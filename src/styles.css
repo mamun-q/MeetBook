@@ -57,6 +57,9 @@ label input, label select, label textarea { margin-top: .3rem; font-weight: 400;
 .badge-bot { background: #e7f3ff; color: var(--brand-dark); }
 html[data-theme="dark"] .badge-bot { background: #263951; color: #7ab3ff; }
 .badge-admin { background: #fde8e8; color: var(--danger); }
+/* Super Admin: gold/crown tint, visually distinct from the red Admin badge. */
+.badge-superadmin { background: #fdf0c0; color: #7a5b00; }
+html[data-theme="dark"] .badge-superadmin { background: #4d3d05; color: #ffd75e; }
 .badge-ok { background: #e6f4ea; color: #137333; }
 .badge-warn { background: #fef7e0; color: #b06000; }
 
@@ -90,7 +93,10 @@ html[data-theme="dark"] .badge-bot { background: #263951; color: #7ab3ff; }
 .tab { flex: 1; padding: .6rem; border: none; border-radius: 8px; background: var(--surface-2); font-weight: 700; cursor: pointer; color: var(--text); }
 .tab.active { background: var(--brand); color: #fff; }
 .boot-splash { display: grid; place-items: center; min-height: 70vh; gap: 8px; }
-.boot-logo { width: 72px; height: 72px; border-radius: 18px; background: var(--brand); color: #fff; font-size: 2.6rem; font-weight: 800; display: grid; place-items: center; }
+.boot-logo { width: 72px; height: 72px; border-radius: 18px; background: var(--brand); color: #fff; font-size: 2.6rem; font-weight: 800; display: grid; place-items: center; overflow: hidden; }
+.boot-sub { color: var(--muted); text-align: center; padding: 0 16px; }
+.boot-spinner { width: 26px; height: 26px; border-radius: 50%; border: 3px solid var(--border); border-top-color: var(--brand); animation: boot-spin .8s linear infinite; }
+@keyframes boot-spin { to { transform: rotate(360deg); } }
 
 /* banners */
 .demo-banner, .maintenance-banner { text-align: center; padding: 8px 12px; font-size: .9rem; }
@@ -110,9 +116,12 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 .story-tile-avatar { position: absolute; top: 7px; left: 7px; z-index: 2; display: inline-flex; border-radius: 50%; }
 .story-tile.unviewed .story-tile-avatar .avatar { box-shadow: 0 0 0 2px rgba(0,0,0,.25), 0 0 0 4.5px var(--brand); }
 .story-tile.viewed .story-tile-avatar .avatar { box-shadow: 0 0 0 2px rgba(0,0,0,.25), 0 0 0 4px #b0b3b8; }
-.story-tile-name { position: absolute; left: 8px; right: 8px; bottom: 7px; z-index: 2; font-size: .72rem; font-weight: 700; line-height: 1.15; text-shadow: 0 1px 3px rgba(0,0,0,.55); word-break: break-word; }
+/* The name sits INSIDE the tile on a bottom gradient strip — anchored
+   to the tile's bottom edge (bottom: 0) with the padding inside the
+   strip, so a two-line name can never spill past the tile. */
+.story-tile-name { position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; padding: 16px 8px 7px; background: linear-gradient(transparent, rgba(0,0,0,.55)); font-size: .72rem; font-weight: 700; line-height: 1.15; text-shadow: 0 1px 3px rgba(0,0,0,.55); word-break: break-word; }
 .story-tile.create { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
-.story-tile.create .story-tile-name { text-shadow: none; color: var(--text); }
+.story-tile.create .story-tile-name { text-shadow: none; color: var(--text); background: none; font-size: .68rem; line-height: 1.25; }
 .story-plus { position: absolute; left: 50%; top: 52px; transform: translateX(-50%); z-index: 2; background: var(--brand); color: #fff; border-radius: 50%; width: 26px; height: 26px; display: grid; place-items: center; font-size: .8rem; border: 3px solid var(--surface); }
 .story-empty { align-self: center; }
 /* create-story background swatches */
@@ -184,12 +193,26 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 /* profile */
 .profile-head { padding: 0; overflow: hidden; }
 .cover { height: 210px; background: linear-gradient(120deg, var(--brand), var(--accent)); background-size: cover; background-position: center; position: relative; }
-/* Subtle dark gradient along the bottom of the cover so the profile
-   name overlapping it stays readable on bright photos. */
+/* Subtle dark gradient along the bottom of the cover (visual depth
+   behind the overlapping avatar and the cover-edit button). */
 .cover::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 45%; background: linear-gradient(transparent, rgba(0,0,0,.38)); pointer-events: none; }
 .cover-edit-btn { position: absolute; right: 12px; bottom: 12px; z-index: 2; }
-.profile-meta { display: flex; gap: 16px; align-items: flex-end; padding: 0 18px 18px; margin-top: -42px; flex-wrap: wrap; }
-.profile-meta .avatar, .profile-meta .avatar-fallback { border: 4px solid var(--surface); width: 110px; height: 110px; font-size: 2rem; }
+/* Only the AVATAR overlaps the cover. The name/text block starts fully
+   below the cover's bottom edge: pulling the whole meta row up over the
+   cover (the old margin-top:-42px + align-items:flex-end) put the
+   heading's first line across the cover's bottom edge, where the cover
+   gradient painted over it and the card clipped it — the name rendered
+   sliced in half.
+   Stacking: the cover is position:relative with an absolutely-positioned
+   ::after gradient, and the meta row is position:relative with an
+   explicit z-index:1 — so the whole header block (avatar AND name)
+   paints above the cover and its gradient by intent, not by DOM order.
+   The avatar also keeps its own z-index:1 inside the meta's stacking
+   context. (The cover-edit button, z-index:2 inside the cover, still
+   paints above the meta — it sits at the cover's bottom-right, away
+   from the avatar and the name block.) */
+.profile-meta { display: flex; gap: 16px; align-items: flex-start; padding: 12px 18px 18px; flex-wrap: wrap; position: relative; z-index: 1; }
+.profile-meta .avatar, .profile-meta .avatar-fallback { border: 4px solid var(--surface); width: 110px; height: 110px; font-size: 2rem; margin-top: -54px; position: relative; z-index: 1; flex: none; }
 .nickname { font-weight: 400; color: var(--muted); font-size: 1.15rem; }
 .profile-cols { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 14px; align-items: start; }
 /* Two-column profiles get a wider wrap (Facebook-style); single-column
@@ -248,7 +271,15 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 .admin-filter select { flex: 0 1 160px; width: auto; }
 .admin-pager { margin-top: 10px; align-items: center; }
 .admin-role-select { width: auto; padding: .35rem .5rem; font-size: .88rem; }
-.admin-users-table td { overflow-wrap: anywhere; }
+/* Admin tables keep a sane minimum width and scroll sideways inside
+   .table-wrap instead of crushing every column until words break
+   letter-by-letter (the old overflow-wrap:anywhere on the users
+   table). Dates, statuses and usernames never wrap mid-token; long
+   emails may break so they stay fully visible. */
+.admin-users-table { min-width: 860px; }
+.admin-users-table td { overflow-wrap: break-word; }
+.cell-nowrap { white-space: nowrap; }
+.cell-email { overflow-wrap: anywhere; min-width: 150px; }
 @media (max-width: 820px) {
   .admin-layout { grid-template-columns: minmax(0, 1fr); }
   .admin-sidebar { position: static; }
@@ -273,10 +304,21 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 .evidence-box { background: var(--surface-2); border: 1px dashed var(--border); border-radius: 10px; padding: 10px 12px; }
 .evidence-box blockquote { margin: 6px 0 0; font-style: italic; overflow-wrap: anywhere; }
 .report-card { margin-bottom: 0; }
-.msg-report-btn { font-size: .78rem; opacity: .55; padding: 0 2px; }
+.msg-report-btn { font-size: .78rem; opacity: .55; padding: 0 4px; line-height: 1; flex: none; }
 .msg-report-btn:hover { opacity: 1; }
-.table-wrap { overflow-x: auto; }
-.table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+/* Message footer row: time/status and the report flag share ONE inline
+   row inside the bubble instead of the flag dropping onto its own line
+   below the bubble. */
+.msg-foot { display: flex; align-items: center; gap: 4px; margin-top: 3px; }
+.msg-foot .msg-meta { margin-top: 0; flex: 1; }
+/* Conversation list: single-line title + preview with true CSS
+   ellipsis (the old JS slice(0, 42) cut words in half). */
+.conv-item .grow { min-width: 0; }
+.conv-title { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.conv-preview { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.msg-row { scroll-margin-top: 10px; }
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; }
+.table { width: 100%; min-width: 560px; border-collapse: collapse; font-size: .92rem; }
 .table th, .table td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 .bot-card details { background: var(--surface-2); border-radius: 10px; padding: 10px 12px; }
 .bot-card summary { cursor: pointer; font-weight: 600; }
@@ -315,7 +357,7 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 .event-date { flex: none; width: 56px; height: 56px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--border); display: flex; flex-direction: column; align-items: center; justify-content: center; }
 .event-day { font-size: 1.35rem; font-weight: 800; line-height: 1; }
 .event-mon { font-size: .72rem; font-weight: 700; text-transform: uppercase; color: var(--danger); }
-.profile-meta .event-date { width: 72px; height: 72px; background: var(--surface); }
+.profile-meta .event-date { width: 72px; height: 72px; background: var(--surface); margin-top: -48px; position: relative; z-index: 1; flex: none; }
 .stars { color: #f5a623; letter-spacing: 1px; }
 .star-picker { display: flex; gap: 4px; }
 .star-option { cursor: pointer; font-size: 1.5rem; line-height: 1; }
@@ -347,7 +389,9 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
   .layout { grid-template-columns: minmax(0, 1fr); }
   .col-left { display: none; }
   .page, .profile-wrap, .col-main { min-width: 0; }
-  .shell { padding: 8px; }
+  /* Bottom padding so the fixed bottom nav (52px+ tall, plus the
+     safe-area inset) never covers the last content of any page. */
+  .shell { padding: 8px; padding-bottom: calc(84px + env(safe-area-inset-bottom, 0px)); }
 
   /* auth: centered brand, full-width thumb-friendly form */
   .auth-wrap { grid-template-columns: 1fr; padding: 28px 16px 44px; gap: 20px; min-height: 0; }
@@ -399,7 +443,8 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
   .messenger.has-open .thread-back { display: inline-flex; align-items: center; justify-content: center; min-width: 40px; min-height: 40px; font-size: 1.25rem; color: var(--text); text-decoration: none; }
   .thread-body { max-height: calc(100vh - 250px); }
 
-  .profile-meta { margin-top: -30px; }
+  .profile-meta .avatar, .profile-meta .avatar-fallback { margin-top: -42px; }
+  .profile-meta .event-date { margin-top: -38px; }
   .profile-cols { grid-template-columns: minmax(0, 1fr); }
   .story-stage-text p { font-size: 1.3rem; }
 }
@@ -444,9 +489,26 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 .preview-remove:hover { background: rgba(0,0,0,.82); }
 
 /* Messenger emoji picker. */
-.emoji-panel { display: flex; flex-wrap: wrap; gap: 2px; padding: 8px; border-top: 1px solid var(--border); background: var(--surface); }
-.emoji-btn { background: none; border: none; cursor: pointer; font-size: 1.3rem; padding: 5px; border-radius: 8px; line-height: 1; }
+/* The emoji picker anchors ABOVE the composer (bottom: 100% of the
+   composer wrapper) as a floating card — in-flow below the form it
+   opened out of view and pushed the latest message off-screen. Targets
+   are a comfortable 36px. */
+.composer-wrap { position: relative; }
+.emoji-panel { position: absolute; bottom: calc(100% + 6px); left: 0; right: 0; z-index: 30; display: flex; flex-wrap: wrap; gap: 2px; padding: 8px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); }
+.emoji-btn { background: none; border: none; cursor: pointer; font-size: 1.3rem; width: 36px; height: 36px; padding: 0; display: grid; place-items: center; border-radius: 8px; line-height: 1; }
 .emoji-btn:hover { background: var(--surface-2); }
+/* Chat photo attach: the chosen photo previews inside the composer
+   before sending; the attach control is a <label> bound to the file
+   input, so a tap always opens the picker natively. */
+.message-preview { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-top: 1px solid var(--border); background: var(--surface); }
+.message-preview img { width: 52px; height: 52px; object-fit: cover; border-radius: 8px; flex: none; }
+.msg-attach { cursor: pointer; }
+/* Settings danger zone: account deletion lives in its own separated
+   card, far from the Log out button it used to sit beside. */
+.danger-zone { border-color: var(--danger); }
+.danger-zone h3 { color: var(--danger); margin-top: 0; }
+.memory-when-label { margin: 14px 2px 6px; }
+.comment-author { font-weight: 700; }
 
 /* Story reply box (non-authors). */
 .story-reply { display: flex; gap: 8px; align-items: center; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); background: rgba(0,0,0,.55); z-index: 3; }

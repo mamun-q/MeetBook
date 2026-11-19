@@ -7,7 +7,7 @@ import {
   getState, mutate, findUser, userByUsername, friendIdsOf, blockedIdsOf, notify, resetDemo
 } from './store.js';
 import { firebaseReady, auth, db, storage, googleProvider } from './firebase.js';
-import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate } from './utils.js';
+import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists } from './utils.js';
 import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay } from './botLogic.js';
 import { generateGeminiText, canAccessBotSecrets, GEMINI_MODEL, botModel, getLastGeminiFailure, resetLastGeminiFailure } from './gemini.js';
 
@@ -26,6 +26,39 @@ import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage
 let remote = null; // Firestore-mirrored dataset (same shape as demo state)
 let remoteUid = '';
 let emptyRemoteCache = null;
+
+// Optimistic local echo for live-mode post creation: a freshly created
+// post is inserted into the mirror IMMEDIATELY (under a temporary id)
+// so the composer doesn't wait for the Firestore snapshot round-trip;
+// when addDoc resolves, the echo adopts the real id, and the posts
+// merge prunes the echo as soon as a listener delivers the server copy.
+let localEchoPosts = [];
+
+// Re-runs the posts merge (assigned inside startRemoteSync): after an
+// optimistic echo adopts its real server id, the merge must run again —
+// the snapshot listener can deliver the server copy BEFORE addDoc
+// resolves (Firestore fires from the local cache first, and the fake
+// flushes on a microtask), so a plain re-render would show the echo
+// and the server copy side by side until the next listener event.
+let remergePosts = null;
+
+function emitData() {
+  document.dispatchEvent(new CustomEvent('meetbook:data'));
+}
+
+// Apply a mutation to a post in the live mirror and notify listeners.
+// The mirror shares object references with the sync listeners' arrays,
+// so the optimistic change survives merges until the next snapshot
+// replaces it with server truth. Returns the post (or null when the
+// post is not mirrored / not in live mode).
+function patchRemotePost(postId, apply) {
+  if (!firebaseReady || !remote) return null;
+  const post = remote.posts.find((p) => p.id === postId);
+  if (!post) return null;
+  apply(post);
+  emitData();
+  return post;
+}
 
 export function data() {
   if (firebaseReady) {
@@ -298,10 +331,14 @@ function startRemoteSync() {
   let publicPosts = [];
   let audiencePosts = [];
   const mergePosts = () => patch((r) => {
-    const byIdMap = new Map();
-    for (const p of [...publicPosts, ...audiencePosts, ...ownPosts]) byIdMap.set(p.id, p);
-    r.posts = [...byIdMap.values()];
+    // Dedupe by id across the three listeners (a public post by a
+    // friend matches two of them) plus the optimistic echo list; the
+    // server copies come last so they replace their echoes.
+    const delivered = new Set([...publicPosts, ...audiencePosts, ...ownPosts].map((p) => p.id));
+    localEchoPosts = localEchoPosts.filter((p) => !delivered.has(p.id));
+    r.posts = mergePostLists(localEchoPosts, publicPosts, audiencePosts, ownPosts);
   });
+  remergePosts = mergePosts;
   onSnapshot(query(collection(db, 'posts'), where('visibility', '==', 'public'), orderBy('createdAt', 'desc'), limit(100)),
     (snap) => { publicPosts = snap.docs.map(mapPost); mergePosts(); },
     () => { /* listener rejected — leave the mirrored set untouched */ });
@@ -582,9 +619,26 @@ export async function createPost({ text, image, visibility, groupId = '', pageId
   };
   if (!post.text && !post.image && !post.poll) throw new Error('Write something or add a photo first.');
   if (firebaseReady) {
-    const ref = await addDoc(collection(db, 'posts'), { ...post, createdAt: serverTimestamp() });
-    fanOutMentions(post.text, author, ref.id);
-    return { id: ref.id, ...post };
+    // Optimistic echo: show the post in the feed at once under a temp
+    // id; the echo adopts the real id when the write lands and the
+    // posts merge prunes it once a listener delivers the server copy.
+    const echo = { id: `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, ...post };
+    localEchoPosts = [echo, ...localEchoPosts];
+    // Rebuild the mirror now (not just emit): the echo only becomes
+    // visible once the merge runs, and the snapshot may not fire until
+    // the server copy arrives.
+    if (remergePosts) remergePosts(); else emitData();
+    try {
+      const ref = await addDoc(collection(db, 'posts'), { ...post, createdAt: serverTimestamp() });
+      echo.id = ref.id;
+      if (remergePosts) remergePosts(); else emitData();
+      fanOutMentions(post.text, author, ref.id);
+      return { id: ref.id, ...post };
+    } catch (err) {
+      localEchoPosts = localEchoPosts.filter((p) => p !== echo);
+      if (remergePosts) remergePosts(); else emitData();
+      throw err;
+    }
   }
   const full = { id: genId('p'), ...post };
   mutate((s) => { s.posts.unshift(full); notifyMentions(s, full, author); });
@@ -624,7 +678,14 @@ export async function toggleLike(postId) {
   if (firebaseReady) {
     const post = data().posts.find((p) => p.id === postId);
     const has = post?.likes?.includes(user.id);
-    await updateDoc(doc(db, 'posts', postId), { likes: has ? arrayRemove(user.id) : arrayUnion(user.id) });
+    // Optimistic: flip the mirror first so the heart/count update in
+    // the same frame as the tap; roll back if the write fails.
+    const applyLike = (p) => { p.likes = has ? (p.likes || []).filter((id) => id !== user.id) : [...(p.likes || []), user.id]; };
+    const undoLike = (p) => { p.likes = has ? [...(p.likes || []), user.id] : (p.likes || []).filter((id) => id !== user.id); };
+    patchRemotePost(postId, applyLike);
+    try {
+      await updateDoc(doc(db, 'posts', postId), { likes: has ? arrayRemove(user.id) : arrayUnion(user.id) });
+    } catch (err) { patchRemotePost(postId, undoLike); throw err; }
     if (!has && post) await addDoc(collection(db, 'notifications'), { userId: post.authorId, type: 'like', actorId: user.id, text: `${user.name} liked your post.`, postId, conversationId: '', read: false, createdAt: Date.now() });
     return;
   }
@@ -640,9 +701,13 @@ export async function toggleReaction(postId, emoji) {
   const user = me(); if (!user) throw new Error('Sign in to react.');
   if (firebaseReady) {
     const post = data().posts.find((p) => p.id === postId);
+    const prevReactions = post ? { ...(post.reactions || {}) } : null;
     const reactions = { ...(post?.reactions || {}) };
     if (reactions[user.id] === emoji) delete reactions[user.id]; else reactions[user.id] = emoji;
-    await updateDoc(doc(db, 'posts', postId), { reactions });
+    patchRemotePost(postId, (p) => { p.reactions = reactions; });
+    try {
+      await updateDoc(doc(db, 'posts', postId), { reactions });
+    } catch (err) { if (prevReactions) patchRemotePost(postId, (p) => { p.reactions = prevReactions; }); throw err; }
     return;
   }
   mutate((s) => {
@@ -658,7 +723,12 @@ export async function toggleSave(postId) {
   if (firebaseReady) {
     const post = data().posts.find((p) => p.id === postId);
     const has = post?.savedBy?.includes(user.id);
-    await updateDoc(doc(db, 'posts', postId), { savedBy: has ? arrayRemove(user.id) : arrayUnion(user.id) });
+    const applySave = (p) => { p.savedBy = has ? (p.savedBy || []).filter((id) => id !== user.id) : [...(p.savedBy || []), user.id]; };
+    const undoSave = (p) => { p.savedBy = has ? [...(p.savedBy || []), user.id] : (p.savedBy || []).filter((id) => id !== user.id); };
+    patchRemotePost(postId, applySave);
+    try {
+      await updateDoc(doc(db, 'posts', postId), { savedBy: has ? arrayRemove(user.id) : arrayUnion(user.id) });
+    } catch (err) { patchRemotePost(postId, undoSave); throw err; }
     return;
   }
   mutate((s) => {
@@ -679,7 +749,11 @@ export async function votePoll(postId, optionId) {
   if (!post?.poll) throw new Error('This post has no poll.');
   const votes = castPollVote(post.poll, user.id, optionId);
   if (firebaseReady) {
-    await updateDoc(doc(db, 'posts', postId), { poll: { options: post.poll.options, votes } });
+    const prevPoll = post.poll;
+    patchRemotePost(postId, (p) => { p.poll = { options: prevPoll.options, votes }; });
+    try {
+      await updateDoc(doc(db, 'posts', postId), { poll: { options: post.poll.options, votes } });
+    } catch (err) { patchRemotePost(postId, (p) => { p.poll = prevPoll; }); throw err; }
     return;
   }
   mutate((s) => {
@@ -714,8 +788,27 @@ export async function sharePost(postId) {
     sharedFrom: original.authorId, savedBy: [], groupId: '', pageId: '', pageName: '', pageAvatar: ''
   };
   if (firebaseReady) {
-    await addDoc(collection(db, 'posts'), shared);
-    await updateDoc(doc(db, 'posts', postId), { shares: (original.shares || 0) + 1 });
+    // Same optimistic echo as createPost, plus the original's share
+    // count flips locally at once. NOTE: nextShares is captured BEFORE
+    // the optimistic patch — the patch mutates the shared `original`
+    // object, so reading original.shares again at write time would
+    // double-count.
+    const nextShares = (original.shares || 0) + 1;
+    const echo = { id: `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, ...shared };
+    localEchoPosts = [echo, ...localEchoPosts];
+    patchRemotePost(postId, (p) => { p.shares = nextShares; });
+    if (remergePosts) remergePosts(); else emitData();
+    try {
+      const ref = await addDoc(collection(db, 'posts'), shared);
+      echo.id = ref.id;
+      if (remergePosts) remergePosts(); else emitData();
+      await updateDoc(doc(db, 'posts', postId), { shares: nextShares });
+    } catch (err) {
+      localEchoPosts = localEchoPosts.filter((p) => p !== echo);
+      patchRemotePost(postId, (p) => { p.shares = Math.max(0, nextShares - 1); });
+      if (remergePosts) remergePosts(); else emitData();
+      throw err;
+    }
     return;
   }
   mutate((s) => {
@@ -732,12 +825,18 @@ export async function addComment(postId, text, parentCommentId = '') {
   if (!comment.text) throw new Error('Comment cannot be empty.');
   if (firebaseReady) {
     const post = data().posts.find((p) => p.id === postId);
-    const comments = [...(post?.comments || [])];
+    const prevComments = post?.comments || [];
+    // Build the next comments array immutably, apply it to the mirror
+    // at once (the comment shows under the post in the same frame),
+    // then persist the identical array; roll back on failure.
+    let comments;
     if (parentCommentId) {
-      const parent = comments.find((c) => c.id === parentCommentId);
-      if (parent) parent.replies = [...(parent.replies || []), comment];
-    } else comments.push(comment);
-    await updateDoc(doc(db, 'posts', postId), { comments });
+      comments = prevComments.map((c) => (c.id === parentCommentId ? { ...c, replies: [...(c.replies || []), comment] } : c));
+    } else comments = [...prevComments, comment];
+    patchRemotePost(postId, (p) => { p.comments = comments; });
+    try {
+      await updateDoc(doc(db, 'posts', postId), { comments });
+    } catch (err) { patchRemotePost(postId, (p) => { p.comments = prevComments; }); throw err; }
     if (post) await addDoc(collection(db, 'notifications'), { userId: post.authorId, type: parentCommentId ? 'reply' : 'comment', actorId: user.id, text: `${user.name} ${parentCommentId ? 'replied to a comment' : 'commented on your post.'}`, postId, conversationId: '', read: false, createdAt: Date.now() });
     return comment;
   }
@@ -763,9 +862,13 @@ export async function addComment(postId, text, parentCommentId = '') {
 export async function deleteComment(postId, commentId) {
   if (firebaseReady) {
     const post = data().posts.find((p) => p.id === postId);
-    const comments = (post?.comments || []).filter((c) => c.id !== commentId)
+    const prevComments = post?.comments || [];
+    const comments = prevComments.filter((c) => c.id !== commentId)
       .map((c) => ({ ...c, replies: (c.replies || []).filter((r) => r.id !== commentId) }));
-    await updateDoc(doc(db, 'posts', postId), { comments });
+    patchRemotePost(postId, (p) => { p.comments = comments; });
+    try {
+      await updateDoc(doc(db, 'posts', postId), { comments });
+    } catch (err) { patchRemotePost(postId, (p) => { p.comments = prevComments; }); throw err; }
     return;
   }
   mutate((s) => {
@@ -1180,6 +1283,12 @@ export function relationship(viewerId, otherId) {
 export async function sendFriendRequest(toId) {
   const user = me(); if (!user) throw new Error('Sign in first.');
   if (firebaseReady) {
+    // Guard (mirrors the demo branch): if ANY friendship already links
+    // the pair — friends, or a request already pending in either
+    // direction — do nothing. Without this, every repeated tap wrote
+    // another identical friend_request notification document.
+    const existing = data().friendships.find((f) => (f.from === user.id && f.to === toId) || (f.from === toId && f.to === user.id));
+    if (existing) return;
     // Deterministic doc id ({from}_{to}) so firestore.rules can verify a
     // friendship with a single exists() check for friends-only posts.
     await setDoc(doc(db, 'friendships', `${user.id}_${toId}`), { from: user.id, to: toId, status: 'pending', createdAt: Date.now() });

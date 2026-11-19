@@ -99,9 +99,17 @@ describe('verified badge rendering', () => {
     expect(userNameHtml({ name: 'A', username: 'a', verified: false })).not.toContain('badge-verified');
   });
 
-  it('superadmins get the Admin badge too', () => {
-    expect(userNameHtml({ name: 'S', username: 's', role: 'superadmin' })).toContain('badge-admin');
+  it('superadmins get their own Super Admin badge; admins keep Admin', () => {
+    const superHtml = userNameHtml({ name: 'S', username: 's', role: 'superadmin' });
+    expect(superHtml).toContain('badge-superadmin');
+    expect(superHtml).toContain('Super Admin');
+    expect(superHtml).not.toContain('badge-admin');
+    const adminHtml = userNameHtml({ name: 'A', username: 'a', role: 'admin' });
+    expect(adminHtml).toContain('badge-admin');
+    expect(adminHtml).toContain('Admin');
+    expect(adminHtml).not.toContain('badge-superadmin');
     expect(userNameHtml({ name: 'M', username: 'm', role: 'moderator' })).not.toContain('badge-admin');
+    expect(userNameHtml({ name: 'M', username: 'm', role: 'moderator' })).not.toContain('badge-superadmin');
   });
 });
 

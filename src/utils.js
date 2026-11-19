@@ -466,6 +466,42 @@ export function filterVisiblePosts(posts, ctx) {
   return (posts || []).filter((p) => canViewPost(p, ctx));
 }
 
+// Merge several post lists into one, deduped by post id. Later lists win
+// for a shared id, so callers pass the most authoritative source last
+// (the live sync merges [local echo, public, audience, own] — a post the
+// "public" AND "audience" listeners both deliver must appear exactly
+// once, with the server copy replacing the optimistic echo).
+export function mergePostLists(...lists) {
+  const byIdMap = new Map();
+  for (const list of lists) {
+    for (const p of list || []) {
+      if (p && p.id) byIdMap.set(p.id, p);
+    }
+  }
+  return [...byIdMap.values()];
+}
+
+// Collapse exact-duplicate notifications for display: same recipient,
+// type, actor and body text within `windowMs` of the kept (newest) copy
+// counts as one. Live mode can hold duplicate DOCUMENTS for a single
+// event (e.g. a friend request sent twice before the first sync came
+// back); the notifications view renders the collapsed list so the user
+// never sees the same line three or four times. Input order is
+// preserved (callers pass newest-first); the input is not mutated.
+export function collapseDuplicateNotifications(list, windowMs = 3600_000) {
+  const keptAt = new Map();
+  const out = [];
+  for (const n of list || []) {
+    if (!n) continue;
+    const key = `${n.userId}|${n.type}|${n.actorId}|${n.text}`;
+    const kept = keptAt.get(key);
+    if (kept !== undefined && Math.abs(kept - (n.createdAt || 0)) <= windowMs) continue;
+    keptAt.set(key, n.createdAt || 0);
+    out.push(n);
+  }
+  return out;
+}
+
 export function paginate(items, page = 1, pageSize = 10) {
   const start = (Math.max(1, page) - 1) * pageSize;
   return {
@@ -739,13 +775,13 @@ export function normalisePoll(optionTexts) {
 // Preset feelings for the composer. The KEY is stored on the post
 // (`feeling` field); label/emoji are looked up at render time.
 export const FEELINGS = [
-  { key: 'happy', emoji: '😊', label: 'happy' },
-  { key: 'loved', emoji: '🥰', label: 'loved' },
-  { key: 'excited', emoji: '🤩', label: 'excited' },
-  { key: 'sad', emoji: '😢', label: 'sad' },
-  { key: 'tired', emoji: '😴', label: 'tired' },
-  { key: 'grateful', emoji: '🙏', label: 'grateful' },
-  { key: 'celebrating', emoji: '🎉', label: 'celebrating' }
+  { key: 'happy', emoji: '😊', label: 'happy', labelKey: 'feelingHappy' },
+  { key: 'loved', emoji: '🥰', label: 'loved', labelKey: 'feelingLoved' },
+  { key: 'excited', emoji: '🤩', label: 'excited', labelKey: 'feelingExcited' },
+  { key: 'sad', emoji: '😢', label: 'sad', labelKey: 'feelingSad' },
+  { key: 'tired', emoji: '😴', label: 'tired', labelKey: 'feelingTired' },
+  { key: 'grateful', emoji: '🙏', label: 'grateful', labelKey: 'feelingGrateful' },
+  { key: 'celebrating', emoji: '🎉', label: 'celebrating', labelKey: 'feelingCelebrating' }
 ];
 
 export function feelingByKey(key) {

@@ -1,7 +1,7 @@
 // HTML generators for every route. Pure string builders: they read the shared
 // dataset (api.data()) and never touch the DOM directly — main.js renders
 // and binds events centrally.
-import { escapeHtml, timeAgo, canViewPost, canViewGroup, canViewGroupPost, isGroupMember, searchByName, truncate, paginate, groupStoriesByAuthor, canViewStory, storyBackgroundCss, STORY_BACKGROUNDS, memoriesFor, upcomingEvents, canViewEvent, averageRating, FEELINGS, plural, mutualFriendCount, isStaff, canModerate, isAdminRole, accountStatus, canManageUser, canChangeRole, ASSIGNABLE_ROLES, platformStats, analyticsSeries, spamSuspects, reportStatus, reportCategory, reportNeedsAttention, countPostComments, botConversationSummaries, recentClientErrors, REPORT_CATEGORIES, REPORT_OUTCOMES } from './utils.js';
+import { escapeHtml, timeAgo, canViewPost, canViewGroup, canViewGroupPost, isGroupMember, searchByName, truncate, paginate, groupStoriesByAuthor, canViewStory, storyBackgroundCss, STORY_BACKGROUNDS, memoriesFor, upcomingEvents, canViewEvent, averageRating, FEELINGS, plural, mutualFriendCount, isStaff, canModerate, isAdminRole, accountStatus, canManageUser, canChangeRole, ASSIGNABLE_ROLES, platformStats, analyticsSeries, spamSuspects, reportStatus, reportCategory, reportNeedsAttention, countPostComments, botConversationSummaries, recentClientErrors, collapseDuplicateNotifications, REPORT_CATEGORIES, REPORT_OUTCOMES } from './utils.js';
 import { GEMINI_MODEL, botModel } from './gemini.js';
 import { t } from './i18n.js';
 import { avatarHtml, userNameHtml, postCardHtml, emptyState } from './components.js';
@@ -64,7 +64,7 @@ export function authView(mode = 'login') {
     <div class="card auth-card">
       ${mode === 'login' ? `
       <form id="login-form" class="stack">
-        <label>${t('email')}<input name="email" type="email" required autocomplete="email" placeholder="you@example.com" /></label>
+        <label>${t('email')}<input name="email" type="email" required autocomplete="username" placeholder="you@example.com" /></label>
         ${passwordFieldHtml({})}
         <button class="btn btn-primary btn-block" type="submit">${t('login')}</button>
         <button class="btn btn-google btn-block" type="button" data-act="google-login">${GOOGLE_G_SVG} ${t('continueWithGoogle')}</button>
@@ -73,8 +73,8 @@ export function authView(mode = 'login') {
         <p class="muted small center">${t('newToMeetBook')} <a href="#/register">${t('register')}</a></p>
       </form>` : `
       <form id="register-form" class="stack">
-        <label>${t('fullName')}<input name="name" required maxlength="60" placeholder="Your name" /></label>
-        <label>${t('username')}<input name="username" required maxlength="24" placeholder="your.name" /></label>
+        <label>${t('fullName')}<input name="name" required maxlength="60" autocomplete="name" placeholder="Your name" /></label>
+        <label>${t('username')}<input name="username" required maxlength="24" autocomplete="username" placeholder="your.name" /></label>
         <label>${t('email')}<input name="email" type="email" required autocomplete="email" placeholder="you@example.com" /></label>
         ${passwordFieldHtml({ autocomplete: 'new-password', placeholder: 'At least 6 characters', minlength: '6' })}
         ${passwordFieldHtml({ name: 'confirmPassword', labelKey: 'confirmPassword', autocomplete: 'new-password', placeholder: 'At least 6 characters', minlength: '6' })}
@@ -123,13 +123,13 @@ export function feedView(d, meUser, page = 1) {
           <div id="composer-preview"></div>
           <input type="file" name="image" accept="image/*" hidden />
           <div class="row gap wrap">
-            <button type="button" class="btn btn-ghost btn-sm" data-act="pick-photo">📷 Photo</button>
+            <button type="button" class="btn btn-ghost btn-sm" data-act="pick-photo">📷 ${t('photo')}</button>
             <label class="btn btn-ghost btn-sm">📊 ${t('addPoll')}<input type="checkbox" name="hasPoll" hidden /></label>
             <select name="visibility" class="select-sm" aria-label="Post privacy">
-              <option value="public" ${defaultVis === 'public' ? 'selected' : ''}>🌍 Public</option>
-              <option value="friends" ${defaultVis === 'friends' ? 'selected' : ''}>👥 Friends</option>
+              <option value="public" ${defaultVis === 'public' ? 'selected' : ''}>🌍 ${t('publicLabel')}</option>
+              <option value="friends" ${defaultVis === 'friends' ? 'selected' : ''}>👥 ${t('friends')}</option>
               <option value="close" ${defaultVis === 'close' ? 'selected' : ''}>⭐ ${t('closeFriends')}</option>
-              <option value="only-me" ${defaultVis === 'only-me' ? 'selected' : ''}>🔒 Only me</option>
+              <option value="only-me" ${defaultVis === 'only-me' ? 'selected' : ''}>🔒 ${t('onlyMe')}</option>
             </select>
             <span class="spacer"></span>
             <button class="btn btn-primary" type="submit">${t('post')}</button>
@@ -148,7 +148,7 @@ export function feedView(d, meUser, page = 1) {
             <label>🙂 ${t('feeling')}
               <select name="feeling" class="select-sm">
                 <option value="">—</option>
-                ${FEELINGS.map((f) => `<option value="${f.key}">${f.emoji} ${f.label}</option>`).join('')}
+                ${FEELINGS.map((f) => `<option value="${f.key}">${f.emoji} ${f.labelKey ? t(f.labelKey) : f.label}</option>`).join('')}
               </select>
             </label>
           </div>
@@ -205,6 +205,21 @@ export function memoriesHtml(d, meUser, ctx) {
       <span class="memory-when">${yearsAgo} ${yearsAgo === 1 ? t('yearAgo') : t('yearsAgo')}</span>
       <span class="memory-text">${escapeHtml(truncate(post.text || (post.image ? '📷 Photo' : ''), 160))}</span>
     </a>`).join('')}
+  </div>`;
+}
+
+// Full Memories page (#/memories): every "on this day" post as a full
+// post card, newest anniversary first. The router used to have no case
+// for this route, so the link silently fell back to the home feed.
+export function memoriesView(d, meUser) {
+  const ctx = viewCtx(d, meUser);
+  const memories = memoriesFor(d.posts, meUser.id);
+  return `<div class="page narrow">
+    <h2>🕰️ ${t('memories')}</h2>
+    <p class="muted">${t('onThisDay')}</p>
+    ${memories.length ? memories.map(({ post, yearsAgo }) => `
+      <p class="memory-when-label muted"><b>${yearsAgo} ${yearsAgo === 1 ? t('yearAgo') : t('yearsAgo')}</b></p>
+      ${postCardHtml(post, ctx)}`).join('') : emptyState('🕰️', t('memoriesEmpty'))}
   </div>`;
 }
 
@@ -280,6 +295,7 @@ export function leftRail(d, meUser) {
     <a class="rail-item" href="#/">📰 Feed</a>
     <a class="rail-item" href="#/friends">👥 ${t('friends')}</a>
     <a class="rail-item" href="#/events">📅 ${t('events')}</a>
+    <a class="rail-item" href="#/memories">🕰️ ${t('memories')}</a>
     <a class="rail-item" href="#/groups">🏘️ ${t('groups')}</a>
     <a class="rail-item" href="#/pages">📄 ${t('pages')}</a>
     <a class="rail-item" href="#/messages">💬 ${t('messages')}</a>
@@ -543,7 +559,7 @@ export function groupView(d, meUser, groupId) {
         <textarea name="text" rows="3" maxlength="2000" placeholder="${t('postToGroup')}"></textarea>
         <input type="file" name="image" accept="image/*" hidden />
         <div class="row gap wrap">
-          <button type="button" class="btn btn-ghost btn-sm" data-act="pick-photo">📷 Photo</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-act="pick-photo">📷 ${t('photo')}</button>
           <span class="spacer"></span>
           <button class="btn btn-primary" type="submit">${t('post')}</button>
         </div>
@@ -625,7 +641,7 @@ export function pageView(d, meUser, pageId) {
       <div class="profile-meta">
         ${avatarHtml({ name: page.name, username: page.name, avatar: page.avatar }, 110)}
         <div class="grow">
-          <h2>${escapeHtml(page.name)} <span class="badge">${t('pageLabel')}</span></h2>
+          <h2>${escapeHtml(page.name)}</h2>
           <p class="muted">${escapeHtml(page.category || '')} · ${plural((page.followers || []).length, t('follower'), t('followers'))} · by ${escapeHtml(ctx.usersById[page.ownerId]?.name || '')}</p>
           <p>${escapeHtml(page.about || '')}</p>
         </div>
@@ -642,7 +658,7 @@ export function pageView(d, meUser, pageId) {
         <textarea name="text" rows="3" maxlength="2000" placeholder="${t('postAsPage')}"></textarea>
         <input type="file" name="image" accept="image/*" hidden />
         <div class="row gap wrap">
-          <button type="button" class="btn btn-ghost btn-sm" data-act="pick-photo">📷 Photo</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-act="pick-photo">📷 ${t('photo')}</button>
           <span class="spacer"></span>
           <button class="btn btn-primary" type="submit">${t('post')}</button>
         </div>
@@ -653,7 +669,7 @@ export function pageView(d, meUser, pageId) {
     </div>
     <div class="card stack">
       <h3>⭐ ${t('reviews')} ${ratingSummary.count ? `· <span class="stars">${stars(ratingSummary.average)}</span> ${ratingSummary.average} (${ratingSummary.count})` : ''}</h3>
-      ${pageReviews.map((r) => { const a = ctx.usersById[r.authorId]; return `<div class="row gap-sm review-item">${avatarHtml(a, 36)}<div class="grow"><b>${escapeHtml(a?.name || '')}</b> <span class="stars">${stars(r.rating)}</span> <span class="muted small">${timeAgo(r.createdAt)}</span>${r.text ? `<br/>${escapeHtml(r.text)}` : ''}</div>${r.authorId === meUser.id ? `<button class="btn btn-ghost btn-sm" data-act="delete-review" data-id="${r.id}">🗑️</button>` : ''}</div>`; }).join('') || `<p class="muted">${t('noReviews')}</p>`}
+      ${pageReviews.map((r) => { const a = ctx.usersById[r.authorId]; return `<div class="row gap-sm review-item">${avatarHtml(a, 36)}<div class="grow"><b>${escapeHtml(a?.name || '')}</b> <span class="stars">${stars(r.rating)}</span> <span class="muted small">· ${timeAgo(r.createdAt)}</span>${r.text ? `<br/>${escapeHtml(r.text)}` : ''}</div>${r.authorId === meUser.id ? `<button class="btn btn-ghost btn-sm" data-act="delete-review" data-id="${r.id}">🗑️</button>` : ''}</div>`; }).join('') || `<p class="muted">${t('noReviews')}</p>`}
       ${isOwner ? '' : `
       <form id="review-form" data-page="${page.id}" class="stack">
         <h4>${myReview ? t('yourReview') : t('writeReview')}</h4>
@@ -811,7 +827,7 @@ export function messagesView(d, meUser, activeConvId = '') {
       <div class="row gap-sm"><h3 class="grow">💬 ${t('messages')}</h3><button class="btn btn-primary btn-sm" data-act="create-group-chat">👥 ${t('newGroupChat')}</button></div>
       <input id="conv-search" class="conv-search" type="search" placeholder="${t('searchConversations')}" autocomplete="off" aria-label="${t('searchConversations')}" />
       ${myConvs.map((x) => `<button class="conv-item ${active?.conv.id === x.conv.id ? 'active' : ''}" data-act="open-conv" data-id="${x.conv.id}" data-search="${escapeHtml(x.searchText)}">
-        ${avatarHtml(x.avatarUser, 44)}<span class="grow left"><b>${x.isGroup ? '👥 ' : ''}${escapeHtml(x.title)}</b> ${!x.isGroup && x.other?.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''}<br/><span class="muted small">${escapeHtml(x.preview.slice(0, 42))}</span></span>
+        ${avatarHtml(x.avatarUser, 44)}<span class="grow left conv-item-text"><b class="conv-title">${x.isGroup ? '👥 ' : ''}${escapeHtml(x.title)}</b> ${!x.isGroup && x.other?.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''}<span class="conv-preview muted small">${escapeHtml(x.preview)}</span></span>
         ${x.unread ? `<span class="unread-badge">${x.unread}</span>` : ''}
       </button>`).join('') || `<p class="muted small">${t('noMessages')}</p>
       <div class="stack"><h4>Start a chat</h4>${d.users.filter((u) => u.id !== meUser.id).slice(0, 6).map((u) => `<button class="conv-item" data-act="message-user" data-id="${u.id}">${avatarHtml(u, 36)}<span>${escapeHtml(u.name)}</span>${u.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''}</button>`).join('')}</div>`}
@@ -823,21 +839,24 @@ export function messagesView(d, meUser, activeConvId = '') {
       <div class="thread-body" id="thread-body">
         ${active.msgs.map((m) => messageHtml(m, meUser, byId, active.isGroup)).join('') || '<p class="muted center">No messages yet. Say hello 👋</p>'}
       </div>
-      <form id="message-form" data-conv="${active.conv.id}" class="message-form">
-        <input type="file" name="image" accept="image/*" hidden />
-        <button type="button" class="btn btn-ghost btn-sm" data-act="pick-photo" title="Photo" aria-label="Photo">📷</button>
-        <button type="button" class="btn btn-ghost btn-sm" data-act="emoji-toggle" title="Emoji" aria-label="Emoji">😊</button>
-        <input name="text" placeholder="Type a message…" autocomplete="off" maxlength="2000" />
-        <button type="button" class="btn btn-ghost btn-sm" id="voice-btn" data-act="voice-toggle" title="${t('voiceMessage')}" aria-label="${t('voiceMessage')}">🎤</button>
-        <button class="btn btn-primary" type="submit">${t('send')}</button>
-      </form>
-      <div id="emoji-panel" class="emoji-panel hidden">
-        ${CHAT_EMOJIS.map((e) => `<button type="button" class="emoji-btn" data-emoji-insert="${e}" aria-label="Insert ${e}">${e}</button>`).join('')}
-      </div>
-      <div id="voice-ui" class="voice-ui hidden">
-        <span class="voice-dot"></span><span id="voice-time" class="mono">0:00</span><span class="grow small">${t('recording')}…</span>
-        <button class="btn btn-ghost btn-sm" data-act="voice-cancel">✕ ${t('cancel')}</button>
-        <button class="btn btn-primary btn-sm" data-act="voice-send">${t('send')}</button>
+      <div class="composer-wrap">
+        <div id="message-preview" class="message-preview hidden"></div>
+        <form id="message-form" data-conv="${active.conv.id}" class="message-form">
+          <input type="file" id="msg-image-input" name="image" accept="image/*" hidden />
+          <label class="btn btn-ghost btn-sm msg-attach" for="msg-image-input" title="${t('photo')}" aria-label="${t('photo')}">📷</label>
+          <button type="button" class="btn btn-ghost btn-sm" data-act="emoji-toggle" title="Emoji" aria-label="Emoji">😊</button>
+          <input name="text" placeholder="Type a message…" autocomplete="off" maxlength="2000" />
+          <button type="button" class="btn btn-ghost btn-sm" id="voice-btn" data-act="voice-toggle" title="${t('voiceMessage')}" aria-label="${t('voiceMessage')}">🎤</button>
+          <button class="btn btn-primary" type="submit">${t('send')}</button>
+        </form>
+        <div id="emoji-panel" class="emoji-panel hidden">
+          ${CHAT_EMOJIS.map((e) => `<button type="button" class="emoji-btn" data-emoji-insert="${e}" aria-label="Insert ${e}">${e}</button>`).join('')}
+        </div>
+        <div id="voice-ui" class="voice-ui hidden">
+          <span class="voice-dot"></span><span id="voice-time" class="mono">0:00</span><span class="grow small">${t('recording')}…</span>
+          <button class="btn btn-ghost btn-sm" data-act="voice-cancel">✕ ${t('cancel')}</button>
+          <button class="btn btn-primary btn-sm" data-act="voice-send">${t('send')}</button>
+        </div>
       </div>` : `<div class="empty-state"><div class="empty-icon">💬</div><p class="muted">${t('selectConversation')}</p></div>`}
     </div>
   </div>`;
@@ -859,8 +878,7 @@ function messageHtml(m, meUser, byId, isGroup = false) {
       ${m.image ? `<img class="msg-image" src="${escapeHtml(m.image)}" alt="Shared photo" loading="lazy" />` : ''}
       ${m.audio ? `<audio class="msg-audio" controls preload="metadata" src="${escapeHtml(m.audio)}"></audio>` : ''}
       ${m.text ? `<p>${escapeHtml(m.text)}</p>` : ''}
-      <span class="msg-meta">${timeAgo(m.createdAt)} ${status}</span>
-      ${mine ? '' : `<button class="link-btn msg-report-btn" data-act="report-message" data-id="${m.id}" title="${t('report')}" aria-label="${t('report')}">🚩</button>`}
+      <span class="msg-foot"><span class="msg-meta">${timeAgo(m.createdAt)} ${status}</span>${mine ? '' : `<button class="link-btn msg-report-btn" data-act="report-message" data-id="${m.id}" title="${t('report')}" aria-label="${t('report')}">🚩</button>`}</span>
     </div>
   </div>`;
 }
@@ -880,14 +898,36 @@ export function groupChatFormHtml(d, meUser) {
 }
 
 // ------------------------------------------------------------------ NOTIFICATIONS
+// Notification bodies are stored as raw English text at creation time,
+// but the common types are re-rendered here from i18n templates with
+// the actor's name, so the page reads in the viewer's language no
+// matter when (or by whom) the notification was created. Unknown /
+// custom types (admin notices, bot events) fall back to the stored
+// text. Exact duplicates (same type+actor+text within an hour —
+// duplicate documents can exist in live mode) are collapsed so one
+// event never fills the list.
+const NOTIF_TEMPLATE_KEYS = {
+  friend_request: 'notifFriendRequest', friend_accept: 'notifFriendAccept',
+  like: 'notifLike', comment: 'notifComment', reply: 'notifReply',
+  message: 'notifMessage', mention: 'notifMention', share: 'notifShare', follow: 'notifFollow'
+};
+
+export function notificationText(n, byId) {
+  const key = NOTIF_TEMPLATE_KEYS[n.type];
+  const actor = byId[n.actorId];
+  if (key && actor?.name) return t(key).replace('{name}', actor.name);
+  return n.text || '';
+}
+
 export function notificationsView(d, meUser) {
   const byId = usersById(d);
-  const mine = d.notifications.filter((n) => n.userId === meUser.id).sort((a, b) => b.createdAt - a.createdAt);
+  const sorted = d.notifications.filter((n) => n.userId === meUser.id).sort((a, b) => b.createdAt - a.createdAt);
+  const mine = collapseDuplicateNotifications(sorted);
   const icons = { friend_request: '👥', friend_accept: '✅', like: '❤️', comment: '💬', reply: '↩️', message: '✉️', mention: '@', share: '🔁', follow: '➕', group_join: '🏘️', page_follow: '📄', group_request: '📥', group_request_result: '🏘️', event_rsvp: '📅' };
   return `<div class="page narrow">
-    <div class="row"><h2 class="grow">🔔 ${t('notifications')}</h2><button class="btn btn-ghost btn-sm" data-act="notif-read-all">Mark all read</button></div>
+    <div class="row"><h2 class="grow">🔔 ${t('notifications')}</h2><button class="btn btn-ghost btn-sm" data-act="notif-read-all">${t('markAllRead')}</button></div>
     ${mine.map((n) => `<button class="card notif ${n.read ? '' : 'unread'}" data-act="notif-open" data-id="${n.id}" data-post="${n.postId || ''}" data-conv="${n.conversationId || ''}">
-      ${avatarHtml(byId[n.actorId], 40)}<span class="grow left">${icons[n.type] || '🔔'} ${escapeHtml(n.text)}<br/><span class="muted small">${timeAgo(n.createdAt)}</span></span>
+      ${avatarHtml(byId[n.actorId], 40)}<span class="grow left">${icons[n.type] || '🔔'} ${escapeHtml(notificationText(n, byId))}<br/><span class="muted small">${timeAgo(n.createdAt)}</span></span>
     </button>`).join('') || emptyState('🔔', t('noNotifications'))}
   </div>`;
 }
@@ -899,8 +939,19 @@ export function searchView(d, meUser, queryText) {
   const blocked = blockedIdsOfData(d, meUser.id);
   const users = q ? d.users.filter((u) => !blocked.has(u.id) && (u.name.toLowerCase().includes(q) || u.username.toLowerCase().includes(q))) : [];
   const friendIds = friendIdsOfData(d, meUser.id);
-  const posts = q ? d.posts.filter((p) => !p.groupId && p.text.toLowerCase().includes(q) && canViewPost(p, { viewerId: meUser.id, friendIds, blockedIds: blocked })).sort((a, b) => b.createdAt - a.createdAt) : [];
   const ctx = viewCtx(d, meUser);
+  // Post search covers EVERY loaded post the viewer may see — bot posts,
+  // page posts and group posts included — and matches the AUTHOR's name
+  // and username (and the page name) as well as the post text, so
+  // searching a person's name finds their posts too.
+  const posts = q ? d.posts.filter((p) => {
+    if (blocked.has(p.authorId)) return false;
+    const author = byId[p.authorId];
+    const haystack = `${p.text || ''} ${author?.name || ''} ${author?.username || ''} ${p.pageName || ''}`.toLowerCase();
+    if (!haystack.includes(q)) return false;
+    if (p.groupId) return canViewGroupPost(p, ctx.groupsById[p.groupId], meUser.id, blocked);
+    return canViewPost(p, { viewerId: meUser.id, friendIds, blockedIds: blocked });
+  }).sort((a, b) => b.createdAt - a.createdAt) : [];
   return `<div class="page">
     <h2>🔎 Search ${q ? `for “${escapeHtml(queryText)}”` : ''}</h2>
     <form id="search-page-form" class="search-box search-page-form" role="search">
@@ -953,7 +1004,6 @@ export function settingsView(d, meUser, prefs) {
         <button class="btn btn-ghost" data-act="edit-profile">✏️ ${t('editProfile')}</button>
         <button class="btn btn-ghost" data-act="change-password">✉️ ${t('sendResetEmail')}</button>
         <button class="btn btn-ghost settings-logout" data-act="logout">🚪 ${t('logout')}</button>
-        <button class="btn btn-danger" data-act="delete-account">${t('deleteAccount')}</button>
       </div>
     </div>
     <div class="card stack">
@@ -982,10 +1032,10 @@ export function settingsView(d, meUser, prefs) {
       <form id="privacy-prefs-form" class="stack">
         <label>${t('defaultPostPrivacy')}
           <select name="defaultPostPrivacy">
-            <option value="public" ${defaultPrivacy === 'public' ? 'selected' : ''}>🌍 Public</option>
-            <option value="friends" ${defaultPrivacy === 'friends' ? 'selected' : ''}>👥 Friends</option>
+            <option value="public" ${defaultPrivacy === 'public' ? 'selected' : ''}>🌍 ${t('publicLabel')}</option>
+            <option value="friends" ${defaultPrivacy === 'friends' ? 'selected' : ''}>👥 ${t('friends')}</option>
             <option value="close" ${defaultPrivacy === 'close' ? 'selected' : ''}>⭐ ${t('closeFriends')}</option>
-            <option value="only-me" ${defaultPrivacy === 'only-me' ? 'selected' : ''}>🔒 Only me</option>
+            <option value="only-me" ${defaultPrivacy === 'only-me' ? 'selected' : ''}>🔒 ${t('onlyMe')}</option>
           </select>
         </label>
         <div><button class="btn btn-primary btn-sm" type="submit">${t('savePrivacy')}</button></div>
@@ -993,11 +1043,16 @@ export function settingsView(d, meUser, prefs) {
       <p class="muted">${t('blockedHelp')}</p>
       ${(d.blocks || []).filter((b) => b.by === meUser.id).map((b) => `<div class="row gap-sm">${avatarHtml(usersById(d)[b.target], 32)}<span class="grow">${escapeHtml(usersById(d)[b.target]?.name || '')}</span><button class="btn btn-ghost btn-sm" data-act="block" data-id="${b.target}">${t('unblock')}</button></div>`).join('') || `<p class="muted small">${t('noBlocked')}</p>`}
       <div class="row gap wrap">
-        <a class="btn btn-ghost btn-sm" href="#/privacy">Privacy Policy</a>
-        <a class="btn btn-ghost btn-sm" href="#/terms">Terms of Service</a>
-        <a class="btn btn-ghost btn-sm" href="#/guidelines">Community Guidelines</a>
+        <a class="btn btn-ghost btn-sm" href="#/privacy">${t('privacyPolicy')}</a>
+        <a class="btn btn-ghost btn-sm" href="#/terms">${t('termsOfService')}</a>
+        <a class="btn btn-ghost btn-sm" href="#/guidelines">${t('communityGuidelines')}</a>
         <a class="btn btn-ghost btn-sm" href="#/help">${t('help')}</a>
       </div>
+    </div>
+    <div class="card stack danger-zone">
+      <h3>⚠️ ${t('dangerZone')}</h3>
+      <p class="muted small">${t('dangerZoneHelp')}</p>
+      <div><button class="btn btn-danger" data-act="delete-account">${t('deleteAccount')}</button></div>
     </div>
   </div>`;
 }
@@ -1029,7 +1084,7 @@ export function adminShell(d, meUser, active, content) {
   ].filter((l) => l.show);
   return `<div class="admin-layout">
     <aside class="admin-sidebar">
-      <div class="admin-side-head"><span class="admin-side-title">🛡️ ${t('adminPanel')}</span><span class="badge badge-admin">${escapeHtml(roleLabel(meUser.role))}</span></div>
+      <div class="admin-side-head"><span class="admin-side-title">🛡️ ${t('adminPanel')}</span><span class="badge ${meUser.role === 'superadmin' ? 'badge-superadmin' : 'badge-admin'}">${escapeHtml(roleLabel(meUser.role))}</span></div>
       <nav class="admin-nav">${links.map((l) => `<a class="admin-nav-item ${active === l.key ? 'active' : ''}" href="${l.href}"><span class="admin-nav-icon">${l.icon}</span><span class="grow">${l.label}</span>${l.badge ? `<span class="nav-badge static">${l.badge}</span>` : ''}</a>`).join('')}</nav>
       <p class="muted small admin-side-note">${escapeHtml(meUser.name)} · @${escapeHtml(meUser.username)}</p>
     </aside>
@@ -1419,7 +1474,7 @@ export function adminUsersView(d, meUser, filters = {}) {
     if (canChangeRole(meUser, u)) {
       return `<select class="admin-role-select" data-id="${u.id}" aria-label="${t('roleLabel')}">${ASSIGNABLE_ROLES.map((r) => `<option value="${r}" ${u.role === r ? 'selected' : ''}>${escapeHtml(roleLabel(r))}</option>`).join('')}</select>`;
     }
-    return `<span class="badge ${u.role === 'superadmin' || u.role === 'admin' ? 'badge-admin' : ''}">${escapeHtml(roleLabel(u.role))}</span>`;
+    return `<span class="badge ${u.role === 'superadmin' ? 'badge-superadmin' : u.role === 'admin' ? 'badge-admin' : ''}">${escapeHtml(roleLabel(u.role))}</span>`;
   };
   return `<h2>👥 ${t('adminUsers')}</h2>
     <form id="admin-user-filter" class="card admin-filter">
@@ -1446,11 +1501,11 @@ export function adminUsersView(d, meUser, filters = {}) {
         <thead><tr><th>User</th><th>${t('username')}</th><th>${t('email')}</th><th>${t('roleLabel')}</th><th>${t('statusLabel')}</th><th>${t('joinedLabel')}</th><th>${t('postsCount')}</th><th>${t('friendsLabel')}</th><th>${t('actionsLabel')}</th></tr></thead>
         <tbody>${rows.map((u) => `<tr>
           <td><a class="row gap-sm" href="#/profile/${u.id}">${avatarHtml(u, 30)}<span>${userNameHtml(u)}</span></a></td>
-          <td>@${escapeHtml(u.username)}</td>
-          <td>${escapeHtml(u.email || '')}</td>
+          <td class="cell-nowrap">@${escapeHtml(u.username)}</td>
+          <td class="cell-email">${escapeHtml(u.email || '')}</td>
           <td>${roleCell(u)}</td>
-          <td>${statusBadge(u)}</td>
-          <td>${u.createdAt ? escapeHtml(new Date(u.createdAt).toLocaleDateString()) : '—'}</td>
+          <td class="cell-nowrap">${statusBadge(u)}</td>
+          <td class="cell-nowrap">${u.createdAt ? escapeHtml(new Date(u.createdAt).toLocaleDateString()) : '—'}</td>
           <td>${postCounts.get(u.id) || 0}</td>
           <td>${friendIdsOfData(d, u.id).size}</td>
           <td>${rowActions(u)}</td>

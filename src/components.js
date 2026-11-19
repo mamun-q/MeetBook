@@ -13,6 +13,13 @@ export function toast(message, type = 'info') {
   setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 300); }, 3600);
 }
 
+// Drop every visible toast immediately — called on route change so a
+// toast from one page never lingers over the next page's content.
+export function clearToasts() {
+  const root = document.getElementById('toast-root');
+  if (root) root.innerHTML = '';
+}
+
 export function openModal(html) {
   const root = document.getElementById('modal-root');
   root.innerHTML = `<div class="modal-backdrop" data-close-modal><div class="modal" role="dialog" aria-modal="true">${html}</div></div>`;
@@ -73,11 +80,13 @@ export function userNameHtml(user) {
   // Badges are joined with explicit spaces — concatenated badge spans
   // with nothing between them render (and extract) as one run-on word.
   // The verified ✓ (users.verified, set from Admin → Users) renders
-  // everywhere names appear through this helper.
+  // everywhere names appear through this helper. Super Admins get
+  // their own gold 👑 badge; plain admins keep the red "Admin" one.
   const badges = [
     user.verified ? `<span class="badge badge-verified" title="${t('verified')}">✓</span>` : '',
     user.isBot ? `<span class="badge badge-bot" title="This is an AI bot account">${t('aiBot')}</span>` : '',
-    (user.role === 'admin' || user.role === 'superadmin') ? '<span class="badge badge-admin">Admin</span>' : ''
+    user.role === 'superadmin' ? `<span class="badge badge-superadmin" title="${t('roleSuperadmin')}">👑 ${t('roleSuperadmin')}</span>` : '',
+    user.role === 'admin' ? `<span class="badge badge-admin">${t('roleAdmin')}</span>` : ''
   ].filter(Boolean).join(' ');
   return `<span class="user-name">${escapeHtml(user.name)}${badges ? ` ${badges}` : ''}</span>`;
 }
@@ -125,7 +134,7 @@ export function postCardHtml(post, ctx) {
   // Facebook-style header suffix: "— feeling grateful 🙏 at Lalbagh Fort".
   const feelingObj = feelingByKey(post.feeling);
   const feelBits = [];
-  if (feelingObj) feelBits.push(`${t('feelingLabel')} ${feelingObj.label} ${feelingObj.emoji}`);
+  if (feelingObj) feelBits.push(`${t('feelingLabel')} ${feelingObj.labelKey ? t(feelingObj.labelKey) : feelingObj.label} ${feelingObj.emoji}`);
   if (post.location) feelBits.push(`at <b>${escapeHtml(post.location)}</b>`);
   const feelSuffix = feelBits.length ? ` <span class="post-feeling">— ${feelBits.join(' ')}</span>` : '';
   const authorBlock = page
@@ -166,10 +175,10 @@ export function postCardHtml(post, ctx) {
         ${['❤️', '😆', '😮', '😢', '👏'].map((e) => `<button class="reaction-btn ${myReaction === e ? 'active' : ''}" data-act="react" data-emoji="${e}" aria-label="React ${e}">${e}</button>`).join('')}
       </span>
     </div>
-    <div class="comments">${comments || '<p class="muted small">No comments yet.</p>'}</div>
+    <div class="comments">${comments || `<p class="muted small">${t('noCommentsYet')}</p>`}</div>
     <form class="comment-form" data-comment-form="${post.id}">
       ${avatarHtml(me, 32)}
-      <input name="text" placeholder="Write a comment…" autocomplete="off" maxlength="500" />
+      <input name="text" placeholder="${t('writeComment')}" autocomplete="off" maxlength="500" />
       <button class="btn btn-primary btn-sm" type="submit">${t('send')}</button>
     </form>
   </article>`;
@@ -198,17 +207,17 @@ function commentHtml(c, post, ctx) {
     const ra = usersById[r.authorId];
     return `<div class="comment reply">
       ${avatarHtml(ra, 28)}
-      <div class="comment-body"><b>${escapeHtml(ra?.name || '')}</b>${verifiedBadgeHtml(ra)} ${ra?.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''} ${linkify(r.text)}
+      <div class="comment-body"><span class="comment-author">${userNameHtml(ra)}</span> <span class="comment-text">${linkify(r.text)}</span>
       <div class="muted small">${timeAgo(r.createdAt)}${r.authorId === me?.id || post.authorId === me?.id ? ` · <button class="link-btn" data-act="delete-comment" data-comment="${r.id}">delete</button>` : ''}</div></div>
     </div>`;
   }).join('');
   return `<div class="comment">
     ${avatarHtml(author, 32)}
     <div class="comment-body">
-      <b>${escapeHtml(author?.name || '')}</b>${verifiedBadgeHtml(author)} ${author?.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''} ${linkify(c.text)}
+      <span class="comment-author">${userNameHtml(author)}</span> <span class="comment-text">${linkify(c.text)}</span>
       <div class="muted small">${timeAgo(c.createdAt)} · <button class="link-btn" data-act="reply-toggle" data-comment="${c.id}">Reply</button>${c.authorId === me?.id || post.authorId === me?.id ? ` · <button class="link-btn" data-act="delete-comment" data-comment="${c.id}">delete</button>` : ''}</div>
       <form class="reply-form hidden" data-reply-form="${c.id}">
-        <input name="text" placeholder="Write a reply…" autocomplete="off" maxlength="500" />
+        <input name="text" placeholder="${t('writeReply')}" autocomplete="off" maxlength="500" />
         <button class="btn btn-primary btn-sm" type="submit">${t('send')}</button>
       </form>
       ${replies}

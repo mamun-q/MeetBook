@@ -5,7 +5,7 @@ import { firebaseReady, firebaseConfig } from './firebase.js';
 import { subscribe as storeSubscribe, mutate as demoMutate } from './store.js';
 import { setLocale, t } from './i18n.js';
 import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError } from './utils.js';
-import { toast, openModal, closeModal, confirmModal, adminActionModal, avatarHtml } from './components.js';
+import { toast, clearToasts, openModal, closeModal, confirmModal, adminActionModal, avatarHtml } from './components.js';
 import * as V from './views.js';
 
 // ------------------------------------------------------------- preferences
@@ -32,7 +32,7 @@ const appEl = document.getElementById('app');
 // form at a user who is actually signed in.
 let authResolved = false;
 let authSessionSeen = false;
-const BOOT_SPLASH_HTML = `<div class="boot-splash"><div class="boot-logo">MeetBook</div><div class="boot-sub">Connect with people and AI friends</div><div class="boot-spinner" aria-hidden="true"></div></div>`;
+const BOOT_SPLASH_HTML = `<div class="boot-splash"><div class="boot-logo">M</div><div class="boot-sub">${t('taglineShort')}</div><div class="boot-spinner" aria-hidden="true"></div></div>`;
 
 function parseRoute() {
   const hash = location.hash.replace(/^#\/?/, '');
@@ -126,6 +126,8 @@ function headerHtml(d, user) {
           <div class="menu-user">${avatarHtml(user, 36)}<span class="grow"><b>${escapeHtml(user.name)}</b><br/><span class="muted small">@${escapeHtml(user.username)}</span></span></div>
           <a href="#/profile/${user.id}">👤 ${t('myProfile')}</a>
           <a href="#/saved">🔖 ${t('savedPosts')}</a>
+          <a href="#/events">📅 ${t('events')}</a>
+          <a href="#/memories">🕰️ ${t('memories')}</a>
           <a href="#/settings">⚙️ ${t('settings')}</a>
           <a href="#/help">❓ ${t('help')}</a>
           <button data-act="logout">🚪 ${t('logout')}</button>
@@ -186,7 +188,7 @@ export function render() {
     appEl.innerHTML = `
     ${headerHtml(d, user)}
     <div class="shell">${V.accountStatusView(user)}</div>
-    <footer class="footer muted small">${escapeHtml(brand)} · Connect with people and AI friends</footer>`;
+    <footer class="footer muted small">${escapeHtml(brand)} · ${t('taglineShort')}</footer>`;
     return;
   }
 
@@ -206,6 +208,7 @@ export function render() {
     case 'profile': body = V.profileView(d, user, seg[1] || user.id); break;
     case 'search': body = V.searchView(d, user, query.get('q') || ''); break;
     case 'saved': body = V.savedView(d, user); break;
+    case 'memories': body = V.memoriesView(d, user); break;
     case 'settings': body = V.settingsView(d, user, prefs); break;
     case 'admin': body = adminRoute(d, user, seg, query); break;
     case 'bots': location.hash = '#/admin/bots'; return; // legacy link → Bot Center inside the admin shell
@@ -219,7 +222,7 @@ export function render() {
     ${maintenance ? '<div class="maintenance-banner">🛠️ MeetBook is briefly under maintenance. You can browse, but changes may be paused.</div>' : ''}
     ${!firebaseReady ? `<div class="demo-banner">🧪 ${t('demoMode')} — sign in with a demo account or create one. <button class="link-btn" data-act="dismiss-demo">Dismiss</button></div>` : ''}
     <div class="shell">${body}</div>
-    <footer class="footer muted small">${escapeHtml(brand)} · Connect with people and AI friends · <a href="#/help">Help</a> · <a href="#/terms">Terms</a> · <a href="#/privacy">Privacy</a> · <a href="#/guidelines">Guidelines</a></footer>
+    <footer class="footer muted small">${escapeHtml(brand)} · ${t('taglineShort')} · <a href="#/help">${t('help')}</a> · <a href="#/terms">${t('termsOfService')}</a> · <a href="#/privacy">${t('privacyPolicy')}</a> · <a href="#/guidelines">${t('communityGuidelines')}</a></footer>
     ${bottomNavHtml(d, user, route, seg)}`;
 
   maybeBrowserNotify(d, user);
@@ -481,7 +484,7 @@ function softRender() {
 // Realtime: demo store subscription + Firestore mirror events.
 storeSubscribe(() => softRender());
 document.addEventListener('meetbook:data', () => softRender());
-window.addEventListener('hashchange', () => { feedPage = 1; render(); window.scrollTo({ top: 0 }); });
+window.addEventListener('hashchange', () => { feedPage = 1; clearToasts(); render(); window.scrollTo({ top: 0 }); });
 
 // Infinite scroll for the feed (the Load more button is the fallback).
 window.addEventListener('scroll', () => {
@@ -575,6 +578,13 @@ document.addEventListener('click', async (e) => {
       if (preview) preview.innerHTML = '';
       break;
     }
+    case 'clear-message-photo': {
+      const input = document.getElementById('msg-image-input');
+      if (input) input.value = '';
+      const preview = document.getElementById('message-preview');
+      if (preview) { preview.innerHTML = ''; preview.classList.add('hidden'); }
+      break;
+    }
     case 'poll-add-option': {
       const list = document.getElementById('poll-options-list');
       if (!list) break;
@@ -599,7 +609,7 @@ document.addEventListener('click', async (e) => {
       if (ta) ta.placeholder = t('whatsOnYourMind');
       break;
     }
-    case 'emoji-toggle': document.getElementById('emoji-panel')?.classList.toggle('hidden'); break;
+    case 'emoji-toggle': { const panel = document.getElementById('emoji-panel'); panel?.classList.toggle('hidden'); if (panel && !panel.classList.contains('hidden')) scrollThread(); break; }
     case 'toggle-theme': prefs.theme = prefs.theme === 'dark' ? 'light' : 'dark'; savePrefs(); applyPrefs(); render(); break;
     case 'install-app': if (deferredInstallPrompt) { deferredInstallPrompt.prompt(); deferredInstallPrompt = null; } break;
     case 'logout': await handle(api.logout(), 'Logged out.'); location.hash = '#/login'; break;
@@ -1267,6 +1277,18 @@ document.addEventListener('change', async (e) => {
     if (file && preview) {
       const url = URL.createObjectURL(file);
       preview.innerHTML = `<div class="composer-preview-wrap"><img class="post-image" src="${url}" alt="Selected photo preview" /><button type="button" class="preview-remove" data-act="remove-composer-photo" aria-label="Remove photo" title="Remove photo">✕</button></div>`;
+    }
+  }
+  if (e.target.id === 'msg-image-input') {
+    // Chat photo attach: show the chosen photo in the composer BEFORE
+    // sending, so the tap visibly did something and the user can still
+    // change their mind (the ✕ clears the input).
+    const file = e.target.files?.[0];
+    const preview = document.getElementById('message-preview');
+    if (file && preview) {
+      const url = URL.createObjectURL(file);
+      preview.innerHTML = `<img src="${url}" alt="Selected photo preview" /><span class="grow small">${escapeHtml(file.name)}</span><button type="button" class="btn btn-ghost btn-sm" data-act="clear-message-photo" aria-label="${t('removePhoto')}" title="${t('removePhoto')}">✕</button>`;
+      preview.classList.remove('hidden');
     }
   }
 });
