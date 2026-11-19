@@ -407,7 +407,8 @@ export function friendsView(d, meUser) {
     <h2>👥 ${t('friends')}</h2>
     <h3>${t('requestsReceived')}</h3>
     ${incoming.length ? `<div class="grid-people">${incoming.map((f) => person(byId[f.from], `<button class="btn btn-primary btn-sm" data-act="accept-request" data-id="${f.id}">Accept</button><button class="btn btn-ghost btn-sm" data-act="reject-request" data-id="${f.id}">Reject</button>`, mutualLine(byId[f.from]))).join('')}</div>` : `<p class="muted">${t('noRequestsReceived')}</p>`}
-    ${outgoing.length ? `<h3>${t('requestsSent')}</h3><div class="grid-people">${outgoing.map((f) => person(byId[f.to], `<button class="btn btn-ghost btn-sm" data-act="cancel-request" data-id="${f.id}">${t('cancelRequest')}</button>`)).join('')}</div>` : ''}
+    <h3>${t('requestsSent')}</h3>
+    ${outgoing.length ? `<div class="grid-people">${outgoing.map((f) => person(byId[f.to], `<button class="btn btn-ghost btn-sm" data-act="cancel-request" data-id="${f.id}">${t('cancelRequest')}</button>`)).join('')}</div>` : `<p class="muted">${t('noRequestsSent')}</p>`}
     <h3>${t('yourFriends')} (${friendIds.size})</h3>
     <div class="grid-people">${[...friendIds].map((id) => { const rel = d.friendships.find((f) => f.status === 'accepted' && ((f.from === meUser.id && f.to === id) || (f.to === meUser.id && f.from === id))); const isClose = (meUser.closeFriends || []).includes(id); return person(byId[id], `<button class="btn ${isClose ? 'btn-primary' : 'btn-ghost'} btn-sm" data-act="toggle-close-friend" data-id="${id}" title="${t('closeFriends')}">${isClose ? '⭐' : '☆'} ${t('closeFriends')}</button><button class="btn btn-ghost btn-sm" data-act="message-user" data-id="${id}">Message</button><button class="btn btn-ghost btn-sm" data-act="remove-friend" data-id="${rel?.id}">Remove</button>`); }).join('') || '<p class="muted">No friends yet — send a request below.</p>'}</div>
     <h3>${t('suggestedForYou')}</h3>
