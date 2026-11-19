@@ -1576,8 +1576,17 @@ function botCardHtml(d, b) {
 
 const BOT_MODEL_OPTIONS = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.8-flash'];
 function botModelSelectHtml(current = '') {
+  // A bot whose stored model is not in the standard list (e.g. set
+  // before a model retirement, or a custom id) keeps it as a visible
+  // selected option — otherwise the select would silently fall back to
+  // the platform default and a settings save would rewrite the model
+  // without the admin noticing.
+  const custom = current && !BOT_MODEL_OPTIONS.includes(current)
+    ? `<option value="${escapeHtml(current)}" selected>${escapeHtml(current)} (current)</option>`
+    : '';
   return `<select name="model">
     <option value="" ${!current ? 'selected' : ''}>${t('modelDefaultLabel')}</option>
+    ${custom}
     ${BOT_MODEL_OPTIONS.map((m) => `<option value="${m}" ${current === m ? 'selected' : ''}>${m}</option>`).join('')}
   </select>`;
 }
