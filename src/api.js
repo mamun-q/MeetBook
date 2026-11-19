@@ -9,7 +9,8 @@ import {
 import { firebaseReady, auth, db, storage, googleProvider } from './firebase.js';
 import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme } from './utils.js';
 import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay } from './botLogic.js';
-import { generateGeminiText, canAccessBotSecrets, GEMINI_MODEL, botModel, getLastGeminiFailure, resetLastGeminiFailure } from './gemini.js';
+import { canAccessBotSecrets, botModel } from './gemini.js';
+import { providerById, resolveAiConfig, generateRouted, testProvider as testAiProvider, getLastRoutedFailure, resetLastRoutedFailure, anyProviderConfigured, dhakaDayKey, normaliseUsageMap, usageTotals } from './aiProviders.js';
 
 // --- Firebase imports are dynamic-free static imports of the SDK ---------
 import {
@@ -130,10 +131,11 @@ function blankRemote() {
     healthProbe: null, // Pack C: last Firestore connectivity probe (probeFirestoreHealth)
     adminStats: null, // Pack B: staff-only server aggregates (loadAdminStats)
     botSettings: { global: { enabled: true }, counters: {} },
-    botSecrets: { geminiApiKey: '' },
+    botSecrets: { geminiApiKey: '', providers: {} },
+    providerHealth: {}, // Stage A: last Test-connection result per provider
     botRunner: { live: true, active: false, lastCycleAt: 0, lastSummary: '', lastDetails: [] },
     config: { maintenanceMode: false },
-    aiUsage: { callsToday: 0, tokensToday: 0, updatedAt: 0 }
+    aiUsage: { callsToday: 0, tokensToday: 0, updatedAt: 0, day: '', providers: {} }
   };
 }
 
@@ -2199,6 +2201,20 @@ export async function adminSavePlatformSettings(patch = {}, reason = '') {
     if (!['en', 'bn'].includes(patch.defaultLanguage)) throw new Error('Unknown language.');
     clean.defaultLanguage = patch.defaultLanguage;
   }
+  // Stage A multi-provider: the router's fallback order + the paid
+  // approval gate live in the same config/app doc (admin-writable,
+  // arbitrary fields — no rules change needed).
+  if (patch.aiFallbackOrder !== undefined) {
+    if (!Array.isArray(patch.aiFallbackOrder)) throw new Error('Fallback order must be a list of provider ids.');
+    const order = [];
+    for (const id of patch.aiFallbackOrder) {
+      const cleanId = String(id || '').trim().toLowerCase();
+      if (providerById(cleanId) && !order.includes(cleanId)) order.push(cleanId);
+    }
+    if (!order.length) throw new Error('Fallback order needs at least one known provider.');
+    clean.aiFallbackOrder = order;
+  }
+  if (patch.aiPaidApproved !== undefined) clean.aiPaidApproved = Boolean(patch.aiPaidApproved);
   if (!Object.keys(clean).length) throw new Error('Nothing to save.');
   if (firebaseReady) await setDoc(doc(db, 'config', 'app'), clean, { merge: true });
   else mutate((s) => { s.config = { ...s.config, ...clean }; });
@@ -2231,12 +2247,21 @@ export async function probeFirestoreHealth() {
 }
 
 // -------------------------------------------------------------------------
-// GEMINI KEY (Spark-plan browser wiring) — the admin saves a Google
-// Gemini API key in the Bot Admin Panel. Live mode: stored ONLY in the
-// admin-only Firestore doc botSecrets/config and fetched ONLY when the
-// signed-in user is an admin (rules enforce the same). Demo mode: kept
-// in local demo state. The key is never rendered back into the UI — the
-// panel shows set/not-set status only.
+// PROVIDER SECRETS + AI USAGE (Spark-plan browser wiring, Stage A) —
+// admins save provider API keys in the Bot Admin Panel. Live mode:
+// stored ONLY in the admin-only Firestore doc botSecrets/config and
+// fetched ONLY when the signed-in user is an admin (rules enforce the
+// same). Gemini keeps its original top-level geminiApiKey field; the
+// other providers live in a providers map in the same doc
+// ({ groq: { apiKey, enabled, defaultModel }, ollama: { endpoint,
+// enabled }, … }). Demo mode: kept in local demo state. Keys are never
+// rendered back into the UI — the panel shows set/not-set status only.
+//
+// AI USAGE counters (per provider, per Dhaka day) ride inside the SAME
+// doc under an `aiUsage` field: a dedicated aiUsage collection has no
+// match in firestore.rules, so the catch-all would deny every write,
+// while botSecrets is admin read/write — exactly the runner's access.
+// No rules change is needed for any of Stage A.
 // -------------------------------------------------------------------------
 let botSecretsLoaded = false;
 export async function loadBotSecrets() {
@@ -2246,7 +2271,17 @@ export async function loadBotSecrets() {
   try {
     const snap = await getDoc(doc(db, 'botSecrets', 'config'));
     if (remote) {
-      remote.botSecrets = { geminiApiKey: snap.exists() ? String(snap.data().geminiApiKey || '') : '' };
+      const stored = snap.exists() ? snap.data() : {};
+      remote.botSecrets = {
+        geminiApiKey: String(stored.geminiApiKey || ''),
+        providers: stored.providers && typeof stored.providers === 'object' ? stored.providers : {}
+      };
+      const storedUsage = stored.aiUsage;
+      if (storedUsage && storedUsage.day === dhakaDayKey()) {
+        const providers = normaliseUsageMap(storedUsage.providers);
+        const totals = usageTotals(providers);
+        remote.aiUsage = { day: storedUsage.day, providers, callsToday: totals.calls, tokensToday: totals.tokens, updatedAt: Date.now() };
+      }
       document.dispatchEvent(new CustomEvent('meetbook:data'));
     }
   } catch {
@@ -2254,34 +2289,174 @@ export async function loadBotSecrets() {
   }
 }
 
+// One write path for every botSecrets field: live mode merges into the
+// Firestore doc (setDoc merge deep-merges the providers map, so one
+// provider's patch never clobbers another's), demo mode mutates the
+// local store. `applyLocal` performs the same change on a botSecrets
+// object (the remote mirror or the demo state's).
+async function patchBotSecrets(firestorePatch, applyLocal) {
+  if (firebaseReady) {
+    await setDoc(doc(db, 'botSecrets', 'config'), { ...firestorePatch, updatedAt: Date.now() }, { merge: true });
+    botSecretsLoaded = true;
+    if (remote) {
+      remote.botSecrets ||= { geminiApiKey: '', providers: {} };
+      applyLocal(remote.botSecrets);
+      document.dispatchEvent(new CustomEvent('meetbook:data'));
+    }
+    return;
+  }
+  mutate((s) => {
+    s.botSecrets ||= { geminiApiKey: '', providers: {} };
+    applyLocal(s.botSecrets);
+  });
+}
+
 export async function saveGeminiApiKey(key) {
   const value = String(key || '').trim();
   if (!value) throw new Error('Paste a Gemini API key first.');
   if (!isAdmin()) throw new Error('Only admins can manage the Gemini API key.');
-  if (firebaseReady) {
-    await setDoc(doc(db, 'botSecrets', 'config'), { geminiApiKey: value, updatedAt: Date.now() }, { merge: true });
-    botSecretsLoaded = true;
-    if (remote) {
-      remote.botSecrets = { geminiApiKey: value };
-      document.dispatchEvent(new CustomEvent('meetbook:data'));
-    }
-    return;
-  }
-  mutate((s) => { (s.botSecrets ||= { geminiApiKey: '' }).geminiApiKey = value; });
+  await patchBotSecrets({ geminiApiKey: value }, (s) => { s.geminiApiKey = value; });
 }
 
 export async function removeGeminiApiKey() {
   if (!isAdmin()) throw new Error('Only admins can manage the Gemini API key.');
+  // Clear ONLY the key field (this used to delete the whole doc — the
+  // doc now also holds the other providers' keys and the usage
+  // counters, which must survive a Gemini key removal).
+  await patchBotSecrets({ geminiApiKey: '' }, (s) => { s.geminiApiKey = ''; });
+}
+
+function assertProvider(providerId) {
+  const entry = providerById(providerId);
+  if (!entry) throw new Error('Unknown AI provider.');
+  return entry;
+}
+
+function assertPaidGate(entry) {
+  if (entry.freeStatus === 'paid-only' && data().config?.aiPaidApproved !== true) {
+    throw new Error(`${entry.label} is a paid provider with no free tier — turn on paid-provider approval in the AI Providers section first.`);
+  }
+}
+
+export async function saveProviderKey(providerId, key) {
+  const entry = assertProvider(providerId);
+  const value = String(key || '').trim();
+  if (!value) throw new Error(`Paste a ${entry.label} API key first.`);
+  if (!isAdmin()) throw new Error('Only admins can manage provider API keys.');
+  if (entry.id === 'gemini') return saveGeminiApiKey(value);
+  if (entry.endpointField) throw new Error(`${entry.label} uses an endpoint URL, not an API key.`);
+  assertPaidGate(entry);
+  await patchBotSecrets(
+    { providers: { [entry.id]: { apiKey: value } } },
+    (s) => { (s.providers ||= {})[entry.id] = { ...(s.providers[entry.id] || {}), apiKey: value }; }
+  );
+}
+
+export async function removeProviderKey(providerId) {
+  const entry = assertProvider(providerId);
+  if (!isAdmin()) throw new Error('Only admins can manage provider API keys.');
+  if (entry.id === 'gemini') return removeGeminiApiKey();
+  if (entry.endpointField) throw new Error(`${entry.label} uses an endpoint URL, not an API key.`);
+  await patchBotSecrets(
+    { providers: { [entry.id]: { apiKey: '' } } },
+    (s) => { (s.providers ||= {})[entry.id] = { ...(s.providers[entry.id] || {}), apiKey: '' }; }
+  );
+}
+
+export async function saveProviderEndpoint(endpoint) {
+  const entry = assertProvider('ollama');
+  if (!isAdmin()) throw new Error('Only admins can manage provider settings.');
+  const value = String(endpoint || '').trim().replace(/\/+$/, '');
+  let parsed;
+  try { parsed = new URL(value); } catch { throw new Error('Enter a valid endpoint URL (e.g. http://localhost:11434/v1).'); }
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('The endpoint must start with http:// or https://.');
+  await patchBotSecrets(
+    { providers: { ollama: { endpoint: value } } },
+    (s) => { (s.providers ||= {}).ollama = { ...(s.providers.ollama || {}), endpoint: value }; }
+  );
+  return entry;
+}
+
+export async function setProviderEnabled(providerId, enabled) {
+  const entry = assertProvider(providerId);
+  if (!isAdmin()) throw new Error('Only admins can manage provider settings.');
+  await patchBotSecrets(
+    { providers: { [entry.id]: { enabled: Boolean(enabled) } } },
+    (s) => { (s.providers ||= {})[entry.id] = { ...(s.providers[entry.id] || {}), enabled: Boolean(enabled) }; }
+  );
+}
+
+export async function saveProviderDefaultModel(providerId, model) {
+  const entry = assertProvider(providerId);
+  if (!isAdmin()) throw new Error('Only admins can manage provider settings.');
+  const value = String(model || '').trim();
+  await patchBotSecrets(
+    { providers: { [entry.id]: { defaultModel: value } } },
+    (s) => { (s.providers ||= {})[entry.id] = { ...(s.providers[entry.id] || {}), defaultModel: value }; }
+  );
+}
+
+// Test connection: one minimal real generation through the router's
+// own adapter (api.testProvider), result mirrored for the panel.
+export async function testProviderConnection(providerId) {
+  const entry = assertProvider(providerId);
+  if (!isAdmin()) throw new Error('Only admins can test providers.');
+  await loadBotSecrets();
+  const result = await testAiProvider(entry.id, { config: resolveAiConfig(data().botSecrets || {}, data().config || {}) });
+  const health = { ok: result.ok, detail: result.detail, at: Date.now() };
   if (firebaseReady) {
-    await deleteDoc(doc(db, 'botSecrets', 'config'));
-    botSecretsLoaded = true;
     if (remote) {
-      remote.botSecrets = { geminiApiKey: '' };
+      (remote.providerHealth ||= {})[entry.id] = health;
       document.dispatchEvent(new CustomEvent('meetbook:data'));
     }
+  } else {
+    mutate((s) => { (s.providerHealth ||= {})[entry.id] = health; });
+  }
+  return health;
+}
+
+// -------------------------------------------------------------------------
+// AI USAGE ACCOUNTING — every routed attempt (success or failure) is
+// counted per provider with the provider's OWN reported token usage.
+// Live mode persists into botSecrets/config (see the section header);
+// demo mode into the local store. A 429 stamps exhaustedUntil (+24h on
+// a per-day map = "the rest of today") so the router skips the
+// provider until tomorrow's fresh counters.
+// -------------------------------------------------------------------------
+function bumpAiUsage(usage, providerId, attempt) {
+  const day = dhakaDayKey();
+  const base = usage && usage.day === day ? usage : { day, providers: {} };
+  const providers = normaliseUsageMap(base.providers);
+  const p = providers[providerId];
+  if (p) {
+    p.calls += 1;
+    if (!attempt.ok) p.errors += 1;
+    if (attempt.usage) {
+      p.promptTokens += attempt.usage.promptTokens || 0;
+      p.completionTokens += attempt.usage.completionTokens || 0;
+    }
+    if (attempt.exhausted) p.exhaustedUntil = Date.now() + 24 * 3600_000;
+  }
+  const totals = usageTotals(providers);
+  return { day, providers, callsToday: totals.calls, tokensToday: totals.tokens, updatedAt: Date.now() };
+}
+
+function recordAiUsage(providerId, attempt) {
+  if (firebaseReady) {
+    if (!remote) return;
+    remote.aiUsage = bumpAiUsage(remote.aiUsage, providerId, attempt);
+    document.dispatchEvent(new CustomEvent('meetbook:data'));
+    setDoc(doc(db, 'botSecrets', 'config'), {
+      aiUsage: { day: remote.aiUsage.day, providers: remote.aiUsage.providers }, updatedAt: Date.now()
+    }, { merge: true }).catch(() => { /* counters are bookkeeping — never fail a cycle */ });
     return;
   }
-  mutate((s) => { (s.botSecrets ||= { geminiApiKey: '' }).geminiApiKey = ''; });
+  mutate((s) => { s.aiUsage = bumpAiUsage(s.aiUsage, providerId, attempt); });
+}
+
+function aiUsageTodayMap() {
+  const u = data().aiUsage || {};
+  return u.day === dhakaDayKey() ? normaliseUsageMap(u.providers) : normaliseUsageMap(null);
 }
 
 // Demo-mode botLogs write — the existing client-side log channel (the
@@ -2297,11 +2472,14 @@ function logBotEvent(botId, level, message) {
 // the botBrains doc directly — its rules are admin-writable (unlike
 // botActivities/botLogs, which stay Functions-only, so those are
 // skipped silently in live mode). Best-effort: never fail a cycle.
-function recordBotBrain(bot, provider) {
+// `model` is the model that actually answered (the router reports it);
+// template output keeps the 'template-fallback' stamp.
+function recordBotBrain(bot, provider, model) {
+  const stampedModel = model || (provider === 'template-fallback' ? 'template-fallback' : botModel(bot));
   if (firebaseReady) {
     setDoc(doc(db, 'botBrains', bot.id), {
       botId: bot.id, systemPrompt: bot.personality.systemPrompt, provider,
-      model: provider === 'gemini' ? botModel(bot) : 'template-fallback', updatedAt: Date.now()
+      model: stampedModel, updatedAt: Date.now()
     }, { merge: true }).catch(() => { /* bookkeeping only */ });
     return;
   }
@@ -2312,25 +2490,32 @@ function recordBotBrain(bot, provider) {
       botId: bot.id,
       systemPrompt: bot.personality.systemPrompt,
       provider,
-      model: provider === 'gemini' ? botModel(bot) : 'template-fallback',
+      model: stampedModel,
       updatedAt: Date.now()
     };
   });
 }
 
-// One bot text, Gemini-first: when a key is saved, try Gemini (called
-// from this browser — the Spark-plan substitute for the Functions
-// provider); ANY failure falls back silently to the template text the
-// caller prepared. Returns { text, provider }.
+// One bot text through the multi-provider router (aiProviders.js):
+// the bot's own provider+model first, then the admin's fallback order
+// — personality and memory ride in the shared prompt, identical for
+// every provider. ANY total failure falls back silently to the
+// template text the caller prepared. Returns { text, provider } where
+// provider is the registry id that answered ('gemini', 'groq', …) or
+// 'template-fallback'.
 async function generateBotText(bot, memories, context, templateText) {
-  const apiKey = String(data().botSecrets?.geminiApiKey || '').trim();
-  if (apiKey) {
-    const text = await generateGeminiText({ apiKey, bot, memories, context });
-    if (text) {
-      recordBotBrain(bot, 'gemini');
-      return { text, provider: 'gemini' };
-    }
-    logBotEvent(bot.id, 'warn', `Gemini failed for ${bot.name}, using template fallback.`);
+  const config = resolveAiConfig(data().botSecrets || {}, data().config || {});
+  const res = await generateRouted({
+    bot, memories, context, config,
+    usageToday: aiUsageTodayMap(),
+    onAttempt: (providerId, attempt) => recordAiUsage(providerId, attempt)
+  });
+  if (res) {
+    recordBotBrain(bot, res.provider, res.model);
+    return { text: res.text, provider: res.provider };
+  }
+  if (anyProviderConfigured(config)) {
+    logBotEvent(bot.id, 'warn', `AI generation failed for ${bot.name} (${getLastRoutedFailure() || 'no provider available'}), using template fallback.`);
   }
   recordBotBrain(bot, 'template-fallback');
   return { text: templateText, provider: 'template-fallback' };
@@ -2345,9 +2530,9 @@ export async function runDemoBotCycle() {
   if (!s.botSettings.global.enabled) return { ran: false, reason: 'Global bot kill switch is off.' };
   const results = [];
   // Plan phase: decide each bot's action from its counters (same gating
-  // as before) and generate its text up front — Gemini when a key is
-  // saved, template otherwise — because generation is async while the
-  // state mutation below must stay atomic.
+  // as before) and generate its text up front — a routed AI provider
+  // when one is configured, template otherwise — because generation is
+  // async while the state mutation below must stay atomic.
   const plan = [];
   for (const bot of s.bots) {
     const counters = { ...(s.botSettings.counters?.[bot.id] || { postsToday: 0, commentsToday: 0, likesToday: 0, messagesToday: 0, lastActionAt: 0 }) };
@@ -2395,16 +2580,16 @@ export async function runDemoBotCycle() {
       counters.lastActionAt = Date.now();
       st.botSettings.counters[bot.id] = counters;
     }
-    st.aiUsage.callsToday += results.filter((r) => r.action !== 'none').length;
-    st.aiUsage.updatedAt = Date.now();
+    // aiUsage is owned by recordAiUsage now (real per-provider
+    // counters, bumped on every routed attempt during the plan phase).
   });
   return { ran: true, results };
 }
 
 // Bot reply in a 1-1 conversation (demo mode): uses the bot's OWN
-// memories. Gemini-first when a key is saved (the user's message is the
-// context, so a Bangla message earns a Bangla reply); the personality
-// template below is the silent fallback.
+// memories. Routed through the AI providers when any is configured
+// (the user's message is the context, so a Bangla message earns a
+// Bangla reply); the personality template below is the silent fallback.
 export async function demoBotReply(botUserId, userText) {
   if (firebaseReady) return null;
   const s = getState();
@@ -2426,7 +2611,7 @@ export async function demoBotReply(botUserId, userText) {
 // writes on behalf of bot accounts, which the Firestore rules allow
 // only through the narrow admin-as-bot branches (the author/sender
 // must be a users doc with isBot == true). Text generation is the same
-// Gemini-first path as demo mode (generateBotText). LIMITATION, by
+// routed multi-provider path as demo mode (generateBotText). LIMITATION, by
 // design: bots only act while an admin browser session is open — the
 // runner starts when an admin signs in, runs one cycle shortly after,
 // then on BOT_RUNNER_INTERVAL_MS, and stops on sign-out. Non-admin
@@ -2550,8 +2735,8 @@ export async function runLiveBotCycle() {
   botCycleInFlight = true;
   const results = [];
   try {
-    resetLastGeminiFailure(); // the summary reports only THIS cycle's Gemini outcome
-    await loadBotSecrets(); // make sure the Gemini key is in memory
+    resetLastRoutedFailure(); // the summary reports only THIS cycle's AI outcome
+    await loadBotSecrets(); // make sure the provider keys are in memory
     const { day, counters } = await loadLiveBotCounters();
     let actions = 0;
     const details = [];
@@ -2686,15 +2871,14 @@ export async function runLiveBotCycle() {
       }
     }
     await saveLiveBotCounters(day, counters);
-    if (remote) { remote.aiUsage.callsToday += actions; remote.aiUsage.updatedAt = Date.now(); }
-    const geminiFailure = getLastGeminiFailure();
+    const aiFailure = getLastRoutedFailure();
     // Blocked-DM notes (pendingDMs > 0) are part of the summary even
     // though they are 'none' results: "no actions" must never hide
     // unanswered DMs (Audit fix #1).
     const dmNotes = results.filter((r) => r.pendingDMs > 0).map((r) => `${r.bot}: ${r.reason}`);
     const summary = (results.filter((r) => r.action !== 'none').map((r) => (r.action === 'error' ? `${r.bot} → error: ${r.reason}` : `${r.bot} → ${r.action}`)).join(', ') || 'no actions')
       + (dmNotes.length ? ` · ${dmNotes.join(' · ')}` : '')
-      + (geminiFailure ? ` · Gemini failed: ${geminiFailure} (template fallback used)` : '');
+      + (aiFailure ? ` · AI generation failed: ${aiFailure} (template fallback used)` : '');
     setLiveRunnerState({ lastCycleAt: Date.now(), lastSummary: summary, lastDetails: details });
     return { ran: true, results };
   } finally {

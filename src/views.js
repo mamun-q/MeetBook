@@ -2,7 +2,8 @@
 // dataset (api.data()) and never touch the DOM directly — main.js renders
 // and binds events centrally.
 import { escapeHtml, timeAgo, canViewPost, canViewGroup, canViewGroupPost, isGroupMember, searchByName, truncate, paginate, groupStoriesByAuthor, canViewStory, storyBackgroundCss, STORY_BACKGROUNDS, memoriesFor, upcomingEvents, canViewEvent, averageRating, FEELINGS, plural, mutualFriendCount, isStaff, canModerate, isAdminRole, accountStatus, canManageUser, canChangeRole, ASSIGNABLE_ROLES, platformStats, analyticsSeries, spamSuspects, reportStatus, reportCategory, reportNeedsAttention, countPostComments, botConversationSummaries, recentClientErrors, collapseDuplicateNotifications, REPORT_CATEGORIES, REPORT_OUTCOMES, typingUserIds, reactionChips, pinnedMessages, messageSnippet, chatTheme, CHAT_THEMES, MESSAGE_REACTIONS, reviewText } from './utils.js';
-import { GEMINI_MODEL, botModel } from './gemini.js';
+import { botModel } from './gemini.js';
+import { AI_PROVIDERS, providerById, resolveAiConfig, usageTotals } from './aiProviders.js';
 import { t } from './i18n.js';
 import { avatarHtml, userNameHtml, postCardHtml, emptyState } from './components.js';
 import { friendIdsOf, blockedIdsOf } from './store.js';
@@ -1607,6 +1608,8 @@ export function accountStatusView(user) {
 // ------------------------------------------------------------------ BOTS ADMIN
 export function botsView(d, meUser) {
   const globalOn = d.botSettings?.global?.enabled !== false;
+  const aiCfg = resolveAiConfig(d.botSecrets || {}, d.config || {});
+  const totals = usageTotals(d.aiUsage?.providers);
   return `<div class="admin-inner">
     <h2>🤖 AI Bot Admin Panel</h2>
     <div class="card stack">
@@ -1616,14 +1619,9 @@ export function botsView(d, meUser) {
         <button class="btn btn-ghost" data-act="bot-run-cycle">${t('botRunCycle')}</button>
         <button class="btn btn-primary" data-act="bot-new">+ Create bot</button>
       </div>
-      <p class="muted small">Status: <b>${globalOn ? 'ENABLED' : 'STOPPED'}</b> · AI usage today: ${d.aiUsage?.callsToday || 0} calls · ~${d.aiUsage?.tokensToday || 0} tokens (template fallback uses 0 provider tokens).</p>
+      <p class="muted small">Status: <b>${globalOn ? 'ENABLED' : 'STOPPED'}</b> · ${t('aiUsageToday')}: ${totals.calls} calls · ${totals.tokens} tokens reported by providers (template fallback uses 0 provider tokens).</p>
     </div>
-    <div class="card stack">
-      <h3>🧠 ${t('aiProviderTitle')} — Google Gemini</h3>
-      <p class="small">Status: <b>${d.botSecrets?.geminiApiKey ? t('geminiKeySet') : t('geminiKeyNotSet')}</b> · ${t('aiModelInUse')}: <b>${GEMINI_MODEL}</b> <span class="muted">(platform default — a bot can override it in its own settings)</span></p>
-      <p class="small">${t('aiUsageToday')}: <b>${d.aiUsage?.callsToday || 0}</b> calls · ~<b>${d.aiUsage?.tokensToday || 0}</b> tokens</p>
-      <p class="muted small">${t('aiFallbackNote')}</p>
-    </div>
+    ${aiProvidersSection(d, aiCfg)}
     ${firebaseReady ? `<div class="card stack">
       <h3>🛰️ ${t('botRunnerTitle')}</h3>
       <p class="small"><b>${d.botRunner?.active ? t('botRunnerActive') : t('botRunnerInactive')}</b></p>
@@ -1631,16 +1629,6 @@ export function botsView(d, meUser) {
       ${(d.botRunner?.lastDetails || []).filter((x) => x.pendingDMs > 0).map((x) => `<p class="small">🤖 <b>${escapeHtml(x.bot)}</b>: ${escapeHtml(x.note || `${x.pendingDMs} unanswered DM(s)`)} <span class="muted">· latest unanswered ${timeAgo(x.lastUnansweredAt)}</span></p>`).join('')}
       <p class="muted small">${t('botRunnerNote')}</p>
     </div>` : ''}
-    <div class="card stack">
-      <h3>🔑 ${t('geminiApiKeyTitle')}</h3>
-      <p class="muted small">${t('geminiApiKeyHelp')}</p>
-      <p class="small">Status: <b>${d.botSecrets?.geminiApiKey ? t('geminiKeySet') : t('geminiKeyNotSet')}</b></p>
-      <form id="gemini-key-form" class="row gap wrap">
-        <input type="password" name="geminiKey" class="grow" placeholder="${t('geminiKeyPlaceholder')}" autocomplete="off" />
-        <button class="btn btn-primary" type="submit">${t('save')}</button>
-        ${d.botSecrets?.geminiApiKey ? `<button class="btn btn-danger" type="button" data-act="gemini-key-remove">${t('geminiKeyRemove')}</button>` : ''}
-      </form>
-    </div>
     ${d.bots.map((b) => botCardHtml(d, b)).join('') || emptyState('🤖', 'No bots yet. Create your first AI bot.')}
     <div class="card stack">
       <h3>Recent bot activity</h3>
@@ -1648,6 +1636,82 @@ export function botsView(d, meUser) {
       <h3>Bot logs</h3>
       ${d.botLogs.slice(0, 10).map((l) => `<p class="small mono">[${escapeHtml(l.level)}] ${escapeHtml(l.message)} <span class="muted">${timeAgo(l.createdAt)}</span></p>`).join('') || '<p class="muted">No logs.</p>'}
     </div>
+  </div>`;
+}
+
+// ------------------------------------------------- AI PROVIDERS (Stage A)
+// One card per registry provider: free-status badge, the verified
+// free terms, enable toggle, key/endpoint form, default model, TODAY's
+// real usage from the per-provider counters, and a Test connection
+// button whose last result renders inline. Paid-only providers stay
+// locked (no key input at all) until the platform's paid approval is
+// on — the gate is also enforced in api.saveProviderKey and in the
+// router itself.
+function aiProvidersSection(d, aiCfg) {
+  const usage = d.aiUsage?.providers || {};
+  const health = d.providerHealth || {};
+  return `<div class="card stack">
+      <h3>🔌 ${t('aiProvidersTitle')}</h3>
+      <p class="muted small">${t('aiFallbackNote')}</p>
+      <form id="ai-fallback-form" class="row gap wrap">
+        <label class="grow">${t('fallbackOrderLabel')}<input name="order" value="${escapeHtml(aiCfg.fallbackOrder.join(', '))}" /></label>
+        <button class="btn btn-primary" type="submit">${t('save')}</button>
+      </form>
+      <p class="muted small">${t('fallbackOrderHelp')}</p>
+      <div class="row gap wrap">
+        <span class="grow"><b>${t('paidApprovalLabel')}</b><br/><span class="muted small">${t('paidApprovalWarning')}</span></span>
+        <button class="btn ${aiCfg.paidApproved ? 'btn-danger' : 'btn-ghost'}" data-act="ai-paid-toggle" data-on="${aiCfg.paidApproved ? '0' : '1'}">${aiCfg.paidApproved ? 'ON' : 'OFF'}</button>
+      </div>
+    </div>
+    ${AI_PROVIDERS.map((entry) => providerCardHtml(entry, aiCfg.providers[entry.id] || {}, usage[entry.id] || {}, aiCfg.paidApproved, health[entry.id])).join('')}`;
+}
+
+function providerCardHtml(entry, cfg, usage, paidApproved, health) {
+  const badge = entry.freeStatus === 'free'
+    ? `<span class="badge badge-ok">${t('providerFree')}</span>`
+    : entry.freeStatus === 'paid-only'
+      ? `<span class="badge badge-warn">${t('providerPaidOnly')}</span>`
+      : `<span class="badge">${t('providerSelfHosted')}</span>`;
+  const locked = entry.freeStatus === 'paid-only' && !paidApproved;
+  const hasKey = Boolean(cfg.apiKey);
+  const tokens = (usage.promptTokens || 0) + (usage.completionTokens || 0);
+  const exhausted = usage.exhaustedUntil && usage.exhaustedUntil > Date.now();
+  const modelForm = entry.models.length && !entry.freeText
+    ? `<form data-provider-model-form="${entry.id}" class="row gap wrap">
+        <label class="grow">${t('providerDefaultModelLabel')}<select name="model">${entry.models.map((m) => `<option value="${escapeHtml(m)}" ${cfg.defaultModel === m ? 'selected' : ''}>${escapeHtml(m)}</option>`).join('')}</select></label>
+        <button class="btn btn-ghost" type="submit">${t('save')}</button>
+      </form>`
+    : `<form data-provider-model-form="${entry.id}" class="row gap wrap">
+        <label class="grow">${t('providerDefaultModelLabel')}<input name="model" value="${escapeHtml(cfg.defaultModel || '')}" placeholder="${escapeHtml(entry.defaultModel || 'provider/model-id')}" /></label>
+        <button class="btn btn-ghost" type="submit">${t('save')}</button>
+      </form>`;
+  return `<div class="card stack provider-card" data-provider="${entry.id}">
+    <div class="row gap wrap">
+      <span class="grow"><b>${escapeHtml(entry.label)}</b> ${badge}<br/><span class="muted small">${escapeHtml(entry.blurb)}</span></span>
+      <button class="btn ${cfg.enabled !== false ? 'btn-danger' : 'btn-primary'} btn-sm" data-act="provider-toggle" data-id="${entry.id}" data-on="${cfg.enabled !== false ? '0' : '1'}">${cfg.enabled !== false ? 'Deactivate' : 'Activate'}</button>
+      <button class="btn btn-ghost btn-sm" data-act="provider-test" data-id="${entry.id}">${t('providerTestBtn')}</button>
+    </div>
+    <p class="muted small">${escapeHtml(entry.rpmNote)} ${entry.dailyCap != null ? `· ${t('providerDailyCap')}: ${entry.dailyCap}` : `· ${t('providerNoDailyCap')}`}</p>
+    ${entry.endpointField
+      ? `<p class="small">${t('providerEndpointLabel')}: <b>${escapeHtml(cfg.endpoint || entry.baseUrl)}</b></p>`
+      : `<p class="small">Status: <b>${hasKey ? t('providerKeySet') : t('providerKeyNotSet')}</b></p>`}
+    <p class="small">${t('providerUsageToday')}: <b>${usage.calls || 0}</b> calls · <b>${usage.promptTokens || 0}</b> prompt + <b>${usage.completionTokens || 0}</b> completion tokens · <b>${usage.errors || 0}</b> errors${(usage.calls || 0) > 0 && tokens === 0 ? ` <span class="muted">(${t('providerTokensNotReported')})</span>` : ''}</p>
+    ${exhausted ? `<p class="small">⚠️ ${t('providerRateLimited')}</p>` : ''}
+    ${health ? `<p class="small">${t('lastTestLabel')}: <b>${health.ok ? '✓ OK' : '✗ Failed'}</b> — ${escapeHtml(health.detail || '')} <span class="muted">${timeAgo(health.at)}</span></p>` : ''}
+    ${locked
+      ? `<p class="muted small">🔒 ${escapeHtml(entry.paidNote || '')} ${t('providerLockedNote')}</p>`
+      : entry.endpointField
+        ? `<form data-provider-endpoint-form="${entry.id}" class="row gap wrap">
+            <input name="endpoint" class="grow" value="${escapeHtml(cfg.endpoint || '')}" placeholder="${escapeHtml(entry.baseUrl)}" autocomplete="off" />
+            <button class="btn btn-primary" type="submit">${t('save')}</button>
+          </form>
+          ${modelForm}`
+        : `<form data-provider-key-form="${entry.id}" class="row gap wrap">
+            <input type="password" name="apiKey" class="grow" placeholder="${t('providerKeyPlaceholder')}" autocomplete="off" />
+            <button class="btn btn-primary" type="submit">${t('save')}</button>
+            ${hasKey ? `<button class="btn btn-danger" type="button" data-act="provider-key-remove" data-id="${entry.id}">${t('geminiKeyRemove')}</button>` : ''}
+          </form>
+          ${modelForm}`}
   </div>`;
 }
 
@@ -1674,25 +1738,49 @@ function botCardHtml(d, b) {
   </div>`;
 }
 
-const BOT_MODEL_OPTIONS = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.8-flash'];
-function botModelSelectHtml(current = '') {
-  // A bot whose stored model is not in the standard list (e.g. set
-  // before a model retirement, or a custom id) keeps it as a visible
-  // selected option — otherwise the select would silently fall back to
-  // the platform default and a settings save would rewrite the model
-  // without the admin noticing.
-  const custom = current && !BOT_MODEL_OPTIONS.includes(current)
+// The model a bot effectively uses on its provider (its own model, or
+// the provider's default) — for display in the detail tabs.
+function botEffectiveModelLabel(b) {
+  const entry = providerById(b?.provider);
+  return (typeof b?.model === 'string' && b.model.trim()) || entry?.defaultModel || botModel(b || {});
+}
+
+// For free-text providers (OpenRouter, Ollama, paid providers) the
+// model lives in the custom-id input instead of the dropdown.
+function botCustomModelValue(b) {
+  const entry = providerById(b?.provider);
+  if (!entry?.freeText) return '';
+  return typeof b?.model === 'string' ? b.model : '';
+}
+
+function botProviderSelectHtml(current = '') {
+  return `<select name="provider">
+    <option value="" ${!current ? 'selected' : ''}>${t('providerDefaultRouting')}</option>
+    ${AI_PROVIDERS.map((p) => `<option value="${p.id}" ${current === p.id ? 'selected' : ''}>${escapeHtml(p.label)}</option>`).join('')}
+  </select>`;
+}
+
+function botModelSelectHtml(current = '', providerId = '') {
+  // Options follow the bot's provider (Gemini's list when no provider
+  // is chosen — the historical default). A bot whose stored model is
+  // not in the provider's list (e.g. set before a model retirement, or
+  // a custom id) keeps it as a visible selected option — otherwise the
+  // select would silently fall back to the provider default and a
+  // settings save would rewrite the model without the admin noticing.
+  const entry = providerById(providerId) || providerById('gemini');
+  const options = entry?.models || [];
+  const custom = current && !options.includes(current)
     ? `<option value="${escapeHtml(current)}" selected>${escapeHtml(current)} (current)</option>`
     : '';
   return `<select name="model">
-    <option value="" ${!current ? 'selected' : ''}>${t('modelDefaultLabel')}</option>
+    <option value="" ${!current ? 'selected' : ''}>${t('modelProviderDefaultLabel')}</option>
     ${custom}
-    ${BOT_MODEL_OPTIONS.map((m) => `<option value="${m}" ${current === m ? 'selected' : ''}>${m}</option>`).join('')}
+    ${options.map((m) => `<option value="${m}" ${current === m ? 'selected' : ''}>${m}</option>`).join('')}
   </select>`;
 }
 
 export function botFormHtml(bot = null) {
-  const b = bot || { name: '', username: '', bio: '', avatar: '', model: '', personality: { traits: [], tone: '', interests: [], systemPrompt: '' }, limits: { postsPerDay: 3, commentsPerDay: 10, likesPerDay: 20, messagesPerDay: 5 } };
+  const b = bot || { name: '', username: '', bio: '', avatar: '', model: '', provider: '', personality: { traits: [], tone: '', interests: [], systemPrompt: '' }, limits: { postsPerDay: 3, commentsPerDay: 10, likesPerDay: 20, messagesPerDay: 5 } };
   return `<h3>${bot ? 'Configure bot' : 'Create AI bot'}</h3>
   <form id="bot-form" data-id="${bot?.id || ''}" class="stack">
     <label>Name<input name="name" required maxlength="40" value="${escapeHtml(b.name)}" /></label>
@@ -1707,7 +1795,9 @@ export function botFormHtml(bot = null) {
     <label>Tone<input name="tone" value="${escapeHtml(b.personality.tone)}" /></label>
     <label>Interests (comma separated)<input name="interests" value="${escapeHtml(b.personality.interests.join(', '))}" /></label>
     <label>Individual system prompt<textarea name="systemPrompt" rows="4" maxlength="1000">${escapeHtml(b.personality.systemPrompt)}</textarea></label>
-    <label>${t('botModelLabel')}${botModelSelectHtml(b.model || '')}</label>
+    <label>${t('botProviderLabel')}${botProviderSelectHtml(b.provider || '')}</label>
+    <label>${t('botModelLabel')}${botModelSelectHtml(b.model || '', b.provider || '')}</label>
+    <label>${t('customModelLabel')}<input name="modelCustom" value="${escapeHtml(botCustomModelValue(b))}" placeholder="provider/model-id" /></label>
     <div class="row gap wrap">
       <label>Posts/day<input name="postsPerDay" type="number" min="0" max="50" value="${b.limits.postsPerDay}" /></label>
       <label>Comments/day<input name="commentsPerDay" type="number" min="0" max="100" value="${b.limits.commentsPerDay}" /></label>
@@ -1781,12 +1871,12 @@ function botTabOverview(d, b, brain) {
   return `<div class="card stack">
       <h3>${t('identityLabel')}</h3>
       <p class="small"><b>${escapeHtml(b.name)}</b> · @${escapeHtml(b.username)}<br/>${escapeHtml(b.bio || '')}</p>
-      <p class="small muted">${t('statusLabel')}: <b>${b.active ? 'Active' : 'Inactive'}</b> · Created: ${b.createdAt ? new Date(b.createdAt).toLocaleDateString() : '—'} · ${t('botModelLabel')}: <b>${escapeHtml(botModel(b))}</b></p>
+      <p class="small muted">${t('statusLabel')}: <b>${b.active ? 'Active' : 'Inactive'}</b> · Created: ${b.createdAt ? new Date(b.createdAt).toLocaleDateString() : '—'} · ${t('botProviderLabel')}: <b>${escapeHtml(providerById(b.provider)?.label || t('providerDefaultRouting'))}</b> · ${t('botModelLabel')}: <b>${escapeHtml(botEffectiveModelLabel(b))}</b></p>
     </div>
     <div class="card stack">
       <h3>${t('countersToday')}</h3>
       ${botCountersRows(b, counters)}
-      <p class="small">${t('brainProvider')}: <b>${escapeHtml(brain.provider || '—')}</b> · ${t('brainModel')}: <b>${escapeHtml(brain.model || botModel(b))}</b>${brain.updatedAt ? ` · ${t('brainUpdated')}: ${timeAgo(brain.updatedAt)}` : ''}</p>
+      <p class="small">${t('brainProvider')}: <b>${escapeHtml(brain.provider || '—')}</b> · ${t('brainModel')}: <b>${escapeHtml(brain.model || botEffectiveModelLabel(b))}</b>${brain.updatedAt ? ` · ${t('brainUpdated')}: ${timeAgo(brain.updatedAt)}` : ''}</p>
       <p class="small">${t('memoryCountLabel')}: <b>${memories.length}</b> · ${t('conversationCountLabel')}: <b>${summaries.length}</b></p>
     </div>
     <div class="card stack">
@@ -1798,7 +1888,7 @@ function botTabOverview(d, b, brain) {
 function botTabBrain(d, b, brain) {
   return `<div class="card stack">
     <h3>🧠 ${t('tabBrain')}</h3>
-    <p class="small">${t('brainProvider')}: <b>${escapeHtml(brain.provider || '—')}</b> · ${t('brainModel')}: <b>${escapeHtml(brain.model || botModel(b))}</b>${brain.updatedAt ? ` · ${t('brainUpdated')}: ${timeAgo(brain.updatedAt)}` : ''}</p>
+    <p class="small">${t('brainProvider')}: <b>${escapeHtml(brain.provider || '—')}</b> · ${t('brainModel')}: <b>${escapeHtml(brain.model || botEffectiveModelLabel(b))}</b>${brain.updatedAt ? ` · ${t('brainUpdated')}: ${timeAgo(brain.updatedAt)}` : ''}</p>
     <form id="bot-brain-form" data-id="${b.id}" class="stack">
       <label>System prompt<textarea name="systemPrompt" rows="6" maxlength="1000">${escapeHtml(brain.systemPrompt || b.personality.systemPrompt)}</textarea></label>
       <p class="muted small">${t('brainNote')}</p>
@@ -1865,13 +1955,20 @@ function botTabConversations(d, b) {
 
 function botTabUsage(d, b, brain) {
   const counters = botCountersToday(d, b.id);
+  const perProvider = d.aiUsage?.providers || {};
+  const totals = usageTotals(perProvider);
+  const breakdown = AI_PROVIDERS
+    .filter((entry) => (perProvider[entry.id]?.calls || 0) > 0)
+    .map((entry) => { const u = perProvider[entry.id]; return `<p class="small">${escapeHtml(entry.label)}: <b>${u.calls}</b> calls · <b>${(u.promptTokens || 0) + (u.completionTokens || 0)}</b> tokens · <b>${u.errors || 0}</b> errors</p>`; })
+    .join('');
   return `<div class="card stack">
     <h3>📊 ${t('tabUsage')}</h3>
     <h4>${t('countersToday')}</h4>
     ${botCountersRows(b, counters)}
     <h4>${t('aiProviderTitle')}</h4>
-    <p class="small">${t('brainProvider')}: <b>${escapeHtml(brain.provider || '—')}</b> · ${t('brainModel')}: <b>${escapeHtml(brain.model || botModel(b))}</b></p>
-    <p class="small">${t('aiUsageToday')}: <b>${d.aiUsage?.callsToday || 0}</b> calls · ~<b>${d.aiUsage?.tokensToday || 0}</b> tokens</p>
+    <p class="small">${t('brainProvider')}: <b>${escapeHtml(brain.provider || '—')}</b> · ${t('brainModel')}: <b>${escapeHtml(brain.model || botEffectiveModelLabel(b))}</b></p>
+    <p class="small">${t('aiUsageToday')}: <b>${totals.calls}</b> calls · <b>${totals.tokens}</b> tokens reported by providers</p>
+    ${breakdown}
     <p class="muted small">${t('usagePlatformNote')}</p>
   </div>`;
 }
@@ -1890,7 +1987,9 @@ function botTabSettings(d, b) {
         <label>Likes/day<input name="likesPerDay" type="number" min="0" max="200" value="${b.limits.likesPerDay}" /></label>
         <label>Messages/day<input name="messagesPerDay" type="number" min="0" max="50" value="${b.limits.messagesPerDay}" /></label>
       </div>
-      <label>${t('botModelLabel')}${botModelSelectHtml(b.model || '')}</label>
+      <label>${t('botProviderLabel')}${botProviderSelectHtml(b.provider || '')}</label>
+      <label>${t('botModelLabel')}${botModelSelectHtml(b.model || '', b.provider || '')}</label>
+      <label>${t('customModelLabel')}<input name="modelCustom" value="${escapeHtml(botCustomModelValue(b))}" placeholder="provider/model-id" /></label>
       <div class="row gap end"><button class="btn btn-primary" type="submit">${t('limitsSave')}</button></div>
     </form>
   </div>
@@ -2004,7 +2103,7 @@ export function adminHealthView(d, meUser, mode) {
         ? `<b>${d.botRunner?.active ? t('botRunnerActive') : t('botRunnerInactive')}</b>${d.botRunner?.lastCycleAt ? ` · ${t('botLastCycle')}: ${timeAgo(d.botRunner.lastCycleAt)}` : ''}`
         : `<span class="muted">${t('healthDemo')}</span>`)}
       ${row(t('healthGemini'), `<b>${d.botSecrets?.geminiApiKey ? t('geminiKeySet') : t('geminiKeyNotSet')}</b>`)}
-      ${brains.map(({ bot, brain }) => `<div class="row gap-sm"><span class="grow muted small">🤖 ${escapeHtml(bot.name)}</span><span class="small">${escapeHtml(brain.provider || '—')} · ${escapeHtml(brain.model || botModel(bot))}${brain.updatedAt ? ` · ${timeAgo(brain.updatedAt)}` : ''}</span></div>`).join('')}
+      ${brains.map(({ bot, brain }) => `<div class="row gap-sm"><span class="grow muted small">🤖 ${escapeHtml(bot.name)}</span><span class="small">${escapeHtml(brain.provider || '—')} · ${escapeHtml(brain.model || botEffectiveModelLabel(bot))}${brain.updatedAt ? ` · ${timeAgo(brain.updatedAt)}` : ''}</span></div>`).join('')}
     </div>
     <div class="card stack">
       <h3>${t('healthDbCounts')}</h3>

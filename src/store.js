@@ -148,11 +148,14 @@ function seed() {
       { id: uid('log'), botId: 'bot_nova', level: 'info', message: 'Runner cycle completed: 1 post created.', createdAt: now - 4 * H }
     ],
     botSettings: { global: { enabled: true }, counters: {} },
-    // Demo-only home for the Gemini API key (in live mode it lives in
+    // Demo-only home for provider secrets (in live mode they live in
     // the admin-only Firestore doc botSecrets/config — never here).
-    botSecrets: { geminiApiKey: '' },
+    // Gemini keeps its original geminiApiKey field; the other
+    // providers live in the providers map (Stage A).
+    botSecrets: { geminiApiKey: '', providers: {} },
+    providerHealth: {}, // Stage A: last Test-connection result per provider (session bookkeeping)
     config: { maintenanceMode: false },
-    aiUsage: { callsToday: 7, tokensToday: 2140, updatedAt: now }
+    aiUsage: { callsToday: 7, tokensToday: 2140, updatedAt: now, day: '', providers: {} }
   };
 }
 
@@ -167,7 +170,11 @@ function load() {
         for (const key of ['stories', 'groups', 'pages', 'events', 'reviews', 'groupRequests', 'adminLogs', 'announcements']) {
           if (!Array.isArray(parsed[key])) parsed[key] = [];
         }
-        if (!parsed.botSecrets || typeof parsed.botSecrets !== 'object') parsed.botSecrets = { geminiApiKey: '' };
+        if (!parsed.botSecrets || typeof parsed.botSecrets !== 'object') parsed.botSecrets = { geminiApiKey: '', providers: {} };
+        if (!parsed.botSecrets.providers || typeof parsed.botSecrets.providers !== 'object') parsed.botSecrets.providers = {};
+        if (!parsed.providerHealth || typeof parsed.providerHealth !== 'object') parsed.providerHealth = {};
+        if (!parsed.aiUsage || typeof parsed.aiUsage !== 'object') parsed.aiUsage = { callsToday: 0, tokensToday: 0, updatedAt: 0, day: '', providers: {} };
+        if (!parsed.aiUsage.providers || typeof parsed.aiUsage.providers !== 'object') parsed.aiUsage.providers = {};
         for (const u of parsed.users) if (!Array.isArray(u.closeFriends)) u.closeFriends = [];
         return parsed;
       }

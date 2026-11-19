@@ -22,6 +22,11 @@ export function normaliseBot(raw = {}) {
     // default" (gemini.js GEMINI_MODEL). Threaded into the provider
     // call by generateGeminiText and stamped onto botBrains.
     model: typeof raw.model === 'string' ? raw.model.trim() : '',
+    // Per-bot AI provider (Stage A multi-provider); '' means the
+    // platform routing decides (the head of the admin's fallback
+    // order). The model above is interpreted in THIS provider's
+    // namespace. Personality/memory never depend on either field.
+    provider: typeof raw.provider === 'string' ? raw.provider.trim().toLowerCase() : '',
     isBot: true,
     active: raw.active !== false,
     personality: {

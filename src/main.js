@@ -6,6 +6,7 @@ import { subscribe as storeSubscribe, mutate as demoMutate } from './store.js';
 import { setLocale, t } from './i18n.js';
 import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError, messageSnippet, focusMovesWithinForm, rsvpToastKey } from './utils.js';
 import { toast, clearToasts, openModal, closeModal, confirmModal, adminActionModal, avatarHtml } from './components.js';
+import { providerById } from './aiProviders.js';
 import * as V from './views.js';
 
 // ------------------------------------------------------------- preferences
@@ -958,6 +959,32 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'gemini-key-remove': if (await confirmModal('Remove the Gemini API key?', 'Bots will go back to template replies until a new key is saved.')) await handle(api.removeGeminiApiKey(), 'Gemini API key removed.'); break;
+    // ---- AI Providers (Stage A): enable/disable, key removal, health
+    // test and the paid-provider approval gate.
+    case 'provider-toggle': {
+      const entry = providerById(actEl.dataset.id);
+      await handle(api.setProviderEnabled(actEl.dataset.id, actEl.dataset.on === '1'), actEl.dataset.on === '1' ? `${entry?.label || 'Provider'} enabled.` : `${entry?.label || 'Provider'} disabled.`);
+      break;
+    }
+    case 'provider-key-remove': {
+      const entry = providerById(actEl.dataset.id);
+      if (await confirmModal(`Remove the ${entry?.label || ''} API key?`, 'Bots will skip this provider until a new key is saved.')) {
+        await handle(actEl.dataset.id === 'gemini' ? api.removeGeminiApiKey() : api.removeProviderKey(actEl.dataset.id), 'API key removed.');
+      }
+      break;
+    }
+    case 'provider-test': {
+      const r = await handle(api.testProviderConnection(actEl.dataset.id));
+      if (r) toast(r.detail, r.ok ? 'success' : 'error');
+      render();
+      break;
+    }
+    case 'ai-paid-toggle': {
+      const turningOn = actEl.dataset.on === '1';
+      if (turningOn && !(await confirmModal('Turn on paid-provider approval?', 'Cerebras and Hugging Face have NO free tier and bill per use. This only unlocks their cards so an admin can add a key — the router never attempts a paid provider while approval is off.'))) break;
+      await handle(api.adminSavePlatformSettings({ aiPaidApproved: turningOn }), turningOn ? 'Paid providers unlocked.' : 'Paid providers locked.');
+      break;
+    }
     case 'bot-new': { const modal = openModal(V.botFormHtml(null)); modal.querySelector('[data-close]').onclick = closeModal; break; }
     case 'bot-edit': { const bot = d.bots.find((b) => b.id === actEl.dataset.id); const modal = openModal(V.botFormHtml(bot)); modal.querySelector('[data-close]').onclick = closeModal; break; }
     case 'bot-toggle': { const bot = d.bots.find((b) => b.id === actEl.dataset.id); if (bot) await handle(api.saveBot({ ...bot, active: !bot.active }), bot.active ? 'Bot deactivated.' : 'Bot activated.'); break; }
@@ -1268,7 +1295,8 @@ document.addEventListener('submit', async (e) => {
       name: String(fd.get('name')), username: String(fd.get('username')).toLowerCase(),
       bio: String(fd.get('bio') || ''),
       avatar,
-      model: String(fd.get('model') || ''),
+      provider: String(fd.get('provider') || ''),
+      model: String(fd.get('modelCustom') || '').trim() || String(fd.get('model') || ''),
       active: existing ? existing.active : true,
       personality: {
         traits: split(fd.get('traits')), tone: String(fd.get('tone') || 'friendly'),
@@ -1315,7 +1343,8 @@ document.addEventListener('submit', async (e) => {
     if (!existing) { toast('Bot not found.', 'error'); return; }
     const bot = {
       ...existing,
-      model: String(fd.get('model') || ''),
+      provider: String(fd.get('provider') || ''),
+      model: String(fd.get('modelCustom') || '').trim() || String(fd.get('model') || ''),
       limits: {
         ...existing.limits,
         postsPerDay: Number(fd.get('postsPerDay') || 0), commentsPerDay: Number(fd.get('commentsPerDay') || 0),
@@ -1349,18 +1378,45 @@ document.addEventListener('submit', async (e) => {
     if (text) await handle(api.addBotMemory(form.dataset.botMemoryForm, text), 'Memory added.');
     return;
   }
-  if (form.id === 'gemini-key-form') {
-    // The key goes straight to saveGeminiApiKey (admin-only doc); the
-    // input is never re-rendered with a value, so the key never appears
-    // back in the page.
-    const key = String(fd.get('geminiKey') || '').trim();
-    if (key) await handle(api.saveGeminiApiKey(key), 'Gemini API key saved.');
+  // ---- AI Providers (Stage A): keys/endpoints/default models are
+  // saved per provider; the key input is never re-rendered with a
+  // value, so a saved key never appears back in the page.
+  if (form.dataset.providerKeyForm) {
+    const id = form.dataset.providerKeyForm;
+    const key = String(fd.get('apiKey') || '').trim();
+    if (key) await handle(id === 'gemini' ? api.saveGeminiApiKey(key) : api.saveProviderKey(id, key), 'API key saved.');
+    return;
+  }
+  if (form.dataset.providerEndpointForm) {
+    await handle(api.saveProviderEndpoint(String(fd.get('endpoint') || '')), 'Endpoint saved.');
+    return;
+  }
+  if (form.dataset.providerModelForm) {
+    await handle(api.saveProviderDefaultModel(form.dataset.providerModelForm, String(fd.get('model') || '')), 'Default model saved.');
+    return;
+  }
+  if (form.id === 'ai-fallback-form') {
+    const order = String(fd.get('order') || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+    await handle(api.adminSavePlatformSettings({ aiFallbackOrder: order }), 'Fallback order saved.');
     return;
   }
 });
 
 // Composer image preview + poll toggle + locale select + maintenance toggle (change events)
 document.addEventListener('change', async (e) => {
+  if (e.target.name === 'provider') {
+    // Bot form / bot settings: the model dropdown follows the chosen
+    // provider (Stage A). The stored custom option is dropped — the
+    // custom-id input below the dropdown is the override path.
+    const form = e.target.closest('#bot-form, #bot-settings-form');
+    const modelSel = form?.querySelector('select[name="model"]');
+    if (modelSel) {
+      const entry = providerById(e.target.value) || providerById('gemini');
+      const options = entry?.models || [];
+      modelSel.innerHTML = `<option value="">${escapeHtml(t('modelProviderDefaultLabel'))}</option>`
+        + options.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
+    }
+  }
   if (e.target.name === 'hasPoll' && e.target.closest('#composer-form')) {
     document.getElementById('poll-fields')?.classList.toggle('hidden', !e.target.checked);
     // In poll mode the composer asks the question the poll answers.

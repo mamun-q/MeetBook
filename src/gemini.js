@@ -104,8 +104,24 @@ async function providerErrorMessage(res, key) {
   }
 }
 
+// Real token usage from a Gemini response: usageMetadata carries
+// promptTokenCount / candidatesTokenCount. Returns null when the
+// response reports neither (the Admin panel then says so honestly
+// instead of inventing a number).
+function geminiUsage(json) {
+  const u = json?.usageMetadata;
+  if (!u) return null;
+  const promptTokens = Number(u.promptTokenCount);
+  const completionTokens = Number(u.candidatesTokenCount);
+  if (!Number.isFinite(promptTokens) && !Number.isFinite(completionTokens)) return null;
+  return {
+    promptTokens: Number.isFinite(promptTokens) ? promptTokens : 0,
+    completionTokens: Number.isFinite(completionTokens) ? completionTokens : 0
+  };
+}
+
 // One provider attempt against one model, with its own timeout. Returns
-// { text } on success or { failure } with the raw failure detail — the
+// { text, usage } on success or { failure } with the raw failure detail — the
 // caller formats it with the model context. Never throws.
 async function attemptGeminiOnce({ key, model, prompt, doFetch, timeoutMs }) {
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
@@ -124,7 +140,7 @@ async function attemptGeminiOnce({ key, model, prompt, doFetch, timeoutMs }) {
     const json = await res.json();
     const text = json?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('').trim();
     if (!text) return { failure: { kind: 'empty' } };
-    return { text };
+    return { text, usage: geminiUsage(json) };
   } catch (err) {
     return { failure: { kind: 'error', detail: String(err?.name || err?.message || 'network error') } };
   } finally {
@@ -147,33 +163,45 @@ function formatGeminiFailure(failure, model, multiModel) {
   return multiModel ? `${base} (${model})` : base;
 }
 
-// Generate one bot text with Gemini. Tries the bot's configured model,
-// then the platform default, then the lite backup — one attempt each,
-// moving on after ANY failure — and returns the first success (trimmed
-// text). Returns null when every attempt fails (no key, timeout,
-// network error, non-200, empty text) so the caller can use its
-// template fallback; the last attempt's failure is recorded in
-// lastGeminiFailure for the bot panel. Never throws.
-export async function generateGeminiText({ apiKey, bot, memories = [], context = {}, fetchImpl, timeoutMs = GEMINI_TIMEOUT_MS } = {}) {
+// Generate one bot text with Gemini, with full detail: tries the bot's
+// configured model, then the platform default, then the lite backup —
+// one attempt each, moving on after ANY failure — and returns
+// { text, model, usage } for the first success (model = the model that
+// actually answered; usage = real token counts or null when Gemini did
+// not report them). Returns null when every attempt fails (no key,
+// timeout, network error, non-200, empty text) so the caller can use
+// its template fallback; the last attempt's failure is recorded in
+// lastGeminiFailure for the bot panel. Never throws. An explicit
+// `prompt` may be passed (the multi-provider router builds the prompt
+// once and shares it across providers); otherwise it is built from
+// bot + memories + context exactly as before.
+export async function generateGeminiDetailed({ apiKey, bot, memories = [], context = {}, prompt, fetchImpl, timeoutMs = GEMINI_TIMEOUT_MS } = {}) {
   const key = String(apiKey || '').trim();
   if (!key) return null; // no key -> never call the provider at all
   const doFetch = fetchImpl || (typeof fetch === 'function' ? fetch : null);
   if (!doFetch) return null;
-  const prompt = buildGeminiPrompt(bot, memories, context);
+  const finalPrompt = typeof prompt === 'string' && prompt ? prompt : buildGeminiPrompt(bot, memories, context);
   const models = geminiAttemptModels(bot);
   let attempts = 0;
   let lastFailure = null;
   let lastModel = '';
   for (const model of models) {
     attempts += 1;
-    const r = await attemptGeminiOnce({ key, model, prompt, doFetch, timeoutMs });
+    const r = await attemptGeminiOnce({ key, model, prompt: finalPrompt, doFetch, timeoutMs });
     if (r.text) {
       lastGeminiFailure = '';
-      return r.text;
+      return { text: r.text, model, usage: r.usage || null };
     }
     lastFailure = r.failure;
     lastModel = model;
   }
   lastGeminiFailure = formatGeminiFailure(lastFailure, lastModel, attempts > 1);
   return null;
+}
+
+// Text-only wrapper kept for the original callers/tests: same attempts,
+// same failure recording, returns just the trimmed text (or null).
+export async function generateGeminiText(args = {}) {
+  const r = await generateGeminiDetailed(args);
+  return r ? r.text : null;
 }
