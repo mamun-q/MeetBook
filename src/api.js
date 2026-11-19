@@ -2383,7 +2383,7 @@ export async function runLiveBotCycle() {
     }
     await saveLiveBotCounters(day, counters);
     if (remote) { remote.aiUsage.callsToday += actions; remote.aiUsage.updatedAt = Date.now(); }
-    const summary = results.filter((r) => r.action !== 'none').map((r) => `${r.bot} → ${r.action}`).join(', ') || 'no actions';
+    const summary = results.filter((r) => r.action !== 'none').map((r) => (r.action === 'error' ? `${r.bot} → error: ${r.reason}` : `${r.bot} → ${r.action}`)).join(', ') || 'no actions';
     setLiveRunnerState({ lastCycleAt: Date.now(), lastSummary: summary });
     return { ran: true, results };
   } finally {
