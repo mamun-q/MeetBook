@@ -1,7 +1,7 @@
 // HTML generators for every route. Pure string builders: they read the shared
 // dataset (api.data()) and never touch the DOM directly — main.js renders
 // and binds events centrally.
-import { escapeHtml, timeAgo, canViewPost, canViewGroup, canViewGroupPost, isGroupMember, searchByName, truncate, paginate, groupStoriesByAuthor, canViewStory, storyBackgroundCss, STORY_BACKGROUNDS, memoriesFor, upcomingEvents, canViewEvent, averageRating, FEELINGS, plural, mutualFriendCount, isStaff, canModerate, isAdminRole, accountStatus, canManageUser, canChangeRole, ASSIGNABLE_ROLES, platformStats, analyticsSeries, spamSuspects, reportStatus, reportCategory, reportNeedsAttention, countPostComments, botConversationSummaries, recentClientErrors, collapseDuplicateNotifications, REPORT_CATEGORIES, REPORT_OUTCOMES, typingUserIds, reactionChips, pinnedMessages, messageSnippet, chatTheme, CHAT_THEMES, MESSAGE_REACTIONS } from './utils.js';
+import { escapeHtml, timeAgo, canViewPost, canViewGroup, canViewGroupPost, isGroupMember, searchByName, truncate, paginate, groupStoriesByAuthor, canViewStory, storyBackgroundCss, STORY_BACKGROUNDS, memoriesFor, upcomingEvents, canViewEvent, averageRating, FEELINGS, plural, mutualFriendCount, isStaff, canModerate, isAdminRole, accountStatus, canManageUser, canChangeRole, ASSIGNABLE_ROLES, platformStats, analyticsSeries, spamSuspects, reportStatus, reportCategory, reportNeedsAttention, countPostComments, botConversationSummaries, recentClientErrors, collapseDuplicateNotifications, REPORT_CATEGORIES, REPORT_OUTCOMES, typingUserIds, reactionChips, pinnedMessages, messageSnippet, chatTheme, CHAT_THEMES, MESSAGE_REACTIONS, reviewText } from './utils.js';
 import { GEMINI_MODEL, botModel } from './gemini.js';
 import { t } from './i18n.js';
 import { avatarHtml, userNameHtml, postCardHtml, emptyState } from './components.js';
@@ -10,7 +10,7 @@ import { firebaseReady } from './firebase.js';
 
 // Transient per-session UI state that views need but which is not app
 // data (main.js flips these; a re-render reads them).
-export const uiState = { memoriesDismissed: false };
+export const uiState = { memoriesDismissed: false, convInfoFor: '' };
 
 export function usersById(d) {
   return Object.fromEntries(d.users.map((u) => [u.id, u]));
@@ -382,18 +382,26 @@ export function profileView(d, meUser, userId) {
     ${(() => {
       const intro = introCardHtml(user, isMe);
       // Photos strip: this user's photo posts (already visibility-filtered
-      // into `posts` above), newest first, up to 9 thumbnails.
+      // into `posts` above), newest first, up to 9 thumbnails. The strip
+      // ALWAYS renders (Audit fix #7) — thumbnails when photo posts
+      // exist, a clean empty state otherwise — exactly like the
+      // Friends strip below, so the profile layout never depends on
+      // whether the account happens to have photo posts yet.
       const photoPosts = posts.filter((p) => p.image).slice(0, 9);
-      const photosStrip = photoPosts.length ? `<div class="card strip-card">
+      const photosStrip = `<div class="card strip-card">
         <h3>${t('photos')}</h3>
-        <div class="photos-grid">${photoPosts.map((p) => `<img class="photos-thumb" src="${escapeHtml(p.image)}" alt="${escapeHtml(truncate(p.text || 'Photo', 60))}" loading="lazy" />`).join('')}</div>
-      </div>` : '';
+        ${photoPosts.length
+          ? `<div class="photos-grid">${photoPosts.map((p) => `<img class="photos-thumb" src="${escapeHtml(p.image)}" alt="${escapeHtml(truncate(p.text || 'Photo', 60))}" loading="lazy" />`).join('')}</div>`
+          : `<p class="muted small">${t('noPhotosYet')}</p>`}
+      </div>`;
       // Friends strip: count + up to 9 friend avatars linking to profiles.
       const friendUsers = [...friendIds].map((id) => ctx.usersById[id]).filter(Boolean).slice(0, 9);
-      const friendsStrip = friendUsers.length ? `<div class="card strip-card">
+      const friendsStrip = `<div class="card strip-card">
         <h3>${t('friends')} (${friendIds.size})</h3>
-        <div class="friends-strip">${friendUsers.map((u) => `<a class="friend-tile" href="#/profile/${u.id}">${avatarHtml(u, 52)}<span>${escapeHtml(u.name.split(' ')[0])}</span></a>`).join('')}</div>
-      </div>` : '';
+        ${friendUsers.length
+          ? `<div class="friends-strip">${friendUsers.map((u) => `<a class="friend-tile" href="#/profile/${u.id}">${avatarHtml(u, 52)}<span>${escapeHtml(u.name.split(' ')[0])}</span></a>`).join('')}</div>`
+          : `<p class="muted small">${t('noFriendsYet')}</p>`}
+      </div>`;
       const sideBits = intro + photosStrip + friendsStrip;
       const postsHtml = `<div class="profile-posts">
       ${posts.map((p) => postCardHtml(p, ctx)).join('') || emptyState('📝', 'No visible posts yet.')}
@@ -483,7 +491,7 @@ export function groupsView(d, meUser, queryText = '') {
     <div class="row"><h2 class="grow">🏘️ ${t('groups')}</h2><button class="btn btn-primary" data-act="create-group">+ ${t('createGroup')}</button></div>
     <form id="groups-search-form" class="row gap">
       <input name="q" class="grow" placeholder="${t('searchGroups')}" value="${escapeHtml(queryText || '')}" autocomplete="off" />
-      <button class="btn btn-ghost" type="submit">Search</button>
+      <button class="btn btn-ghost" type="submit">${t('search')}</button>
     </form>
     <h3>${t('yourGroups')} (${mine.length})</h3>
     <div class="grid-people">${mine.map(card).join('') || `<p class="muted">${t('noGroups')}</p>`}</div>
@@ -573,7 +581,7 @@ export function groupView(d, meUser, groupId) {
       ${(group.members || []).map((id) => {
         const u = byId[id];
         if (!u) return '';
-        return `<div class="row gap-sm">${avatarHtml(u, 36)}<a class="grow" href="#/profile/${u.id}">${escapeHtml(u.name)}</a>${id === group.createdBy ? ' <span class="badge badge-admin">Admin</span>' : ''}${u.isBot ? ` <span class="badge badge-bot">${t('aiBot')}</span>` : ''}${isCreator && id !== group.createdBy ? `<button class="btn btn-ghost btn-sm" data-act="remove-member" data-group="${group.id}" data-id="${id}">Remove</button>` : ''}</div>`;
+        return `<div class="row gap-sm">${avatarHtml(u, 36)}<a class="grow" href="#/profile/${u.id}">${escapeHtml(u.name)}</a>${id === group.createdBy ? ` <span class="badge badge-admin">${t('roleAdmin')}</span>` : ''}${u.isBot ? ` <span class="badge badge-bot">${t('aiBot')}</span>` : ''}${isCreator && id !== group.createdBy ? `<button class="btn btn-ghost btn-sm" data-act="remove-member" data-group="${group.id}" data-id="${id}">Remove</button>` : ''}</div>`;
       }).join('')}
     </div>
   </div>`;
@@ -615,7 +623,7 @@ export function pagesView(d, meUser, queryText = '') {
     <div class="row"><h2 class="grow">📄 ${t('pages')}</h2><button class="btn btn-primary" data-act="create-page">+ ${t('createPage')}</button></div>
     <form id="pages-search-form" class="row gap">
       <input name="q" class="grow" placeholder="${t('searchPages')}" value="${escapeHtml(queryText || '')}" autocomplete="off" />
-      <button class="btn btn-ghost" type="submit">Search</button>
+      <button class="btn btn-ghost" type="submit">${t('search')}</button>
     </form>
     <h3>${t('yourPages')} (${mine.length})</h3>
     <div class="grid-people">${mine.map(card).join('') || `<p class="muted">${t('noPages')}</p>`}</div>
@@ -669,7 +677,7 @@ export function pageView(d, meUser, pageId) {
     </div>
     <div class="card stack">
       <h3>⭐ ${t('reviews')} ${ratingSummary.count ? `· <span class="stars">${stars(ratingSummary.average)}</span> ${ratingSummary.average} (${ratingSummary.count})` : ''}</h3>
-      ${pageReviews.map((r) => { const a = ctx.usersById[r.authorId]; return `<div class="row gap-sm review-item">${avatarHtml(a, 36)}<div class="grow"><b>${escapeHtml(a?.name || '')}</b> <span class="stars">${stars(r.rating)}</span> <span class="muted small">· ${timeAgo(r.createdAt)}</span>${r.text ? `<br/>${escapeHtml(r.text)}` : ''}</div>${r.authorId === meUser.id ? `<button class="btn btn-ghost btn-sm" data-act="delete-review" data-id="${r.id}">🗑️</button>` : ''}</div>`; }).join('') || `<p class="muted">${t('noReviews')}</p>`}
+      ${pageReviews.map((r) => { const a = ctx.usersById[r.authorId]; return `<div class="row gap-sm review-item">${avatarHtml(a, 36)}<div class="grow"><b>${escapeHtml(a?.name || '')}</b> <span class="stars">${stars(r.rating)}</span> <span class="muted small">· ${timeAgo(r.createdAt)}</span>${reviewText(r) ? `<br/>${escapeHtml(reviewText(r))}` : ''}</div>${r.authorId === meUser.id ? `<button class="btn btn-ghost btn-sm" data-act="delete-review" data-id="${r.id}">🗑️</button>` : ''}</div>`; }).join('') || `<p class="muted">${t('noReviews')}</p>`}
       ${isOwner ? '' : `
       <form id="review-form" data-page="${page.id}" class="stack">
         <h4>${myReview ? t('yourReview') : t('writeReview')}</h4>
@@ -721,7 +729,7 @@ function eventCardHtml(d, meUser, e, ctx) {
       </div>
     </div>
     <div class="row gap wrap">
-      <button class="btn ${going ? 'btn-primary' : 'btn-ghost'} btn-sm" data-act="rsvp" data-kind="going" data-id="${e.id}">✓ ${t('going')}</button>
+      <button class="btn ${going ? 'btn-primary' : 'btn-ghost'} btn-sm" data-act="rsvp" data-kind="going" data-id="${e.id}">${going ? '✓ ' : ''}${t('going')}</button>
       <button class="btn ${interested ? 'btn-primary' : 'btn-ghost'} btn-sm" data-act="rsvp" data-kind="interested" data-id="${e.id}">⭐ ${t('interested')}</button>
       <a class="btn btn-ghost btn-sm" href="#/event/${e.id}">Details</a>
     </div>
@@ -768,7 +776,7 @@ export function eventView(d, meUser, eventId) {
     </div>
     <div class="card stack">
       <div class="row gap wrap">
-        <button class="btn ${going ? 'btn-primary' : 'btn-ghost'}" data-act="rsvp" data-kind="going" data-id="${e.id}">✓ ${t('going')} (${(e.going || []).length})</button>
+        <button class="btn ${going ? 'btn-primary' : 'btn-ghost'}" data-act="rsvp" data-kind="going" data-id="${e.id}">${going ? '✓ ' : ''}${t('going')} (${(e.going || []).length})</button>
         <button class="btn ${interested ? 'btn-primary' : 'btn-ghost'}" data-act="rsvp" data-kind="interested" data-id="${e.id}">⭐ ${t('interested')} (${(e.interested || []).length})</button>
       </div>
       ${e.description ? `<p>${escapeHtml(e.description)}</p>` : ''}
@@ -838,7 +846,7 @@ export function messagesView(d, meUser, activeConvId = '') {
       <header class="thread-head"><a class="thread-back" href="#/messages" aria-label="Back to conversations">←</a>${avatarHtml(active.avatarUser, 40)}<div><b>${active.isGroup ? '👥 ' : ''}${escapeHtml(active.title)}</b><br/><span class="muted small">${active.isGroup ? `${active.conv.participants.length} ${t('members')}` : `${active.other?.online ? t('online') : t('offline')}${active.other?.isBot ? ' · AI Bot' : ''}`}</span></div>
       <span class="spacer"></span><button type="button" class="btn btn-ghost btn-sm" data-act="conv-info" title="${t('conversationDetails')}" aria-label="${t('conversationDetails')}">ℹ️</button>${active.isGroup ? '' : `<button class="btn btn-ghost btn-sm" data-act="report-user" data-id="${active.other?.id}">🚩</button>`}</header>
       ${latestPinned ? `<button type="button" class="pinned-bar" data-act="jump-message" data-id="${latestPinned.id}"><span class="pinned-bar-label">📌 ${t('pinnedMessage')}</span><span class="pinned-bar-text">${escapeHtml(messageSnippet(latestPinned, 90))}</span></button>` : ''}
-      <div id="conv-info" class="conv-info hidden">
+      <div id="conv-info" class="conv-info${uiState.convInfoFor === active.conv.id ? '' : ' hidden'}">
         <div class="conv-info-section"><h4>🎨 ${t('chatTheme')}</h4>
           <div class="theme-swatches">${CHAT_THEMES.map((th) => `<button type="button" class="theme-swatch ${theme.id === th.id ? 'active' : ''}" data-act="set-theme" data-conv="${active.conv.id}" data-theme="${th.id}" title="${t(`theme_${th.id}`)}" aria-label="${t(`theme_${th.id}`)}" style="${th.gradient ? `background:${th.gradient};` : ''}">${th.id === 'default' ? '∅' : ''}</button>`).join('')}</div>
           <p class="muted small">${t(`theme_${theme.id}`)}</p>
@@ -992,7 +1000,7 @@ export function searchView(d, meUser, queryText) {
     <h2>🔎 Search ${q ? `for “${escapeHtml(queryText)}”` : ''}</h2>
     <form id="search-page-form" class="search-box search-page-form" role="search">
       <input name="q" placeholder="${t('searchPlaceholder')}" value="${escapeHtml(queryText || '')}" autocomplete="off" />
-      <button class="btn btn-primary" type="submit">Search</button>
+      <button class="btn btn-primary" type="submit">${t('search')}</button>
     </form>
     <h3>People</h3>
     <div class="grid-people">${users.map((u) => {
@@ -1144,7 +1152,7 @@ export function adminOverviewView(d, meUser, mode) {
   const stat = (value, label, metric = '') => `<div class="card stat"><b>${value}</b><span>${label}${metric ? note(metric) : ''}</span></div>`;
   return `<h2>🛡️ ${t('adminOverview')}</h2>
     <div class="stat-grid">
-      ${stat(s.totalUsers, t('statUsers'))}
+      ${stat(s.totalAccounts, `${t('statUsers')} · 👤 ${s.totalUsers} · 🤖 ${s.botAccounts}`)}
       ${stat(s.newToday, t('statNewToday'))}
       ${stat(s.new7d, t('statNew7d'))}
       ${stat(s.new30d, t('statNew30d'))}
@@ -1284,7 +1292,7 @@ export function adminContentView(d, meUser, filters = {}) {
           <option value="human" ${kindF === 'human' ? 'selected' : ''}>${t('humans')}</option>
           <option value="bot" ${kindF === 'bot' ? 'selected' : ''}>${t('bots')}</option>
         </select>
-        <button class="btn btn-primary btn-sm" type="submit">Search</button>
+        <button class="btn btn-primary btn-sm" type="submit">${t('search')}</button>
       </form>
       <div class="card"><div class="table-wrap"><table class="table">
         <thead><tr><th>Author</th><th>${t('statPosts')}</th><th>💬</th><th>❤️</th><th>${t('auditTime')}</th><th>${t('actionsLabel')}</th></tr></thead>
@@ -1530,7 +1538,7 @@ export function adminUsersView(d, meUser, filters = {}) {
         <option value="humans" ${kindF === 'humans' ? 'selected' : ''}>${t('humans')}</option>
         <option value="bots" ${kindF === 'bots' ? 'selected' : ''}>${t('bots')}</option>
       </select>
-      <button class="btn btn-primary btn-sm" type="submit">Search</button>
+      <button class="btn btn-primary btn-sm" type="submit">${t('search')}</button>
     </form>
     <div class="card">
       <div class="table-wrap"><table class="table admin-users-table">
@@ -1566,7 +1574,7 @@ export function adminSecurityView(d, meUser, filters = {}) {
   return `<h2>🔐 ${t('adminSecurity')}</h2>
     <form id="admin-log-filter" class="card admin-filter">
       <input name="q" value="${escapeHtml(filters.q || '')}" placeholder="${t('auditFilterPlaceholder')}" autocomplete="off" />
-      <button class="btn btn-primary btn-sm" type="submit">Search</button>
+      <button class="btn btn-primary btn-sm" type="submit">${t('search')}</button>
     </form>
     <div class="card stack">
       <h3>${t('auditLog')} (${logs.length})</h3>
@@ -1620,6 +1628,7 @@ export function botsView(d, meUser) {
       <h3>🛰️ ${t('botRunnerTitle')}</h3>
       <p class="small"><b>${d.botRunner?.active ? t('botRunnerActive') : t('botRunnerInactive')}</b></p>
       ${d.botRunner?.lastCycleAt ? `<p class="small">${t('botLastCycle')}: ${timeAgo(d.botRunner.lastCycleAt)} — ${escapeHtml(d.botRunner.lastSummary || '')}</p>` : ''}
+      ${(d.botRunner?.lastDetails || []).filter((x) => x.pendingDMs > 0).map((x) => `<p class="small">🤖 <b>${escapeHtml(x.bot)}</b>: ${escapeHtml(x.note || `${x.pendingDMs} unanswered DM(s)`)} <span class="muted">· latest unanswered ${timeAgo(x.lastUnansweredAt)}</span></p>`).join('')}
       <p class="muted small">${t('botRunnerNote')}</p>
     </div>` : ''}
     <div class="card stack">
@@ -1999,7 +2008,7 @@ export function adminHealthView(d, meUser, mode) {
     </div>
     <div class="card stack">
       <h3>${t('healthDbCounts')}</h3>
-      ${row(t('statUsers'), `<b>${s.totalUsers}</b>`)}
+      ${row(t('statUsers'), `<b>${s.totalAccounts}</b> <span class="muted small">(👤 ${s.totalUsers} · 🤖 ${s.botAccounts})</span>`)}
       ${row(t('statPosts'), `<b>${s.totalPosts}</b>${mode.firebase && s.sources.posts === 'loaded' ? ` <span class="muted small">(${t('statFromLoaded')})</span>` : ''}`)}
       ${row(t('statMessages'), `<b>${s.totalMessages}</b>${mode.firebase && s.sources.messages === 'loaded' ? ` <span class="muted small">(${t('statFromLoaded')})</span>` : ''}`)}
       ${row(t('healthConversations'), `<b>${(d.conversations || []).length}</b>${mode.firebase ? ` <span class="muted small">(${t('statFromLoaded')})</span>` : ''}`)}

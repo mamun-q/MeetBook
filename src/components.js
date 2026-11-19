@@ -1,5 +1,5 @@
 // Shared UI components: avatars, toasts, modals, post cards.
-import { escapeHtml, initials, avatarColor, timeAgo, pollResults, feelingByKey } from './utils.js';
+import { escapeHtml, initials, avatarColor, timeAgo, pollResults, feelingByKey, shouldClearToast } from './utils.js';
 import { t } from './i18n.js';
 
 export function toast(message, type = 'info') {
@@ -8,16 +8,28 @@ export function toast(message, type = 'info') {
   const el = document.createElement('div');
   el.className = `toast toast-${type}`;
   el.textContent = message;
+  // Creation stamp: clearToasts(minAgeMs) spares younger toasts, so a
+  // toast raised by an action that itself navigates (login, logout,
+  // register — handle() toasts, then the branch sets location.hash)
+  // is not wiped by its own navigation's hashchange (Audit fix #3).
+  el.dataset.at = String(Date.now());
   root.appendChild(el);
   setTimeout(() => el.classList.add('show'), 10);
   setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 300); }, 3600);
 }
 
-// Drop every visible toast immediately — called on route change so a
-// toast from one page never lingers over the next page's content.
-export function clearToasts() {
+// Drop visible toasts — called on route change so a toast from one
+// page never lingers over the next page's content. With minAgeMs > 0
+// only toasts at least that old are dropped; fresher ones (typically
+// the feedback for the action that caused this very navigation)
+// survive the route change they belong to.
+export function clearToasts(minAgeMs = 0) {
   const root = document.getElementById('toast-root');
-  if (root) root.innerHTML = '';
+  if (!root) return;
+  const now = Date.now();
+  for (const el of [...root.children]) {
+    if (shouldClearToast(el.dataset.at, now, minAgeMs)) el.remove();
+  }
 }
 
 export function openModal(html) {

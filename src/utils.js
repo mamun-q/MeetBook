@@ -227,6 +227,13 @@ export function platformStats(d, now = Date.now(), aggregates = null) {
   const bots = d.bots || [];
   return {
     totalUsers: humans.length,
+    // Every users doc the client holds, bot accounts included — the
+    // number the Admin → Users table actually lists. totalUsers above
+    // stays humans-only (growth/online metrics are about people); the
+    // Overview headline uses totalAccounts with the split spelled out
+    // so the two surfaces can never silently disagree (Audit fix #12).
+    totalAccounts: (d.users || []).length,
+    botAccounts: (d.users || []).filter((u) => u.isBot).length,
     newToday: humans.filter((u) => within(u.createdAt, DAY)).length,
     new7d: humans.filter((u) => within(u.createdAt, 7 * DAY)).length,
     new30d: humans.filter((u) => within(u.createdAt, 30 * DAY)).length,
@@ -964,6 +971,39 @@ export function typingUserIds(conv, viewerId, now = Date.now()) {
 // before they can submit.
 export function focusMovesWithinForm(currentFormId, nextFormId) {
   return Boolean(currentFormId) && currentFormId === nextFormId;
+}
+
+// The displayable body of a page review. The create path stores the
+// text under `text` (form field -> saveReview -> doc), and that is
+// the canonical field; tolerate legacy docs written as body/comment
+// and normalize whitespace-only text to '' so the renderer can omit
+// the body of a stars-only review instead of showing a blank gap
+// (Audit fix #8).
+export function reviewText(review) {
+  if (!review) return '';
+  return String(review.text || review.body || review.comment || '').trim();
+}
+
+// Which RSVP toast an event-RSVP toggle shows. api.toggleEventRsvp
+// resolves a BOOLEAN (true = the RSVP is now active, false = it was
+// removed) — the toast key must come from that boolean, never from a
+// property read on it (Audit fix #4: `!res.active` on a boolean is
+// always true, so every toggle toasted "RSVP removed").
+export function rsvpToastKey(nowActive, kind) {
+  if (!nowActive) return 'rsvpRemoved';
+  return kind === 'going' ? 'rsvpGoing' : 'rsvpInterested';
+}
+
+// Should a toast created at `createdAt` be dropped by a clearToasts
+// pass at `now` that only clears toasts at least `minAgeMs` old? The
+// hashchange handler clears with a grace window so feedback raised by
+// the very action that navigated (login/logout/register raise their
+// toast, THEN set location.hash) is not wiped in the same tick by the
+// navigation it caused (Audit fix #3).
+export function shouldClearToast(createdAt, now, minAgeMs = 0) {
+  const at = Number(createdAt) || 0;
+  if (!minAgeMs) return true;
+  return now - at >= minAgeMs;
 }
 
 // The fixed reaction set offered on messages (Facebook-style six).

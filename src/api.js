@@ -81,6 +81,17 @@ function patchRemoteConversation(convId, apply) {
   return conv;
 }
 
+// Single choke point for live-mode notification writes: an actor is
+// never notified about their OWN action (Audit fix #10 — liking or
+// commenting on your own post used to generate a notification to
+// yourself; the demo store's notify() always had this guard, the
+// direct Firestore writes did not). Returns the doc ref, or null when
+// the write was suppressed as a self-notification.
+async function createNotification(note) {
+  if (!note || !note.userId || note.userId === note.actorId) return null;
+  return addDoc(collection(db, 'notifications'), note);
+}
+
 export function data() {
   if (firebaseReady) {
     // Live mode must never fall through to demo data.
@@ -120,7 +131,7 @@ function blankRemote() {
     adminStats: null, // Pack B: staff-only server aggregates (loadAdminStats)
     botSettings: { global: { enabled: true }, counters: {} },
     botSecrets: { geminiApiKey: '' },
-    botRunner: { live: true, active: false, lastCycleAt: 0, lastSummary: '' },
+    botRunner: { live: true, active: false, lastCycleAt: 0, lastSummary: '', lastDetails: [] },
     config: { maintenanceMode: false },
     aiUsage: { callsToday: 0, tokensToday: 0, updatedAt: 0 }
   };
@@ -669,7 +680,9 @@ export async function createPost({ text, image, visibility, groupId = '', pageId
 function notifyMentions(s, post, author) {
   for (const uname of extractMentions(post.text)) {
     const target = s.users.find((u) => u.username === uname);
-    if (target) {
+    // Never notify the author about their own mention (Audit fix #10;
+    // store.notify has the same guard, this direct write bypassed it).
+    if (target && target.id !== author.id) {
       s.notifications.unshift({ id: genId('n'), userId: target.id, type: 'mention', actorId: author.id, text: `${author.name} mentioned you in a post.`, postId: post.id, conversationId: '', read: false, createdAt: Date.now() });
     }
   }
@@ -679,7 +692,7 @@ async function fanOutMentions(text, author, postId) {
   for (const uname of extractMentions(text)) {
     const snap = await getDocs(query(collection(db, 'users'), where('username', '==', uname)));
     for (const d of snap.docs) {
-      await addDoc(collection(db, 'notifications'), { userId: d.id, type: 'mention', actorId: author.id, text: `${author.name} mentioned you in a post.`, postId, conversationId: '', read: false, createdAt: Date.now() });
+      await createNotification({ userId: d.id, type: 'mention', actorId: author.id, text: `${author.name} mentioned you in a post.`, postId, conversationId: '', read: false, createdAt: Date.now() });
     }
   }
 }
@@ -707,7 +720,7 @@ export async function toggleLike(postId) {
     try {
       await updateDoc(doc(db, 'posts', postId), { likes: has ? arrayRemove(user.id) : arrayUnion(user.id) });
     } catch (err) { patchRemotePost(postId, undoLike); throw err; }
-    if (!has && post) await addDoc(collection(db, 'notifications'), { userId: post.authorId, type: 'like', actorId: user.id, text: `${user.name} liked your post.`, postId, conversationId: '', read: false, createdAt: Date.now() });
+    if (!has && post) await createNotification({ userId: post.authorId, type: 'like', actorId: user.id, text: `${user.name} liked your post.`, postId, conversationId: '', read: false, createdAt: Date.now() });
     return;
   }
   mutate((s) => {
@@ -858,7 +871,7 @@ export async function addComment(postId, text, parentCommentId = '') {
     try {
       await updateDoc(doc(db, 'posts', postId), { comments });
     } catch (err) { patchRemotePost(postId, (p) => { p.comments = prevComments; }); throw err; }
-    if (post) await addDoc(collection(db, 'notifications'), { userId: post.authorId, type: parentCommentId ? 'reply' : 'comment', actorId: user.id, text: `${user.name} ${parentCommentId ? 'replied to a comment' : 'commented on your post.'}`, postId, conversationId: '', read: false, createdAt: Date.now() });
+    if (post) await createNotification({ userId: post.authorId, type: parentCommentId ? 'reply' : 'comment', actorId: user.id, text: `${user.name} ${parentCommentId ? 'replied to a comment' : 'commented on your post.'}`, postId, conversationId: '', read: false, createdAt: Date.now() });
     return comment;
   }
   mutate((s) => {
@@ -1042,7 +1055,7 @@ export async function toggleGroupMembership(groupId) {
     const request = { groupId, groupOwnerId: group.createdBy, userId: user.id, status: 'pending', createdAt: Date.now() };
     if (firebaseReady) {
       await setDoc(doc(db, 'groupRequests', requestId), request);
-      await addDoc(collection(db, 'notifications'), { userId: group.createdBy, type: 'group_request', actorId: user.id, text: `${user.name} asked to join your private group "${group.name}".`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
+      await createNotification({ userId: group.createdBy, type: 'group_request', actorId: user.id, text: `${user.name} asked to join your private group "${group.name}".`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
       return 'requested';
     }
     mutate((s) => {
@@ -1054,7 +1067,7 @@ export async function toggleGroupMembership(groupId) {
   }
   if (firebaseReady) {
     await updateDoc(doc(db, 'groups', groupId), { members: isMember ? arrayRemove(user.id) : arrayUnion(user.id) });
-    if (!isMember) await addDoc(collection(db, 'notifications'), { userId: group.createdBy, type: 'group_join', actorId: user.id, text: `${user.name} joined your group "${group.name}".`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
+    if (!isMember) await createNotification({ userId: group.createdBy, type: 'group_join', actorId: user.id, text: `${user.name} joined your group "${group.name}".`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
     return isMember ? 'left' : 'joined';
   }
   let result = 'left';
@@ -1083,7 +1096,7 @@ export async function respondGroupRequest(requestId, approve) {
   if (firebaseReady) {
     if (approve) await updateDoc(doc(db, 'groups', group.id), { members: arrayUnion(request.userId) });
     await updateDoc(doc(db, 'groupRequests', requestId), { status });
-    await addDoc(collection(db, 'notifications'), { userId: request.userId, type: 'group_request_result', actorId: user.id, text: approve ? `Your request to join "${group.name}" was approved.` : `Your request to join "${group.name}" was declined.`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
+    await createNotification({ userId: request.userId, type: 'group_request_result', actorId: user.id, text: approve ? `Your request to join "${group.name}" was approved.` : `Your request to join "${group.name}" was declined.`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
     return status;
   }
   mutate((s) => {
@@ -1160,7 +1173,7 @@ export async function toggleFollowPage(pageId) {
   const following = (page.followers || []).includes(user.id);
   if (firebaseReady) {
     await updateDoc(doc(db, 'pages', pageId), { followers: following ? arrayRemove(user.id) : arrayUnion(user.id) });
-    if (!following) await addDoc(collection(db, 'notifications'), { userId: page.ownerId, type: 'page_follow', actorId: user.id, text: `${user.name} started following your page "${page.name}".`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
+    if (!following) await createNotification({ userId: page.ownerId, type: 'page_follow', actorId: user.id, text: `${user.name} started following your page "${page.name}".`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
     return !following;
   }
   let nowFollowing = false;
@@ -1236,7 +1249,7 @@ export async function toggleEventRsvp(eventId, kind) {
   if (firebaseReady) {
     await updateDoc(doc(db, 'events', eventId), next);
     if (!active && event.createdBy !== user.id) {
-      await addDoc(collection(db, 'notifications'), { userId: event.createdBy, type: 'event_rsvp', actorId: user.id, text: `${user.name} is ${kind === 'going' ? 'going to' : 'interested in'} your event "${event.title}".`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
+      await createNotification({ userId: event.createdBy, type: 'event_rsvp', actorId: user.id, text: `${user.name} is ${kind === 'going' ? 'going to' : 'interested in'} your event "${event.title}".`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
     }
     return !active;
   }
@@ -1313,7 +1326,7 @@ export async function sendFriendRequest(toId) {
     // Deterministic doc id ({from}_{to}) so firestore.rules can verify a
     // friendship with a single exists() check for friends-only posts.
     await setDoc(doc(db, 'friendships', `${user.id}_${toId}`), { from: user.id, to: toId, status: 'pending', createdAt: Date.now() });
-    await addDoc(collection(db, 'notifications'), { userId: toId, type: 'friend_request', actorId: user.id, text: `${user.name} sent you a friend request.`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
+    await createNotification({ userId: toId, type: 'friend_request', actorId: user.id, text: `${user.name} sent you a friend request.`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
     return;
   }
   mutate((s) => {
@@ -1405,16 +1418,53 @@ export async function toggleCloseFriend(friendId) {
 // -------------------------------------------------------------------------
 export async function openConversation(otherId) {
   const user = me(); if (!user) throw new Error('Sign in first.');
-  const existing = data().conversations.find((c) => !c.isGroup && c.participants.includes(user.id) && c.participants.includes(otherId) && c.participants.length === 2);
+  // The pair test is a SET test (exactly the two of us, either stored
+  // order, never a group) — the same predicate for the local mirror,
+  // the live query below and demo state.
+  const isPair = (c) => Boolean(c) && !c.isGroup
+    && (c.participants || []).length === 2
+    && c.participants.includes(user.id) && c.participants.includes(otherId);
+  const existing = data().conversations.find(isPair);
   if (existing) return existing;
   const conv = { participants: [user.id, otherId], createdAt: Date.now() };
   if (firebaseReady) {
+    // Idempotent get-or-create (Audit fix #2): the local mirror alone
+    // is NOT a safe existence check in live mode — it only holds what
+    // the listener has delivered so far, so opening a chat before the
+    // first snapshot (or right after creating one in another tab, or
+    // when the other side created the thread first) minted a SECOND
+    // conversation doc for the same pair. Ask Firestore directly:
+    // every conversation I belong to, filtered by the pair predicate.
+    const snap = await getDocs(query(collection(db, 'conversations'), where('participants', 'array-contains', user.id)));
+    const found = snap.docs
+      .map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) }))
+      .find(isPair);
+    if (found) {
+      mirrorConversation(found);
+      return found;
+    }
     const ref = await addDoc(collection(db, 'conversations'), conv);
-    return { id: ref.id, ...conv };
+    const created = { id: ref.id, ...conv };
+    // Mirror it at once: until the listener delivers the server copy,
+    // a second open (double-tap, another entry point) must find this
+    // conversation locally instead of creating a duplicate.
+    mirrorConversation(created);
+    return created;
   }
   const full = { id: genId('conv'), ...conv };
   mutate((s) => { s.conversations.push(full); });
   return full;
+}
+
+// Insert a conversation into the live mirror if it is not there yet
+// (openConversation's get-or-create; the snapshot listener replaces
+// the mirror wholesale when it delivers, so this only bridges the
+// gap until then). No-op outside live mode.
+function mirrorConversation(conv) {
+  if (!firebaseReady || !remote || !conv?.id) return;
+  if (remote.conversations.some((c) => c.id === conv.id)) return;
+  remote.conversations = [...remote.conversations, conv];
+  emitData();
 }
 
 // Create a GROUP conversation (3+ participants including the creator).
@@ -1461,7 +1511,7 @@ export async function sendMessage(conversationId, { text, image, audio = '', rep
   if (firebaseReady) {
     const ref = await addDoc(collection(db, 'messages'), msg);
     for (const other of others) {
-      await addDoc(collection(db, 'notifications'), { userId: other, type: 'message', actorId: user.id, text: noteText, postId: '', conversationId, read: false, createdAt: Date.now() });
+      await createNotification({ userId: other, type: 'message', actorId: user.id, text: noteText, postId: '', conversationId, read: false, createdAt: Date.now() });
     }
     return { id: ref.id, ...msg };
   }
@@ -1800,7 +1850,7 @@ async function sendModerationWarning(userId, actor, reason) {
     ? `A moderator warned you about a community-guideline violation: ${reason}`
     : 'A moderator warned you about a community-guideline violation. Please review the community guidelines.';
   if (firebaseReady) {
-    await addDoc(collection(db, 'notifications'), { userId, type: 'warning', actorId: actor.id, text, postId: '', conversationId: '', read: false, createdAt: Date.now() });
+    await createNotification({ userId, type: 'warning', actorId: actor.id, text, postId: '', conversationId: '', read: false, createdAt: Date.now() });
     return;
   }
   notify(userId, 'warning', actor.id, text);
@@ -2504,44 +2554,73 @@ export async function runLiveBotCycle() {
     await loadBotSecrets(); // make sure the Gemini key is in memory
     const { day, counters } = await loadLiveBotCounters();
     let actions = 0;
+    const details = [];
     for (const bot of data().bots) {
-      if (!bot.active) { results.push({ bot: bot.name, action: 'none', reason: 'bot is deactivated' }); continue; }
       const c = { ...emptyBotCounters(), ...(counters[bot.id] || {}) };
+      // Reply-target discovery runs for EVERY bot, BEFORE the active
+      // and daily-cap gates (Audit fix #1): those gates used to skip
+      // discovery entirely, so a bot sitting on unanswered DMs still
+      // reported a clean "no actions" — the panel could not tell a
+      // quiet bot from a blocked one, and the per-bot reason described
+      // only the autonomous decision. Discovery is read-only; the
+      // gates below still decide whether a reply may be SENT (the
+      // designed daily cap is never silently raised).
+      let targets = [];
+      let targetError = '';
+      try { targets = await findLiveReplyTargets(bot); } catch (err) { targetError = String(err?.message || err); }
+      const dmDetail = {
+        bot: bot.name,
+        pendingDMs: targets.length,
+        lastUnansweredAt: targets.length ? Math.max(...targets.map((t) => t.lastMessage?.createdAt || 0)) : 0,
+        note: ''
+      };
+      details.push(dmDetail);
+      if (!bot.active) {
+        dmDetail.note = targets.length
+          ? `bot is deactivated — ${targets.length} unanswered DM(s) waiting`
+          : 'bot is deactivated';
+        results.push({ bot: bot.name, action: 'none', reason: dmDetail.note, pendingDMs: targets.length });
+        continue;
+      }
       counters[bot.id] = c;
       try {
         try { await ensureBotUserDoc(bot); } catch { /* rules may lag a deploy — actions below will surface real errors */ }
         const memories = await loadLiveBotMemories(bot.id);
         let acted = false;
+        let dmNote = targetError ? `could not scan DMs: ${targetError}` : '';
 
         // --- chat reply (does not consume the min-interval pacing;
         // the messages/day counter is its gate) ---
-        if (c.messagesToday < bot.limits.messagesPerDay) {
-          const targets = await findLiveReplyTargets(bot);
-          if (targets.length) {
-            const target = targets[0];
-            // Re-check the latest message right before writing, so two
-            // cycles (or a fast human) never produce a double reply.
-            const fresh = await latestLiveMessage(target.conversationId);
-            if (fresh && fresh.senderId === target.humanId) {
-              const gen = await generateBotText(bot, memories, { kind: 'message', text: fresh.text }, templateBotMessageReply(bot, fresh.text));
-              await addDoc(collection(db, 'messages'), {
-                conversationId: target.conversationId, participants: [...target.participants],
-                senderId: bot.id, text: gen.text, image: '', audio: '',
-                createdAt: Date.now(), status: 'sent', readBy: [bot.id]
-              });
-              await addDoc(collection(db, 'notifications'), {
-                userId: target.humanId, type: 'message', actorId: bot.id,
-                text: `${bot.name} sent you a message.`, postId: '', conversationId: target.conversationId,
-                read: false, createdAt: Date.now()
-              });
-              const updatedMemories = memoryFromConversation(memories, fresh.text, gen.text);
-              try { await setDoc(doc(db, 'botMemories', bot.id), { botId: bot.id, items: updatedMemories }); } catch { /* memory is best-effort */ }
-              c.messagesToday += 1;
-              actions += 1;
-              acted = true;
-              results.push({ bot: bot.name, action: 'message' });
-            }
+        if (targets.length && c.messagesToday >= bot.limits.messagesPerDay) {
+          dmNote = `${targets.length} unanswered DM(s) — daily message limit reached (${c.messagesToday}/${bot.limits.messagesPerDay})`;
+        } else if (targets.length) {
+          const target = targets[0];
+          // Re-check the latest message right before writing, so two
+          // cycles (or a fast human) never produce a double reply.
+          const fresh = await latestLiveMessage(target.conversationId);
+          if (fresh && fresh.senderId === target.humanId) {
+            const gen = await generateBotText(bot, memories, { kind: 'message', text: fresh.text }, templateBotMessageReply(bot, fresh.text));
+            await addDoc(collection(db, 'messages'), {
+              conversationId: target.conversationId, participants: [...target.participants],
+              senderId: bot.id, text: gen.text, image: '', audio: '',
+              createdAt: Date.now(), status: 'sent', readBy: [bot.id]
+            });
+            await createNotification({
+              userId: target.humanId, type: 'message', actorId: bot.id,
+              text: `${bot.name} sent you a message.`, postId: '', conversationId: target.conversationId,
+              read: false, createdAt: Date.now()
+            });
+            const updatedMemories = memoryFromConversation(memories, fresh.text, gen.text);
+            try { await setDoc(doc(db, 'botMemories', bot.id), { botId: bot.id, items: updatedMemories }); } catch { /* memory is best-effort */ }
+            c.messagesToday += 1;
+            actions += 1;
+            acted = true;
+            results.push({ bot: bot.name, action: 'message' });
           }
+        }
+        if (dmNote) {
+          dmDetail.note = dmNote;
+          results.push({ bot: bot.name, action: 'none', reason: dmNote, pendingDMs: targets.length });
         }
 
         // --- autonomous action (post / comment / like) ---
@@ -2578,7 +2657,7 @@ export async function runLiveBotCycle() {
               const freshComments = postSnap.exists() ? (postSnap.data().comments || []) : (target.comments || []);
               const comment = { id: genId('c'), authorId: bot.id, text: gen.text, createdAt: Date.now(), replies: [] };
               await updateDoc(doc(db, 'posts', target.id), { comments: [...freshComments, comment] });
-              await addDoc(collection(db, 'notifications'), {
+              await createNotification({
                 userId: target.authorId, type: 'comment', actorId: bot.id,
                 text: `${bot.name} (AI Bot) commented on your post.`, postId: target.id, conversationId: '',
                 read: false, createdAt: Date.now()
@@ -2601,7 +2680,7 @@ export async function runLiveBotCycle() {
             results.push({ bot: bot.name, action: 'like' });
           }
         }
-        if (!acted) results.push({ bot: bot.name, action: 'none', reason: decision.action === 'message' ? 'no unreplied conversations' : decision.reason });
+        if (!acted && !dmNote) results.push({ bot: bot.name, action: 'none', reason: decision.action === 'message' ? 'no unreplied conversations' : decision.reason });
       } catch (err) {
         results.push({ bot: bot.name, action: 'error', reason: String(err?.message || err) });
       }
@@ -2609,8 +2688,14 @@ export async function runLiveBotCycle() {
     await saveLiveBotCounters(day, counters);
     if (remote) { remote.aiUsage.callsToday += actions; remote.aiUsage.updatedAt = Date.now(); }
     const geminiFailure = getLastGeminiFailure();
-    const summary = (results.filter((r) => r.action !== 'none').map((r) => (r.action === 'error' ? `${r.bot} → error: ${r.reason}` : `${r.bot} → ${r.action}`)).join(', ') || 'no actions') + (geminiFailure ? ` · Gemini failed: ${geminiFailure} (template fallback used)` : '');
-    setLiveRunnerState({ lastCycleAt: Date.now(), lastSummary: summary });
+    // Blocked-DM notes (pendingDMs > 0) are part of the summary even
+    // though they are 'none' results: "no actions" must never hide
+    // unanswered DMs (Audit fix #1).
+    const dmNotes = results.filter((r) => r.pendingDMs > 0).map((r) => `${r.bot}: ${r.reason}`);
+    const summary = (results.filter((r) => r.action !== 'none').map((r) => (r.action === 'error' ? `${r.bot} → error: ${r.reason}` : `${r.bot} → ${r.action}`)).join(', ') || 'no actions')
+      + (dmNotes.length ? ` · ${dmNotes.join(' · ')}` : '')
+      + (geminiFailure ? ` · Gemini failed: ${geminiFailure} (template fallback used)` : '');
+    setLiveRunnerState({ lastCycleAt: Date.now(), lastSummary: summary, lastDetails: details });
     return { ran: true, results };
   } finally {
     botCycleInFlight = false;

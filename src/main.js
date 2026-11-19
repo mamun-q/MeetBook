@@ -4,7 +4,7 @@ import * as api from './api.js';
 import { firebaseReady, firebaseConfig } from './firebase.js';
 import { subscribe as storeSubscribe, mutate as demoMutate } from './store.js';
 import { setLocale, t } from './i18n.js';
-import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError, messageSnippet, focusMovesWithinForm } from './utils.js';
+import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError, messageSnippet, focusMovesWithinForm, rsvpToastKey } from './utils.js';
 import { toast, clearToasts, openModal, closeModal, confirmModal, adminActionModal, avatarHtml } from './components.js';
 import * as V from './views.js';
 
@@ -106,9 +106,9 @@ function headerHtml(d, user) {
     <a class="brand" href="#/">${escapeHtml(d.config?.platformName || 'MeetBook')}</a>
     <form id="search-form" class="search-box" role="search">
       <input name="q" placeholder="${t('searchPlaceholder')}" autocomplete="off" />
-      <button class="btn btn-primary btn-sm" type="submit">Search</button>
+      <button class="btn btn-primary btn-sm" type="submit">${t('search')}</button>
     </form>
-    <a class="icon-btn mobile-search" href="#/search" title="Search" aria-label="Search">🔎</a>
+    <a class="icon-btn mobile-search" href="#/search" title="${t('search')}" aria-label="${t('search')}">🔎</a>
     <nav class="topnav">
       ${navItem('#/', '🏠', t('home'))}
       ${navItem('#/friends', '👥', t('friends'))}
@@ -117,7 +117,7 @@ function headerHtml(d, user) {
       ${navItem('#/pages', '📄', t('pages'))}
       ${navItem('#/messages', '💬', t('messages'), um)}
       ${navItem('#/notifications', '🔔', t('notifications'), un)}
-      ${isStaff(user) ? navItem('#/admin', '🛡️', 'Admin') : ''}${isAdminRole(user) ? navItem('#/admin/bots', '🤖', 'AI Bots') : ''}
+      ${isStaff(user) ? navItem('#/admin', '🛡️', t('admin')) : ''}${isAdminRole(user) ? navItem('#/admin/bots', '🤖', t('bots')) : ''}
       <button class="icon-btn" data-act="toggle-theme" title="Theme">${prefs.theme === 'dark' ? '☀️' : '🌙'}</button>
       ${deferredInstallPrompt ? '<button class="btn btn-ghost btn-sm install-btn" data-act="install-app">⬇️ Install</button>' : ''}
       <div class="avatar-wrap">
@@ -544,7 +544,7 @@ function softRender() {
 // Realtime: demo store subscription + Firestore mirror events.
 storeSubscribe(() => softRender());
 document.addEventListener('meetbook:data', () => softRender());
-window.addEventListener('hashchange', () => { feedPage = 1; clearToasts(); replyTarget = null; stopTyping(); render(); window.scrollTo({ top: 0 }); });
+window.addEventListener('hashchange', () => { feedPage = 1; clearToasts(1500); replyTarget = null; stopTyping(); render(); window.scrollTo({ top: 0 }); });
 
 // Infinite scroll for the feed (the Load more button is the fallback).
 window.addEventListener('scroll', () => {
@@ -671,7 +671,15 @@ document.addEventListener('click', async (e) => {
     }
     case 'emoji-toggle': { const panel = document.getElementById('emoji-panel'); panel?.classList.toggle('hidden'); if (panel && !panel.classList.contains('hidden')) scrollThread(); break; }
     // ---- Chat Pack: conversation info / themes / reply / reactions / pins
-    case 'conv-info': document.getElementById('conv-info')?.classList.toggle('hidden'); break;
+    case 'conv-info': {
+      // The open state lives in uiState (keyed by conversation) so a
+      // re-render — above all picking a chat theme, Audit fix #5 —
+      // restores the panel instead of rebuilding it closed.
+      const convId = document.getElementById('message-form')?.dataset.conv || '';
+      V.uiState.convInfoFor = V.uiState.convInfoFor === convId ? '' : convId;
+      document.getElementById('conv-info')?.classList.toggle('hidden');
+      break;
+    }
     case 'set-theme': await handle(api.setConversationTheme(actEl.dataset.conv, actEl.dataset.theme)); break;
     case 'reply-message': {
       const msg = d.messages.find((m) => m.id === actEl.dataset.id);
@@ -790,7 +798,10 @@ document.addEventListener('click', async (e) => {
     case 'rsvp': {
       const kind = actEl.dataset.kind;
       const res = await handle(api.toggleEventRsvp(actEl.dataset.id, kind));
-      if (res) toast(!res.active ? t('rsvpRemoved') : kind === 'going' ? t('rsvpGoing') : t('rsvpInterested'), 'success');
+      // api.toggleEventRsvp resolves a boolean (true = RSVP now
+      // active) or null when the event is gone — the toast must say
+      // what actually happened (Audit fix #4).
+      if (res === true || res === false) toast(t(rsvpToastKey(res, kind)), 'success');
       break;
     }
     case 'delete-review': if (await confirmModal('Delete your review?', 'Your rating and review text will be removed.')) await handle(api.deleteReview(actEl.dataset.id), 'Review deleted.'); break;

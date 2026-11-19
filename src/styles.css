@@ -218,7 +218,7 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 .action-btn:active { transform: scale(.95); }
 .action-btn.active { color: var(--danger); }
 .reaction-bar { display: flex; gap: 2px; }
-.reaction-btn { background: none; border: none; cursor: pointer; font-size: 1.05rem; padding: 4px; border-radius: 50%; transition: transform .12s ease, background .12s ease; }
+.reaction-btn { background: none; border: none; cursor: pointer; font-size: 1.05rem; padding: 8px; min-width: 36px; min-height: 36px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; transition: transform .12s ease, background .12s ease; }
 .reaction-btn:hover { transform: scale(1.22); }
 .reaction-btn:active { transform: scale(1.35); }
 .reaction-btn.active { background: var(--surface-2); transform: scale(1.15); }
@@ -261,7 +261,7 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
    paints above the meta — it sits at the cover's bottom-right, away
    from the avatar and the name block.) */
 .profile-meta { display: flex; gap: 16px; align-items: flex-start; padding: 12px 18px 18px; flex-wrap: wrap; position: relative; z-index: 1; }
-.profile-meta .avatar, .profile-meta .avatar-fallback { border: 4px solid var(--surface); width: 110px; height: 110px; font-size: 2rem; margin-top: -54px; position: relative; z-index: 1; flex: none; box-shadow: 0 6px 18px rgba(16,24,40,.22); }
+.profile-meta > .avatar, .profile-meta > .avatar-fallback { border: 4px solid var(--surface); width: 110px; height: 110px; font-size: 2rem; margin-top: -54px; position: relative; z-index: 1; flex: none; box-shadow: 0 6px 18px rgba(16,24,40,.22); }
 .nickname { font-weight: 400; color: var(--muted); font-size: 1.15rem; }
 .profile-cols { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 14px; align-items: start; }
 /* Two-column profiles get a wider wrap (Facebook-style); single-column
@@ -504,7 +504,7 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
   .messenger.has-open .thread-back { display: inline-flex; align-items: center; justify-content: center; min-width: 40px; min-height: 40px; font-size: 1.25rem; color: var(--text); text-decoration: none; }
   .thread-body { max-height: calc(100vh - 250px); }
 
-  .profile-meta .avatar, .profile-meta .avatar-fallback { margin-top: -42px; }
+  .profile-meta > .avatar, .profile-meta > .avatar-fallback { margin-top: -42px; }
   .profile-meta .event-date { margin-top: -38px; }
   .profile-cols { grid-template-columns: minmax(0, 1fr); }
   .story-stage-text p { font-size: 1.3rem; }

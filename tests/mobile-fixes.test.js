@@ -237,11 +237,18 @@ describe('profile / page headers', () => {
     expect(html).toContain('Photos');
     expect(html).toContain('Friends');
   });
-  it('renders no strips for a user with no photo posts and no friends (data-dependent, not hidden)', () => {
+  it('renders Photos and Friends strips with empty states for a user with no photo posts and no friends (Audit fix #7)', () => {
     const emptyUser = { ...friend, id: 'u_empty', name: 'Empty User', username: 'empty' };
     const dd = { ...d, users: [...d.users, emptyUser], posts: d.posts.filter((p) => p.authorId !== 'u_empty') };
     const html = V.profileView(dd, me, 'u_empty');
-    expect(html).not.toContain('strip-card');
+    // The strips always render now — with clean empty states instead
+    // of vanishing — so the profile layout is consistent.
+    expect(html).toContain('strip-card');
+    expect(html).toContain('Photos');
+    expect(html).toContain('Friends');
+    expect(html).toContain('No photos yet.');
+    expect(html).toContain('No friends yet.');
+    expect(html).not.toContain('photos-grid');
   });
   it('page header does not append a Page badge to the page name', () => {
     const html = V.pageView(d, me, 'pg1');
