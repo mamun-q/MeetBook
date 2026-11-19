@@ -410,7 +410,7 @@ export function messagesView(d, meUser, activeConvId = '') {
     })
     .sort((a, b) => (b.last?.createdAt || b.conv.createdAt) - (a.last?.createdAt || a.conv.createdAt));
   const active = myConvs.find((x) => x.conv.id === activeConvId) || myConvs[0];
-  return `<div class="messenger card">
+  return `<div class="messenger card ${activeConvId ? 'has-open' : ''}">
     <div class="conv-list">
       <h3>💬 ${t('messages')}</h3>
       ${myConvs.map((x) => `<button class="conv-item ${active?.conv.id === x.conv.id ? 'active' : ''}" data-act="open-conv" data-id="${x.conv.id}">
@@ -421,7 +421,7 @@ export function messagesView(d, meUser, activeConvId = '') {
     </div>
     <div class="conv-thread">
       ${active ? `
-      <header class="thread-head">${avatarHtml(active.other, 40)}<div><b>${escapeHtml(active.other?.name || '')}</b><br/><span class="muted small">${active.other?.online ? t('online') : t('offline')}${active.other?.isBot ? ' · AI Bot' : ''}</span></div>
+      <header class="thread-head"><a class="thread-back" href="#/messages" aria-label="Back to conversations">←</a>${avatarHtml(active.other, 40)}<div><b>${escapeHtml(active.other?.name || '')}</b><br/><span class="muted small">${active.other?.online ? t('online') : t('offline')}${active.other?.isBot ? ' · AI Bot' : ''}</span></div>
       <span class="spacer"></span><button class="btn btn-ghost btn-sm" data-act="report-user" data-id="${active.other?.id}">🚩</button></header>
       <div class="thread-body" id="thread-body">
         ${active.msgs.map((m) => messageHtml(m, meUser, byId)).join('') || '<p class="muted center">No messages yet. Say hello 👋</p>'}
@@ -472,6 +472,10 @@ export function searchView(d, meUser, queryText) {
   const ctx = viewCtx(d, meUser);
   return `<div class="page">
     <h2>🔎 Search ${q ? `for “${escapeHtml(queryText)}”` : ''}</h2>
+    <form id="search-page-form" class="search-box search-page-form" role="search">
+      <input name="q" placeholder="${t('searchPlaceholder')}" value="${escapeHtml(queryText || '')}" autocomplete="off" />
+      <button class="btn btn-primary" type="submit">Search</button>
+    </form>
     <h3>People</h3>
     <div class="grid-people">${users.map((u) => `<div class="card person-card">${avatarHtml(u, 56)}<a href="#/profile/${u.id}"><b>${escapeHtml(u.name)}</b></a><span class="muted small">@${escapeHtml(u.username)}</span>${u.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''}</div>`).join('') || '<p class="muted">No people matched.</p>'}</div>
     <h3>Posts</h3>
@@ -501,6 +505,7 @@ export function settingsView(d, meUser, prefs) {
       <div class="row gap wrap">
         <button class="btn btn-ghost" data-act="edit-profile">✏️ ${t('edit')} profile</button>
         <button class="btn btn-ghost" data-act="change-password">Change password / reset</button>
+        <button class="btn btn-ghost settings-logout" data-act="logout">🚪 ${t('logout')}</button>
         <button class="btn btn-danger" data-act="delete-account">${t('delete')} account</button>
       </div>
     </div>

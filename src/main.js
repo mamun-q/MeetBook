@@ -53,6 +53,7 @@ function headerHtml(d, user) {
       <input name="q" placeholder="${t('searchPlaceholder')}" autocomplete="off" />
       <button class="btn btn-primary btn-sm" type="submit">Search</button>
     </form>
+    <a class="icon-btn mobile-search" href="#/search" title="Search" aria-label="Search">🔎</a>
     <nav class="topnav">
       <a href="#/" title="${t('home')}">🏠</a>
       <a href="#/friends" title="${t('friends')}">👥</a>
@@ -62,11 +63,29 @@ function headerHtml(d, user) {
       <a href="#/notifications" title="${t('notifications')}">🔔${un ? `<span class="nav-badge">${un}</span>` : ''}</a>
       ${user.role === 'admin' ? '<a href="#/admin" title="Admin">🛡️</a><a href="#/bots" title="AI Bots">🤖</a>' : ''}
       <button class="icon-btn" data-act="toggle-theme" title="Theme">${prefs.theme === 'dark' ? '☀️' : '🌙'}</button>
-      ${deferredInstallPrompt ? '<button class="btn btn-ghost btn-sm" data-act="install-app">⬇️ Install</button>' : ''}
-      <a href="#/profile/${user.id}" class="row gap-sm">${avatarHtml(user, 34)}</a>
-      <button class="btn btn-ghost btn-sm" data-act="logout">${t('logout')}</button>
+      ${deferredInstallPrompt ? '<button class="btn btn-ghost btn-sm install-btn" data-act="install-app">⬇️ Install</button>' : ''}
+      <a href="#/profile/${user.id}" class="row gap-sm topnav-avatar">${avatarHtml(user, 34)}</a>
+      <button class="btn btn-ghost btn-sm logout-btn" data-act="logout">${t('logout')}</button>
     </nav>
   </header>`;
+}
+
+// Mobile-only bottom navigation (CSS hides it above 720px, where the topbar
+// and left rail already provide navigation). Mirrors the topnav's icons,
+// badges and destinations, with a text label under each icon.
+function bottomNavHtml(d, user, route, seg) {
+  const un = unreadCount(d, user);
+  const um = unreadMsgCount(d, user);
+  const item = (href, icon, label, active, badge = 0) => `<a class="bottom-nav-item ${active ? 'active' : ''}" href="${href}">${icon}${badge ? `<span class="nav-badge">${badge}</span>` : ''}<span class="bottom-nav-label">${label}</span></a>`;
+  return `<nav class="bottom-nav" aria-label="Primary">
+    ${item('#/', '🏠', t('home'), route === '')}
+    ${item('#/friends', '👥', t('friends'), route === 'friends')}
+    ${item('#/groups', '🏘️', t('groups'), route === 'groups' || route === 'group')}
+    ${item('#/pages', '📄', t('pages'), route === 'pages' || route === 'page')}
+    ${item('#/messages', '💬', t('messages'), route === 'messages', um)}
+    ${item('#/notifications', '🔔', t('notifications'), route === 'notifications', un)}
+    ${item(`#/profile/${user.id}`, avatarHtml(user, 24), t('profile'), route === 'profile' && seg[1] === user.id)}
+  </nav>`;
 }
 
 export function render() {
@@ -112,7 +131,8 @@ export function render() {
     ${maintenance ? '<div class="maintenance-banner">🛠️ MeetBook is briefly under maintenance. You can browse, but changes may be paused.</div>' : ''}
     ${!firebaseReady ? `<div class="demo-banner">🧪 ${t('demoMode')} — sign in with a demo account or create one. <button class="link-btn" data-act="dismiss-demo">Dismiss</button></div>` : ''}
     <div class="shell">${body}</div>
-    <footer class="footer muted small">MeetBook · People + clearly-labelled AI bots · <a href="#/help">Help</a> · <a href="#/terms">Terms</a> · <a href="#/privacy">Privacy</a> · <a href="#/guidelines">Guidelines</a></footer>`;
+    <footer class="footer muted small">MeetBook · People + clearly-labelled AI bots · <a href="#/help">Help</a> · <a href="#/terms">Terms</a> · <a href="#/privacy">Privacy</a> · <a href="#/guidelines">Guidelines</a></footer>
+    ${bottomNavHtml(d, user, route, seg)}`;
 }
 
 function scrollThread() {
@@ -296,7 +316,7 @@ document.addEventListener('submit', async (e) => {
   const fd = new FormData(form);
   const user = me();
 
-  if (form.id === 'search-form') {
+  if (form.id === 'search-form' || form.id === 'search-page-form') {
     const q = String(fd.get('q') || '').trim();
     location.hash = `#/search?q=${encodeURIComponent(q)}`;
     return;
