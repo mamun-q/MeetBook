@@ -7,7 +7,7 @@ import {
   getState, mutate, findUser, userByUsername, friendIdsOf, blockedIdsOf, notify, resetDemo
 } from './store.js';
 import { firebaseReady, auth, db, storage, googleProvider } from './firebase.js';
-import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists } from './utils.js';
+import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme } from './utils.js';
 import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay } from './botLogic.js';
 import { generateGeminiText, canAccessBotSecrets, GEMINI_MODEL, botModel, getLastGeminiFailure, resetLastGeminiFailure } from './gemini.js';
 
@@ -58,6 +58,27 @@ function patchRemotePost(postId, apply) {
   apply(post);
   emitData();
   return post;
+}
+
+// Same optimistic-mirror pattern for messages and conversations (Chat
+// Pack: reactions, pins, themes, typing heartbeats) — patch locally so
+// the UI responds instantly, then let the snapshot listener confirm.
+function patchRemoteMessage(messageId, apply) {
+  if (!firebaseReady || !remote) return null;
+  const msg = remote.messages.find((m) => m.id === messageId);
+  if (!msg) return null;
+  apply(msg);
+  emitData();
+  return msg;
+}
+
+function patchRemoteConversation(convId, apply) {
+  if (!firebaseReady || !remote) return null;
+  const conv = remote.conversations.find((c) => c.id === convId);
+  if (!conv) return null;
+  apply(conv);
+  emitData();
+  return conv;
 }
 
 export function data() {
@@ -1417,7 +1438,7 @@ export async function createGroupConversation({ title, memberIds }) {
   return full;
 }
 
-export async function sendMessage(conversationId, { text, image, audio = '' }) {
+export async function sendMessage(conversationId, { text, image, audio = '', replyToId = '' }) {
   const user = me(); if (!user) throw new Error('Sign in first.');
   const conv = data().conversations.find((c) => c.id === conversationId);
   // Participants are DENORMALIZED onto the message: the messages read
@@ -1427,6 +1448,14 @@ export async function sendMessage(conversationId, { text, image, audio = '' }) {
   // capped at ~60s / ~700KB by the composer before it gets here).
   const msg = { conversationId, participants: conv ? [...conv.participants] : [], senderId: user.id, text: String(text || '').trim(), image: image || '', audio: audio || '', createdAt: Date.now(), status: 'sent', readBy: [user.id] };
   if (!msg.text && !msg.image && !msg.audio) throw new Error('Message cannot be empty.');
+  // Reply/quote (Chat Pack): snapshot the quoted message onto the new
+  // one — its id, its author's name and a ≤120-char snippet — but only
+  // when the original really belongs to this conversation.
+  if (replyToId) {
+    const original = data().messages.find((m) => m.id === replyToId && m.conversationId === conversationId);
+    const snap = original ? replySnapshot(original, data().users.find((u) => u.id === original.senderId)?.name || '') : null;
+    if (snap) Object.assign(msg, snap);
+  }
   const others = (conv?.participants || []).filter((p) => p !== user.id);
   const noteText = msg.audio && !msg.text ? `${user.name} sent you a voice message.` : `${user.name} sent you a message.`;
   if (firebaseReady) {
@@ -1459,6 +1488,92 @@ export async function markConversationRead(conversationId) {
       }
     }
   });
+}
+
+// ------------------------------------------------------- Chat Pack (chat)
+// Typing heartbeat: conversations.typing is a { uid: epochMs } map. The
+// client refreshes its own entry while typing (throttled in main.js)
+// and clears it on send/blur; readers only honour entries younger than
+// TYPING_FRESH_MS (utils), so a vanished client stops "typing" within
+// seconds. Best-effort by design — a failed write is swallowed, never
+// surfaced over the conversation itself.
+export async function setTyping(conversationId, isTyping) {
+  const user = me(); if (!user) return;
+  const conv = data().conversations.find((c) => c.id === conversationId);
+  if (!conv || !conv.participants?.includes(user.id)) return;
+  const next = { ...(conv.typing || {}) };
+  if (isTyping) next[user.id] = Date.now(); else delete next[user.id];
+  if (firebaseReady) {
+    patchRemoteConversation(conversationId, (c) => { c.typing = next; });
+    try { await updateDoc(doc(db, 'conversations', conversationId), { typing: next }); } catch { /* heartbeat — best effort */ }
+    return;
+  }
+  mutate((s) => { const c = s.conversations.find((x) => x.id === conversationId); if (c) c.typing = next; });
+}
+
+// Message reactions (Chat Pack): toggle my uid in the message's
+// reactions[emoji] list. Optimistic in live mode with rollback, exactly
+// like toggleReaction for posts.
+export async function toggleMessageReaction(messageId, emoji) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const msg = data().messages.find((m) => m.id === messageId);
+  if (!msg) throw new Error('Message not found.');
+  const prev = msg.reactions ? structuredClone(msg.reactions) : null;
+  const next = toggleEmojiReaction(msg.reactions || {}, emoji, user.id);
+  if (firebaseReady) {
+    patchRemoteMessage(messageId, (m) => { m.reactions = next; });
+    try {
+      await updateDoc(doc(db, 'messages', messageId), { reactions: next });
+    } catch (err) {
+      if (prev) patchRemoteMessage(messageId, (m) => { m.reactions = prev; });
+      throw err;
+    }
+    return next;
+  }
+  mutate((s) => { const m = s.messages.find((x) => x.id === messageId); if (m) m.reactions = next; });
+  return next;
+}
+
+// Pin/unpin a message (Chat Pack): any participant may pin; the pin
+// carries who pinned it and when, so the pinned bar/list can order by
+// pinnedAt. Returns the new pinned state.
+export async function togglePinMessage(messageId) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const msg = data().messages.find((m) => m.id === messageId);
+  if (!msg) throw new Error('Message not found.');
+  const pinned = !msg.pinned;
+  const patch = pinned
+    ? { pinned: true, pinnedBy: user.id, pinnedAt: Date.now() }
+    : { pinned: false, pinnedBy: '', pinnedAt: 0 };
+  if (firebaseReady) {
+    const prev = { pinned: Boolean(msg.pinned), pinnedBy: msg.pinnedBy || '', pinnedAt: msg.pinnedAt || 0 };
+    patchRemoteMessage(messageId, (m) => Object.assign(m, patch));
+    try {
+      await updateDoc(doc(db, 'messages', messageId), patch);
+    } catch (err) {
+      patchRemoteMessage(messageId, (m) => Object.assign(m, prev));
+      throw err;
+    }
+    return pinned;
+  }
+  mutate((s) => { const m = s.messages.find((x) => x.id === messageId); if (m) Object.assign(m, patch); });
+  return pinned;
+}
+
+// Chat theme (Chat Pack): stored on the conversation doc so every
+// participant sees the same theme. Unknown ids resolve to 'default'.
+export async function setConversationTheme(conversationId, themeId) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const conv = data().conversations.find((c) => c.id === conversationId);
+  if (!conv || !conv.participants?.includes(user.id)) throw new Error('Conversation not found.');
+  const theme = chatTheme(themeId).id;
+  if (firebaseReady) {
+    patchRemoteConversation(conversationId, (c) => { c.theme = theme; });
+    await updateDoc(doc(db, 'conversations', conversationId), { theme });
+    return theme;
+  }
+  mutate((s) => { const c = s.conversations.find((x) => x.id === conversationId); if (c) c.theme = theme; });
+  return theme;
 }
 
 // -------------------------------------------------------------------------

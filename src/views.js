@@ -1,7 +1,7 @@
 // HTML generators for every route. Pure string builders: they read the shared
 // dataset (api.data()) and never touch the DOM directly — main.js renders
 // and binds events centrally.
-import { escapeHtml, timeAgo, canViewPost, canViewGroup, canViewGroupPost, isGroupMember, searchByName, truncate, paginate, groupStoriesByAuthor, canViewStory, storyBackgroundCss, STORY_BACKGROUNDS, memoriesFor, upcomingEvents, canViewEvent, averageRating, FEELINGS, plural, mutualFriendCount, isStaff, canModerate, isAdminRole, accountStatus, canManageUser, canChangeRole, ASSIGNABLE_ROLES, platformStats, analyticsSeries, spamSuspects, reportStatus, reportCategory, reportNeedsAttention, countPostComments, botConversationSummaries, recentClientErrors, collapseDuplicateNotifications, REPORT_CATEGORIES, REPORT_OUTCOMES } from './utils.js';
+import { escapeHtml, timeAgo, canViewPost, canViewGroup, canViewGroupPost, isGroupMember, searchByName, truncate, paginate, groupStoriesByAuthor, canViewStory, storyBackgroundCss, STORY_BACKGROUNDS, memoriesFor, upcomingEvents, canViewEvent, averageRating, FEELINGS, plural, mutualFriendCount, isStaff, canModerate, isAdminRole, accountStatus, canManageUser, canChangeRole, ASSIGNABLE_ROLES, platformStats, analyticsSeries, spamSuspects, reportStatus, reportCategory, reportNeedsAttention, countPostComments, botConversationSummaries, recentClientErrors, collapseDuplicateNotifications, REPORT_CATEGORIES, REPORT_OUTCOMES, typingUserIds, reactionChips, pinnedMessages, messageSnippet, chatTheme, CHAT_THEMES, MESSAGE_REACTIONS } from './utils.js';
 import { GEMINI_MODEL, botModel } from './gemini.js';
 import { t } from './i18n.js';
 import { avatarHtml, userNameHtml, postCardHtml, emptyState } from './components.js';
@@ -834,13 +834,27 @@ export function messagesView(d, meUser, activeConvId = '') {
     </div>
     <div class="conv-thread">
       ${active ? `
+      ${(() => { const theme = chatTheme(active.conv.theme); const pinned = pinnedMessages(active.msgs); const latestPinned = pinned[0]; return `
       <header class="thread-head"><a class="thread-back" href="#/messages" aria-label="Back to conversations">←</a>${avatarHtml(active.avatarUser, 40)}<div><b>${active.isGroup ? '👥 ' : ''}${escapeHtml(active.title)}</b><br/><span class="muted small">${active.isGroup ? `${active.conv.participants.length} ${t('members')}` : `${active.other?.online ? t('online') : t('offline')}${active.other?.isBot ? ' · AI Bot' : ''}`}</span></div>
-      ${active.isGroup ? '' : `<span class="spacer"></span><button class="btn btn-ghost btn-sm" data-act="report-user" data-id="${active.other?.id}">🚩</button>`}</header>
-      <div class="thread-body" id="thread-body">
+      <span class="spacer"></span><button type="button" class="btn btn-ghost btn-sm" data-act="conv-info" title="${t('conversationDetails')}" aria-label="${t('conversationDetails')}">ℹ️</button>${active.isGroup ? '' : `<button class="btn btn-ghost btn-sm" data-act="report-user" data-id="${active.other?.id}">🚩</button>`}</header>
+      ${latestPinned ? `<button type="button" class="pinned-bar" data-act="jump-message" data-id="${latestPinned.id}"><span class="pinned-bar-label">📌 ${t('pinnedMessage')}</span><span class="pinned-bar-text">${escapeHtml(messageSnippet(latestPinned, 90))}</span></button>` : ''}
+      <div id="conv-info" class="conv-info hidden">
+        <div class="conv-info-section"><h4>🎨 ${t('chatTheme')}</h4>
+          <div class="theme-swatches">${CHAT_THEMES.map((th) => `<button type="button" class="theme-swatch ${theme.id === th.id ? 'active' : ''}" data-act="set-theme" data-conv="${active.conv.id}" data-theme="${th.id}" title="${t(`theme_${th.id}`)}" aria-label="${t(`theme_${th.id}`)}" style="${th.gradient ? `background:${th.gradient};` : ''}">${th.id === 'default' ? '∅' : ''}</button>`).join('')}</div>
+          <p class="muted small">${t(`theme_${theme.id}`)}</p>
+        </div>
+        <div class="conv-info-section"><h4>📌 ${t('pinnedMessages')}</h4>
+          ${pinned.length ? pinned.map((m) => `<button type="button" class="pinned-item" data-act="jump-message" data-id="${m.id}"><b>${escapeHtml((byId[m.senderId]?.name || '').split(' ')[0])}</b><span class="grow">${escapeHtml(messageSnippet(m, 80))}</span><span class="muted small">${timeAgo(m.createdAt)}</span></button>`).join('') : `<p class="muted small">${t('noPinnedMessages')}</p>`}
+        </div>
+        ${active.isGroup ? `<div class="conv-info-section"><h4>👥 ${t('members')}</h4>${active.conv.participants.map((id) => `<div class="row gap-sm">${avatarHtml(byId[id], 28)}<span>${escapeHtml(byId[id]?.name || '')}</span></div>`).join('')}</div>` : ''}
+      </div>
+      <div class="thread-body" id="thread-body" style="${theme.tint ? `background:${theme.tint};` : ''}${theme.bubble ? `--bubble-mine:${theme.bubble};` : ''}">
         ${active.msgs.map((m) => messageHtml(m, meUser, byId, active.isGroup)).join('') || '<p class="muted center">No messages yet. Say hello 👋</p>'}
       </div>
+      <div class="typing-row" id="typing-row">${typingIndicatorHtml(active.conv, meUser, byId)}</div>
       <div class="composer-wrap">
-        <div id="message-preview" class="message-preview hidden"></div>
+        <div id="reply-preview" class="message-preview reply-preview hidden"></div>
+        <div id="message-preview" class="message-preview hidden"></div>`; })()}
         <form id="message-form" data-conv="${active.conv.id}" class="message-form">
           <input type="file" id="msg-image-input" name="image" accept="image/*" hidden />
           <label class="btn btn-ghost btn-sm msg-attach" for="msg-image-input" title="${t('photo')}" aria-label="${t('photo')}">📷</label>
@@ -871,16 +885,38 @@ function messageHtml(m, meUser, byId, isGroup = false) {
   // participant has it in readBy / the status flipped to read, else "Sent".
   const seen = m.status === 'read' || (m.readBy || []).length > 1;
   const status = mine ? (seen ? `✓✓ ${t('seen')}` : `✓ ${t('sent')}`) : '';
-  return `<div class="msg-row ${mine ? 'mine' : ''}">
+  const chips = reactionChips(m.reactions);
+  return `<div class="msg-row ${mine ? 'mine' : ''}" id="msg-${m.id}">
     ${mine ? '' : avatarHtml(byId[m.senderId], 28)}
+    <div class="msg-col">
     <div class="msg-bubble ${mine ? 'mine' : ''}">
       ${isGroup && !mine ? `<span class="msg-sender">${escapeHtml(byId[m.senderId]?.name || '')}</span>` : ''}
+      ${m.replyToId ? `<button type="button" class="msg-quote" data-act="jump-message" data-id="${m.replyToId}"><b>${escapeHtml(m.replyToName || '')}</b><span>${escapeHtml(m.replyToText || '')}</span></button>` : ''}
       ${m.image ? `<img class="msg-image" src="${escapeHtml(m.image)}" alt="Shared photo" loading="lazy" />` : ''}
       ${m.audio ? `<audio class="msg-audio" controls preload="metadata" src="${escapeHtml(m.audio)}"></audio>` : ''}
       ${m.text ? `<p>${escapeHtml(m.text)}</p>` : ''}
-      <span class="msg-foot"><span class="msg-meta">${timeAgo(m.createdAt)} ${status}</span>${mine ? '' : `<button class="link-btn msg-report-btn" data-act="report-message" data-id="${m.id}" title="${t('report')}" aria-label="${t('report')}">🚩</button>`}</span>
+      <div class="msg-picker hidden" id="msg-picker-${m.id}">${MESSAGE_REACTIONS.map((e) => `<button type="button" class="emoji-btn" data-act="msg-react" data-id="${m.id}" data-emoji="${e}" aria-label="${t('reactToMessage')} ${e}">${e}</button>`).join('')}</div>
+      <span class="msg-foot"><span class="msg-meta">${m.pinned ? '📌 ' : ''}${timeAgo(m.createdAt)} ${status}</span><span class="msg-actions"><button type="button" class="link-btn msg-act-btn" data-act="reply-message" data-id="${m.id}" title="${t('replyToMessage')}" aria-label="${t('replyToMessage')}">↩️</button><button type="button" class="link-btn msg-act-btn" data-act="msg-react-toggle" data-id="${m.id}" title="${t('reactToMessage')}" aria-label="${t('reactToMessage')}">😊</button><button type="button" class="link-btn msg-act-btn ${m.pinned ? 'active' : ''}" data-act="pin-message" data-id="${m.id}" title="${t(m.pinned ? 'unpinMessage' : 'pinMessage')}" aria-label="${t(m.pinned ? 'unpinMessage' : 'pinMessage')}">📌</button>${mine ? '' : `<button class="link-btn msg-report-btn" data-act="report-message" data-id="${m.id}" title="${t('report')}" aria-label="${t('report')}">🚩</button>`}</span></span>
+    </div>
+    ${chips.length ? `<div class="msg-chips">${chips.map((c) => `<button type="button" class="msg-chip ${c.uids.includes(meUser.id) ? 'mine' : ''}" data-act="msg-react" data-id="${m.id}" data-emoji="${c.emoji}" title="${t('reactToMessage')}">${c.emoji} ${c.count}</button>`).join('')}</div>` : ''}
     </div>
   </div>`;
+}
+
+// "X is typing…" line for the open thread. Exported because main.js
+// refreshes JUST this row on a 1s ticker (a full re-render would yank
+// focus out of the composer input, and softRender is suppressed while
+// typing). Group chats name up to two typers, then "and others".
+export function typingIndicatorHtml(conv, meUser, byId, now = Date.now()) {
+  const names = typingUserIds(conv, meUser?.id || '', now)
+    .map((id) => (byId[id]?.name || '').split(' ')[0])
+    .filter(Boolean);
+  if (!names.length) return '';
+  let text;
+  if (names.length === 1) text = t('typingOne').replace('{name}', names[0]);
+  else if (names.length === 2) text = t('typingTwo').replace('{name1}', names[0]).replace('{name2}', names[1]);
+  else text = t('typingMany').replace('{name1}', names[0]).replace('{name2}', names[1]);
+  return `<span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>${escapeHtml(text)}</span>`;
 }
 
 // Pick-friends form for a new group conversation (accepted friends only).

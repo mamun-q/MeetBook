@@ -4,7 +4,7 @@ import * as api from './api.js';
 import { firebaseReady, firebaseConfig } from './firebase.js';
 import { subscribe as storeSubscribe, mutate as demoMutate } from './store.js';
 import { setLocale, t } from './i18n.js';
-import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError } from './utils.js';
+import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError, messageSnippet } from './utils.js';
 import { toast, clearToasts, openModal, closeModal, confirmModal, adminActionModal, avatarHtml } from './components.js';
 import * as V from './views.js';
 
@@ -239,6 +239,22 @@ function setupThread() {
   // button entirely where they are unavailable.
   const btn = document.getElementById('voice-btn');
   if (btn && !voiceSupported()) btn.style.display = 'none';
+  // Chat Pack: restore the reply preview if a re-render wiped it
+  // mid-reply, and keep the typing row fresh on a 1s ticker — a full
+  // re-render per heartbeat would yank focus out of the composer, and
+  // softRender is suppressed while typing anyway. The ticker retires
+  // itself as soon as the thread leaves the DOM.
+  if (replyTarget && document.getElementById('message-form')?.dataset.conv === replyTarget.convId) showReplyPreview();
+  if (typingTicker) clearInterval(typingTicker);
+  typingTicker = setInterval(() => {
+    const row = document.getElementById('typing-row');
+    if (!row) { clearInterval(typingTicker); typingTicker = null; return; }
+    const convId = document.getElementById('message-form')?.dataset.conv;
+    const d = api.data();
+    const user = me();
+    const conv = d.conversations.find((c) => c.id === convId);
+    row.innerHTML = conv && user ? V.typingIndicatorHtml(conv, user, V.usersById(d)) : '';
+  }, 1000);
 }
 
 // ------------------------------------------------- foreground web notifications
@@ -277,6 +293,49 @@ function maybeBrowserNotify(d, user) {
     seenNotificationIds.clear();
     for (const id of keep) seenNotificationIds.add(id);
   }
+}
+
+// ------------------------------------------------- Chat Pack: reply + typing
+// replyTarget: the message the composer is currently replying to (set
+// by the ↩️ action on a message, cleared on send / cancel / navigation).
+// The send path snapshots it onto the new message via api.sendMessage.
+let replyTarget = null; // { id, convId, name, text }
+let typingTicker = null; // 1s interval refreshing #typing-row (setupThread)
+
+function showReplyPreview() {
+  const el = document.getElementById('reply-preview');
+  if (!el || !replyTarget) return;
+  el.innerHTML = `<span class="grow small"><b>${escapeHtml(t('replyingTo').replace('{name}', replyTarget.name))}</b><br/>${escapeHtml(replyTarget.text)}</span><button type="button" class="btn btn-ghost btn-sm" data-act="cancel-reply" aria-label="${t('cancel')}">✕</button>`;
+  el.classList.remove('hidden');
+}
+
+function hideReplyPreview() {
+  const el = document.getElementById('reply-preview');
+  if (el) { el.innerHTML = ''; el.classList.add('hidden'); }
+}
+
+// Typing heartbeat: refresh conversations.typing[me] at most every 2s
+// while keystrokes continue; clear it 3s after the last keystroke, or
+// immediately on send/blur. Readers honour only entries <4s old
+// (utils.TYPING_FRESH_MS), so a missed clear can never stick.
+let typingState = { convId: '', lastSent: 0, idleTimer: null };
+
+function noteTyping(convId) {
+  if (!convId) return;
+  if (typingState.convId !== convId) typingState = { convId, lastSent: 0, idleTimer: null };
+  const now = Date.now();
+  if (now - typingState.lastSent >= 2000) {
+    typingState.lastSent = now;
+    void api.setTyping(convId, true);
+  }
+  clearTimeout(typingState.idleTimer);
+  typingState.idleTimer = setTimeout(stopTyping, 3000);
+}
+
+function stopTyping() {
+  clearTimeout(typingState.idleTimer);
+  if (typingState.convId) void api.setTyping(typingState.convId, false);
+  typingState = { convId: '', lastSent: 0, idleTimer: null };
 }
 
 // ------------------------------------------------------------- voice messages
@@ -352,8 +411,9 @@ async function sendVoiceRecording() {
     toast('That voice message is too long to send (about 60 seconds max).', 'error');
     return;
   }
-  const sent = await handle(api.sendMessage(convId, { text: '', image: '', audio: dataUrl }), 'Voice message sent.');
-  if (sent) { render(); scrollThread(); }
+  const replyToId = replyTarget && replyTarget.convId === convId ? replyTarget.id : '';
+  const sent = await handle(api.sendMessage(convId, { text: '', image: '', audio: dataUrl, replyToId }), 'Voice message sent.');
+  if (sent) { if (replyToId) replyTarget = null; render(); scrollThread(); }
 }
 
 // ------------------------------------------------------------- story viewer
@@ -484,7 +544,7 @@ function softRender() {
 // Realtime: demo store subscription + Firestore mirror events.
 storeSubscribe(() => softRender());
 document.addEventListener('meetbook:data', () => softRender());
-window.addEventListener('hashchange', () => { feedPage = 1; clearToasts(); render(); window.scrollTo({ top: 0 }); });
+window.addEventListener('hashchange', () => { feedPage = 1; clearToasts(); replyTarget = null; stopTyping(); render(); window.scrollTo({ top: 0 }); });
 
 // Infinite scroll for the feed (the Load more button is the fallback).
 window.addEventListener('scroll', () => {
@@ -610,6 +670,44 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'emoji-toggle': { const panel = document.getElementById('emoji-panel'); panel?.classList.toggle('hidden'); if (panel && !panel.classList.contains('hidden')) scrollThread(); break; }
+    // ---- Chat Pack: conversation info / themes / reply / reactions / pins
+    case 'conv-info': document.getElementById('conv-info')?.classList.toggle('hidden'); break;
+    case 'set-theme': await handle(api.setConversationTheme(actEl.dataset.conv, actEl.dataset.theme)); break;
+    case 'reply-message': {
+      const msg = d.messages.find((m) => m.id === actEl.dataset.id);
+      if (msg) {
+        replyTarget = {
+          id: msg.id, convId: msg.conversationId,
+          name: d.users.find((u) => u.id === msg.senderId)?.name || '',
+          text: messageSnippet(msg, 120)
+        };
+        showReplyPreview();
+        document.querySelector('#message-form input[name="text"]')?.focus();
+      }
+      break;
+    }
+    case 'cancel-reply': replyTarget = null; hideReplyPreview(); break;
+    case 'msg-react-toggle': {
+      const picker = document.getElementById(`msg-picker-${actEl.dataset.id}`);
+      document.querySelectorAll('.msg-picker').forEach((p) => { if (p !== picker) p.classList.add('hidden'); });
+      picker?.classList.toggle('hidden');
+      break;
+    }
+    case 'msg-react': await handle(api.toggleMessageReaction(actEl.dataset.id, actEl.dataset.emoji)); break;
+    case 'pin-message': { const pinned = await handle(api.togglePinMessage(actEl.dataset.id)); if (pinned !== null) toast(pinned ? t('messagePinned') : t('messageUnpinned'), 'success'); break; }
+    case 'jump-message': {
+      const target = document.getElementById(`msg-${actEl.dataset.id}`);
+      if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        target.classList.remove('flash');
+        void target.offsetWidth; // restart the flash animation if re-tapped
+        target.classList.add('flash');
+        setTimeout(() => target.classList.remove('flash'), 1600);
+      } else {
+        toast(t('originalMessageUnavailable'), 'error');
+      }
+      break;
+    }
     case 'toggle-theme': prefs.theme = prefs.theme === 'dark' ? 'light' : 'dark'; savePrefs(); applyPrefs(); render(); break;
     case 'install-app': if (deferredInstallPrompt) { deferredInstallPrompt.prompt(); deferredInstallPrompt = null; } break;
     case 'logout': await handle(api.logout(), 'Logged out.'); location.hash = '#/login'; break;
@@ -1062,8 +1160,11 @@ document.addEventListener('submit', async (e) => {
     const file = fileFrom(form, 'image');
     const image = file ? await api.uploadImage(file, `messages/${convId}/${Date.now()}_${file.name}`).catch((err) => { toast(err.message, 'error'); return ''; }) : '';
     const text = String(fd.get('text') || '');
-    const sent = await handle(api.sendMessage(convId, { text, image }));
+    const replyToId = replyTarget && replyTarget.convId === convId ? replyTarget.id : '';
+    const sent = await handle(api.sendMessage(convId, { text, image, replyToId }));
     if (sent) {
+      if (replyToId) replyTarget = null; // the re-render rebuilds the (hidden) reply preview
+      stopTyping();
       render(); scrollThread();
       // Demo-mode bot replies: the bot answers from its OWN personality+memory.
       // 1-1 conversations only — bots never auto-reply inside group chats.
@@ -1305,6 +1406,18 @@ document.addEventListener('input', (e) => {
   document.querySelectorAll('.conv-item[data-search]').forEach((el) => {
     el.style.display = !q || (el.dataset.search || '').includes(q) ? '' : 'none';
   });
+});
+
+// Chat Pack typing heartbeat: keystrokes in the composer refresh my
+// typing entry (throttled inside noteTyping); emptying the input or
+// leaving it clears the entry right away.
+document.addEventListener('input', (e) => {
+  if (!e.target.matches?.('#message-form input[name="text"]')) return;
+  const convId = document.getElementById('message-form')?.dataset.conv;
+  if (e.target.value) noteTyping(convId); else stopTyping();
+});
+document.addEventListener('focusout', (e) => {
+  if (e.target.matches?.('#message-form input[name="text"]')) stopTyping();
 });
 
 // Client error collector (Pack C): keep the last 10 uncaught errors

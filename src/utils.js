@@ -927,3 +927,107 @@ export function recentClientErrors() {
     return Array.isArray(list) ? list.filter((e) => e && typeof e.message === 'string') : [];
   } catch { return []; }
 }
+
+// --- Chat Pack: typing / replies / message reactions / themes / pins --------
+// Pure helpers behind the Messenger upgrades. Storage shapes (identical in
+// demo state and Firestore docs):
+//  - conversations.typing: { [uid]: epochMs } — a heartbeat map; an entry
+//    counts as "typing now" only while it is younger than TYPING_FRESH_MS,
+//    so a crashed/closed client stops showing within seconds with no
+//    cleanup write.
+//  - conversations.theme: a CHAT_THEMES id ('default' when unset).
+//  - messages.replyToId / replyToName / replyToText: a send-time snapshot
+//    of the quoted message, so the quote renders even when the original
+//    is outside the loaded window.
+//  - messages.reactions: { [emoji]: [uid, ...] } — toggle semantics, one
+//    entry per user per emoji; a user may hold several different emojis.
+//  - messages.pinned / pinnedBy / pinnedAt: any participant may pin.
+
+export const TYPING_FRESH_MS = 4000;
+
+// Uids (other than the viewer) whose typing heartbeat is still fresh.
+export function typingUserIds(conv, viewerId, now = Date.now()) {
+  const map = conv?.typing || {};
+  return Object.keys(map).filter((id) => id !== viewerId
+    && typeof map[id] === 'number' && map[id] > 0 && now - map[id] < TYPING_FRESH_MS);
+}
+
+// The fixed reaction set offered on messages (Facebook-style six).
+export const MESSAGE_REACTIONS = ['❤️', '😂', '😮', '😢', '😡', '👍'];
+
+// Toggle one user's reaction of one emoji. Returns a NEW map (the input
+// is never mutated); empty emoji lists are dropped so the stored map
+// stays clean.
+export function toggleEmojiReaction(reactions, emoji, userId) {
+  const next = {};
+  for (const [e, uids] of Object.entries(reactions || {})) {
+    if (Array.isArray(uids) && uids.length) next[e] = [...uids];
+  }
+  if (!emoji || !userId) return next;
+  const list = next[emoji] || [];
+  if (list.includes(userId)) {
+    const kept = list.filter((u) => u !== userId);
+    if (kept.length) next[emoji] = kept; else delete next[emoji];
+  } else {
+    next[emoji] = [...list, userId];
+  }
+  return next;
+}
+
+// [{ emoji, count, uids }] for the chips row: most-reacted first, ties
+// broken by the fixed MESSAGE_REACTIONS order so chips don't reshuffle.
+export function reactionChips(reactions) {
+  const order = new Map(MESSAGE_REACTIONS.map((e, i) => [e, i]));
+  return Object.entries(reactions || {})
+    .filter(([, uids]) => Array.isArray(uids) && uids.length)
+    .map(([emoji, uids]) => ({ emoji, count: uids.length, uids: [...uids] }))
+    .sort((a, b) => b.count - a.count || (order.get(a.emoji) ?? 99) - (order.get(b.emoji) ?? 99));
+}
+
+// One-line snippet of a message for quotes, the pinned bar and the
+// pinned list: the text itself, or a media placeholder (the same
+// emoji-label style the conversation list preview already uses).
+export function messageSnippet(message, max = 120) {
+  if (!message) return '';
+  if (message.text) return truncate(message.text, max);
+  if (message.audio) return '🎤 Voice message';
+  if (message.image) return '📷 Photo';
+  return '';
+}
+
+// The reply snapshot stored on a message sent as a reply: who wrote the
+// original plus a ≤120-char snippet of it.
+export function replySnapshot(original, senderName = '') {
+  if (!original?.id) return null;
+  return {
+    replyToId: original.id,
+    replyToName: String(senderName || ''),
+    replyToText: messageSnippet(original, 120)
+  };
+}
+
+// Pinned messages of a conversation, most recently pinned first.
+export function pinnedMessages(messages) {
+  return (messages || []).filter((m) => m?.pinned)
+    .sort((a, b) => (Number(b.pinnedAt) || 0) - (Number(a.pinnedAt) || 0));
+}
+
+// Chat themes: `bubble` is the CSS background for the viewer's OWN
+// message bubbles (applied through the --bubble-mine custom property),
+// `tint` a subtle thread background, `gradient` the picker swatch.
+// 'default' carries empty values so the stock look applies untouched.
+export const CHAT_THEMES = [
+  { id: 'default', gradient: '', bubble: '', tint: '' },
+  { id: 'ocean', gradient: 'linear-gradient(135deg,#38bdf8,#2563eb)', bubble: 'linear-gradient(135deg,#0ea5e9,#2563eb)', tint: 'rgba(14,165,233,.07)' },
+  { id: 'sunset', gradient: 'linear-gradient(135deg,#fbbf24,#ef4444)', bubble: 'linear-gradient(135deg,#f59e0b,#ef4444)', tint: 'rgba(245,158,11,.07)' },
+  { id: 'grape', gradient: 'linear-gradient(135deg,#a78bfa,#d946ef)', bubble: 'linear-gradient(135deg,#8b5cf6,#c026d3)', tint: 'rgba(139,92,246,.08)' },
+  { id: 'forest', gradient: 'linear-gradient(135deg,#4ade80,#0d9488)', bubble: 'linear-gradient(135deg,#22c55e,#0f766e)', tint: 'rgba(34,197,94,.07)' },
+  { id: 'rose', gradient: 'linear-gradient(135deg,#fb7185,#db2777)', bubble: 'linear-gradient(135deg,#f43f5e,#db2777)', tint: 'rgba(244,63,94,.07)' },
+  { id: 'midnight', gradient: 'linear-gradient(135deg,#64748b,#0f172a)', bubble: 'linear-gradient(135deg,#475569,#1e293b)', tint: 'rgba(100,116,139,.10)' },
+  { id: 'peach', gradient: 'linear-gradient(135deg,#fdba74,#f472b6)', bubble: 'linear-gradient(135deg,#fb923c,#ec4899)', tint: 'rgba(251,146,60,.08)' },
+  { id: 'royal', gradient: 'linear-gradient(135deg,#818cf8,#7c3aed)', bubble: 'linear-gradient(135deg,#6366f1,#7c3aed)', tint: 'rgba(99,102,241,.08)' }
+];
+
+export function chatTheme(id) {
+  return CHAT_THEMES.find((th) => th.id === id) || CHAT_THEMES[0];
+}
