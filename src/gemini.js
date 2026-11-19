@@ -49,6 +49,19 @@ export function buildGeminiPrompt(bot, memories = [], context = {}) {
   ].filter(Boolean).join('\n');
 }
 
+// The most recent Gemini failure in this session, in admin-safe terms
+// (an HTTP status or a network error name — never the key and never the
+// prompt). The bot panel surfaces it on the runner's Last cycle line so
+// a silent template fallback is diagnosable from the UI: without it, a
+// bad key and a healthy template fallback look identical.
+let lastGeminiFailure = '';
+export function getLastGeminiFailure() {
+  return lastGeminiFailure;
+}
+export function resetLastGeminiFailure() {
+  lastGeminiFailure = '';
+}
+
 // Generate one bot text with Gemini. Returns the trimmed text, or null
 // on ANY failure (no key, timeout, network error, non-200, empty text)
 // so the caller can use its template fallback. Never throws.
@@ -67,11 +80,17 @@ export async function generateGeminiText({ apiKey, bot, memories = [], context =
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
       ...(controller ? { signal: controller.signal } : {})
     });
-    if (!res || !res.ok) return null;
+    if (!res || !res.ok) {
+      lastGeminiFailure = res ? `HTTP ${res.status}` : 'no response';
+      return null;
+    }
     const json = await res.json();
     const text = json?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('').trim();
+    if (!text) lastGeminiFailure = 'empty response';
+    else lastGeminiFailure = '';
     return text || null;
-  } catch {
+  } catch (err) {
+    lastGeminiFailure = String(err?.name || err?.message || 'network error');
     return null; // network error / timeout / bad JSON -> template fallback
   } finally {
     if (timer) clearTimeout(timer);

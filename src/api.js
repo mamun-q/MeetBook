@@ -9,7 +9,7 @@ import {
 import { firebaseReady, auth, db, storage, googleProvider } from './firebase.js';
 import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate } from './utils.js';
 import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay } from './botLogic.js';
-import { generateGeminiText, canAccessBotSecrets, GEMINI_MODEL, botModel } from './gemini.js';
+import { generateGeminiText, canAccessBotSecrets, GEMINI_MODEL, botModel, getLastGeminiFailure, resetLastGeminiFailure } from './gemini.js';
 
 // --- Firebase imports are dynamic-free static imports of the SDK ---------
 import {
@@ -2276,6 +2276,7 @@ export async function runLiveBotCycle() {
   botCycleInFlight = true;
   const results = [];
   try {
+    resetLastGeminiFailure(); // the summary reports only THIS cycle's Gemini outcome
     await loadBotSecrets(); // make sure the Gemini key is in memory
     const { day, counters } = await loadLiveBotCounters();
     let actions = 0;
@@ -2383,7 +2384,8 @@ export async function runLiveBotCycle() {
     }
     await saveLiveBotCounters(day, counters);
     if (remote) { remote.aiUsage.callsToday += actions; remote.aiUsage.updatedAt = Date.now(); }
-    const summary = results.filter((r) => r.action !== 'none').map((r) => (r.action === 'error' ? `${r.bot} → error: ${r.reason}` : `${r.bot} → ${r.action}`)).join(', ') || 'no actions';
+    const geminiFailure = getLastGeminiFailure();
+    const summary = (results.filter((r) => r.action !== 'none').map((r) => (r.action === 'error' ? `${r.bot} → error: ${r.reason}` : `${r.bot} → ${r.action}`)).join(', ') || 'no actions') + (geminiFailure ? ` · Gemini failed: ${geminiFailure} (template fallback used)` : '');
     setLiveRunnerState({ lastCycleAt: Date.now(), lastSummary: summary });
     return { ran: true, results };
   } finally {
