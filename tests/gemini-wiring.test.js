@@ -57,7 +57,7 @@ describe('Gemini free wiring (demo-mode generation path)', () => {
     expect(botPost.generatedBy).toBe('gemini');
     const brain = store.getState().botBrains.bot_nova;
     expect(brain.provider).toBe('gemini');
-    expect(brain.model).toBe('gemini-2.0-flash');
+    expect(brain.model).toBe('gemini-3.5-flash');
   });
 
   it('uses Gemini for 1-1 bot message replies too', async () => {

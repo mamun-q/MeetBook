@@ -9,7 +9,7 @@
 // in botLogic.js — bots keep working with zero provider cost.
 import { normaliseBot, selectMemories } from './botLogic.js';
 
-export const GEMINI_MODEL = 'gemini-2.0-flash';
+export const GEMINI_MODEL = 'gemini-3.5-flash'; // gemini-2.0-flash was shut down by Google on 2026-06-01 (every call 404s); 3.5-flash is its GA successor
 export const GEMINI_TIMEOUT_MS = 15_000;
 
 // The model a bot actually generates with: its own configured model

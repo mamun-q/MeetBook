@@ -52,7 +52,7 @@ const providers = {
     async generate(bot, memories, context) {
       const key = process.env.GEMINI_API_KEY;
       if (!key) throw new Error('GEMINI_API_KEY is not configured');
-      const model = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+      const model = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
       const memoryText = (memories || []).map((m) => `- ${m.text}`).join('\n');
       const prompt = [
         bot.personality?.systemPrompt || `You are ${bot.name}, an AI bot on MeetBook.`,

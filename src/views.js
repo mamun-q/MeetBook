@@ -1574,7 +1574,7 @@ function botCardHtml(d, b) {
   </div>`;
 }
 
-const BOT_MODEL_OPTIONS = ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash'];
+const BOT_MODEL_OPTIONS = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.8-flash'];
 function botModelSelectHtml(current = '') {
   return `<select name="model">
     <option value="" ${!current ? 'selected' : ''}>${t('modelDefaultLabel')}</option>
