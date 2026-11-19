@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
-import { buildGeminiPrompt, generateGeminiText, canAccessBotSecrets, GEMINI_MODEL } from '../src/gemini.js';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { buildGeminiPrompt, generateGeminiText, canAccessBotSecrets, GEMINI_MODEL, GEMINI_FALLBACK_MODEL, geminiAttemptModels, getLastGeminiFailure, resetLastGeminiFailure } from '../src/gemini.js';
 
 const nova = {
   id: 'bot_nova', name: 'Nova', username: 'nova.bot', active: true,
@@ -36,10 +36,17 @@ describe('buildGeminiPrompt (mirrors functions/botEngine.js gemini provider)', (
 });
 
 describe('generateGeminiText', () => {
+  beforeEach(() => resetLastGeminiFailure());
+
   const okResponse = (text) => ({
     ok: true,
     status: 200,
     json: async () => ({ candidates: [{ content: { parts: [{ text }] } }] })
+  });
+  const errResponse = (status, message) => ({
+    ok: false,
+    status,
+    json: async () => (message === undefined ? {} : { error: { message } })
   });
 
   it('returns the generated text on success and calls the configured model', async () => {
@@ -79,6 +86,105 @@ describe('generateGeminiText', () => {
     expect(await generateGeminiText({ apiKey: '   ', bot: nova, memories, context: { kind: 'post' }, fetchImpl })).toBeNull();
     expect(await generateGeminiText({ bot: nova, memories, context: { kind: 'post' }, fetchImpl })).toBeNull();
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe('generateGeminiText model fallback + failure detail', () => {
+  beforeEach(() => resetLastGeminiFailure());
+
+  const okResponse = (text) => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ candidates: [{ content: { parts: [{ text }] } }] })
+  });
+  const errResponse = (status, message) => ({
+    ok: false,
+    status,
+    json: async () => (message === undefined ? {} : { error: { message } })
+  });
+  // Route a mocked fetch by the model named in the request URL.
+  const byModel = (handlers) => vi.fn(async (url) => {
+    const model = /models\/([^:]+):generateContent/.exec(url)?.[1];
+    const h = handlers[model];
+    if (!h) throw new Error(`unexpected model ${model}`);
+    return typeof h === 'function' ? h() : h;
+  });
+
+  it('builds a deduped attempt list: bot model, platform default, lite backup', () => {
+    expect(geminiAttemptModels(nova)).toEqual([GEMINI_MODEL, GEMINI_FALLBACK_MODEL]);
+    expect(geminiAttemptModels({ ...nova, model: GEMINI_FALLBACK_MODEL })).toEqual([GEMINI_FALLBACK_MODEL, GEMINI_MODEL]);
+    expect(geminiAttemptModels({ ...nova, model: 'gemini-custom-x' })).toEqual(['gemini-custom-x', GEMINI_MODEL, GEMINI_FALLBACK_MODEL]);
+  });
+
+  it('falls back to the platform default when the bot\'s stored model fails (400 -> 200)', async () => {
+    const bot = { ...nova, model: 'gemini-custom-x' };
+    const fetchImpl = byModel({
+      'gemini-custom-x': errResponse(400, 'Model not found or retired.'),
+      [GEMINI_MODEL]: okResponse('Recovered by the default model!')
+    });
+    const text = await generateGeminiText({ apiKey: 'KEY123', bot, memories, context: { kind: 'post' }, fetchImpl });
+    expect(text).toBe('Recovered by the default model!');
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl.mock.calls[0][0]).toContain('models/gemini-custom-x:generateContent');
+    expect(fetchImpl.mock.calls[1][0]).toContain(`models/${GEMINI_MODEL}:generateContent`);
+    expect(getLastGeminiFailure()).toBe(''); // success clears the recorded failure
+  });
+
+  it('falls back through a network error and an empty response too', async () => {
+    const bot = { ...nova, model: 'gemini-custom-x' };
+    const fetchImpl = byModel({
+      'gemini-custom-x': () => { throw new Error('socket hang up'); },
+      [GEMINI_MODEL]: okResponse('   '),
+      [GEMINI_FALLBACK_MODEL]: okResponse('Third time lucky.')
+    });
+    const text = await generateGeminiText({ apiKey: 'KEY123', bot, context: { kind: 'post' }, fetchImpl });
+    expect(text).toBe('Third time lucky.');
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it('records the LAST attempt\'s status and provider message when every model fails', async () => {
+    const fetchImpl = byModel({
+      [GEMINI_MODEL]: errResponse(500, 'Internal error encountered.'),
+      [GEMINI_FALLBACK_MODEL]: errResponse(503, 'The model is currently overloaded. Please try again later.')
+    });
+    const text = await generateGeminiText({ apiKey: 'KEY123', bot: nova, context: { kind: 'post' }, fetchImpl });
+    expect(text).toBeNull();
+    expect(getLastGeminiFailure()).toBe(`HTTP 503 (${GEMINI_FALLBACK_MODEL}): The model is currently overloaded. Please try again later.`);
+  });
+
+  it('keeps just the status when the error body is not JSON', async () => {
+    const fetchImpl = vi.fn(async () => ({ ok: false, status: 502, json: async () => { throw new Error('not json'); } }));
+    const text = await generateGeminiText({ apiKey: 'KEY123', bot: nova, context: { kind: 'post' }, fetchImpl });
+    expect(text).toBeNull();
+    expect(getLastGeminiFailure()).toBe(`HTTP 502 (${GEMINI_FALLBACK_MODEL})`);
+  });
+
+  it('sanitises a provider message that somehow embeds the API key', async () => {
+    const fetchImpl = vi.fn(async () => errResponse(400, 'Invalid request; key KEY123 was rejected by the API.'));
+    const text = await generateGeminiText({ apiKey: 'KEY123', bot: nova, context: { kind: 'post' }, fetchImpl });
+    expect(text).toBeNull();
+    const failure = getLastGeminiFailure();
+    expect(failure).not.toContain('KEY123');
+    expect(failure).toBe(`HTTP 400 (${GEMINI_FALLBACK_MODEL}): Invalid request; key`);
+  });
+
+  it('caps a long provider message at ~120 chars', async () => {
+    const fetchImpl = vi.fn(async () => errResponse(400, 'x'.repeat(300)));
+    await generateGeminiText({ apiKey: 'KEY123', bot: nova, context: { kind: 'post' }, fetchImpl });
+    const failure = getLastGeminiFailure();
+    expect(failure.startsWith(`HTTP 400 (${GEMINI_FALLBACK_MODEL}): `)).toBe(true);
+    expect(failure.length).toBeLessThanOrEqual(`HTTP 400 (${GEMINI_FALLBACK_MODEL}): `.length + 120);
+  });
+
+  it('single-model success is unchanged: exactly one fetch, failure string cleared', async () => {
+    const failing = vi.fn(async () => { throw new Error('offline'); });
+    expect(await generateGeminiText({ apiKey: 'KEY123', bot: nova, context: { kind: 'post' }, fetchImpl: failing })).toBeNull();
+    expect(getLastGeminiFailure()).not.toBe('');
+    const ok = vi.fn(async () => okResponse('fresh text'));
+    const text = await generateGeminiText({ apiKey: 'KEY123', bot: nova, context: { kind: 'post' }, fetchImpl: ok });
+    expect(text).toBe('fresh text');
+    expect(ok).toHaveBeenCalledTimes(1);
+    expect(getLastGeminiFailure()).toBe('');
   });
 });
 

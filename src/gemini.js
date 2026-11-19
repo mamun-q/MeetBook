@@ -50,10 +50,14 @@ export function buildGeminiPrompt(bot, memories = [], context = {}) {
 }
 
 // The most recent Gemini failure in this session, in admin-safe terms
-// (an HTTP status or a network error name — never the key and never the
-// prompt). The bot panel surfaces it on the runner's Last cycle line so
-// a silent template fallback is diagnosable from the UI: without it, a
-// bad key and a healthy template fallback look identical.
+// (an HTTP status plus Google's own error.message snippet, or a network
+// error name — never the key and never the prompt). The bot panel
+// surfaces it on the runner's Last cycle line so a silent template
+// fallback is diagnosable from the UI: without it, a bad key and a
+// healthy template fallback look identical. When several models were
+// tried (see generateGeminiText), the string names the model that
+// produced the recorded (last) failure, e.g.
+// "HTTP 400 (gemini-3.5-flash-lite): API key not valid. ...".
 let lastGeminiFailure = '';
 export function getLastGeminiFailure() {
   return lastGeminiFailure;
@@ -62,37 +66,114 @@ export function resetLastGeminiFailure() {
   lastGeminiFailure = '';
 }
 
-// Generate one bot text with Gemini. Returns the trimmed text, or null
-// on ANY failure (no key, timeout, network error, non-200, empty text)
-// so the caller can use its template fallback. Never throws.
+// Backup model tried when the bot's configured model (and then the
+// platform default) fail: the lite tier is the least likely to be the
+// one that is retired, renamed or overloaded at any given moment.
+export const GEMINI_FALLBACK_MODEL = 'gemini-3.5-flash-lite';
+
+// Ordered, deduped attempt list for one generation: the bot's own
+// configured model first, then the platform default, then the lite
+// backup. A bot whose stored model string has gone stale (retired by
+// Google, typo'd in the Bot Control Center) must not be silenced while
+// its key and the default models are perfectly healthy.
+export function geminiAttemptModels(bot) {
+  return [...new Set([botModel(bot), GEMINI_MODEL, GEMINI_FALLBACK_MODEL])];
+}
+
+// Google's error.message for a failed call, made admin-safe: whitespace
+// collapsed, capped at ~120 chars, and cut at the API key if the key
+// somehow appears in it (it never should — but the key must not reach
+// the bot panel or any log through this string, even defensively).
+function sanitiseProviderMessage(raw, key) {
+  let msg = String(raw || '').replace(/\s+/g, ' ').trim();
+  if (key) {
+    const at = msg.indexOf(key);
+    if (at !== -1) msg = msg.slice(0, at).trim();
+  }
+  return msg.slice(0, 120);
+}
+
+// Read the provider's error detail from a non-200 response. A non-JSON
+// body (or a mock without one) yields '' — the status alone is kept.
+async function providerErrorMessage(res, key) {
+  try {
+    const json = await res.json();
+    return sanitiseProviderMessage(json?.error?.message, key);
+  } catch {
+    return '';
+  }
+}
+
+// One provider attempt against one model, with its own timeout. Returns
+// { text } on success or { failure } with the raw failure detail — the
+// caller formats it with the model context. Never throws.
+async function attemptGeminiOnce({ key, model, prompt, doFetch, timeoutMs }) {
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const res = await doFetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+      ...(controller ? { signal: controller.signal } : {})
+    });
+    if (!res) return { failure: { kind: 'noresponse' } };
+    if (!res.ok) {
+      return { failure: { kind: 'http', status: res.status, message: await providerErrorMessage(res, key) } };
+    }
+    const json = await res.json();
+    const text = json?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('').trim();
+    if (!text) return { failure: { kind: 'empty' } };
+    return { text };
+  } catch (err) {
+    return { failure: { kind: 'error', detail: String(err?.name || err?.message || 'network error') } };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// Render one attempt's failure for the bot panel. When more than one
+// model was tried, the model that produced this (last) failure is named
+// in parens so the panel stays truthful about which model failed:
+// "HTTP 503 (gemini-3.5-flash-lite): The model is overloaded ...".
+function formatGeminiFailure(failure, model, multiModel) {
+  if (failure.kind === 'http') {
+    const head = multiModel ? `HTTP ${failure.status} (${model})` : `HTTP ${failure.status}`;
+    return failure.message ? `${head}: ${failure.message}` : head;
+  }
+  const base = failure.kind === 'empty' ? 'empty response'
+    : failure.kind === 'noresponse' ? 'no response'
+      : failure.detail;
+  return multiModel ? `${base} (${model})` : base;
+}
+
+// Generate one bot text with Gemini. Tries the bot's configured model,
+// then the platform default, then the lite backup — one attempt each,
+// moving on after ANY failure — and returns the first success (trimmed
+// text). Returns null when every attempt fails (no key, timeout,
+// network error, non-200, empty text) so the caller can use its
+// template fallback; the last attempt's failure is recorded in
+// lastGeminiFailure for the bot panel. Never throws.
 export async function generateGeminiText({ apiKey, bot, memories = [], context = {}, fetchImpl, timeoutMs = GEMINI_TIMEOUT_MS } = {}) {
   const key = String(apiKey || '').trim();
   if (!key) return null; // no key -> never call the provider at all
   const doFetch = fetchImpl || (typeof fetch === 'function' ? fetch : null);
   if (!doFetch) return null;
   const prompt = buildGeminiPrompt(bot, memories, context);
-  const controller = typeof AbortController === 'function' ? new AbortController() : null;
-  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
-  try {
-    const res = await doFetch(`https://generativelanguage.googleapis.com/v1beta/models/${botModel(bot)}:generateContent?key=${encodeURIComponent(key)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-      ...(controller ? { signal: controller.signal } : {})
-    });
-    if (!res || !res.ok) {
-      lastGeminiFailure = res ? `HTTP ${res.status}` : 'no response';
-      return null;
+  const models = geminiAttemptModels(bot);
+  let attempts = 0;
+  let lastFailure = null;
+  let lastModel = '';
+  for (const model of models) {
+    attempts += 1;
+    const r = await attemptGeminiOnce({ key, model, prompt, doFetch, timeoutMs });
+    if (r.text) {
+      lastGeminiFailure = '';
+      return r.text;
     }
-    const json = await res.json();
-    const text = json?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('').trim();
-    if (!text) lastGeminiFailure = 'empty response';
-    else lastGeminiFailure = '';
-    return text || null;
-  } catch (err) {
-    lastGeminiFailure = String(err?.name || err?.message || 'network error');
-    return null; // network error / timeout / bad JSON -> template fallback
-  } finally {
-    if (timer) clearTimeout(timer);
+    lastFailure = r.failure;
+    lastModel = model;
   }
+  lastGeminiFailure = formatGeminiFailure(lastFailure, lastModel, attempts > 1);
+  return null;
 }
