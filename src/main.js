@@ -4,7 +4,7 @@ import * as api from './api.js';
 import { firebaseReady, firebaseConfig } from './firebase.js';
 import { subscribe as storeSubscribe, mutate as demoMutate } from './store.js';
 import { setLocale, t } from './i18n.js';
-import { escapeHtml, uid as genId } from './utils.js';
+import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll } from './utils.js';
 import { toast, openModal, closeModal, confirmModal, avatarHtml } from './components.js';
 import * as V from './views.js';
 
@@ -57,6 +57,7 @@ function headerHtml(d, user) {
     <nav class="topnav">
       <a href="#/" title="${t('home')}">🏠</a>
       <a href="#/friends" title="${t('friends')}">👥</a>
+      <a href="#/events" title="${t('events')}">📅</a>
       <a href="#/groups" title="${t('groups')}">🏘️</a>
       <a href="#/pages" title="${t('pages')}">📄</a>
       <a href="#/messages" title="${t('messages')}">💬${um ? `<span class="nav-badge">${um}</span>` : ''}</a>
@@ -109,11 +110,13 @@ export function render() {
   switch (route) {
     case '': body = V.feedView(d, user, feedPage); break;
     case 'friends': body = V.friendsView(d, user); break;
+    case 'events': body = V.eventsView(d, user); break;
+    case 'event': body = V.eventView(d, user, seg[1] || ''); break;
     case 'groups': body = V.groupsView(d, user, query.get('q') || ''); break;
     case 'group': body = V.groupView(d, user, seg[1] || ''); break;
     case 'pages': body = V.pagesView(d, user, query.get('q') || ''); break;
     case 'page': body = V.pageView(d, user, seg[1] || ''); break;
-    case 'messages': body = V.messagesView(d, user, seg[1] || ''); setTimeout(scrollThread, 30); break;
+    case 'messages': body = V.messagesView(d, user, seg[1] || ''); setTimeout(setupThread, 30); break;
     case 'notifications': body = V.notificationsView(d, user); break;
     case 'profile': body = V.profileView(d, user, seg[1] || user.id); break;
     case 'search': body = V.searchView(d, user, query.get('q') || ''); break;
@@ -133,6 +136,8 @@ export function render() {
     <div class="shell">${body}</div>
     <footer class="footer muted small">MeetBook · People + clearly-labelled AI bots · <a href="#/help">Help</a> · <a href="#/terms">Terms</a> · <a href="#/privacy">Privacy</a> · <a href="#/guidelines">Guidelines</a></footer>
     ${bottomNavHtml(d, user, route, seg)}`;
+
+  maybeBrowserNotify(d, user);
 }
 
 function scrollThread() {
@@ -140,7 +145,220 @@ function scrollThread() {
   if (el) el.scrollTop = el.scrollHeight;
 }
 
+function setupThread() {
+  scrollThread();
+  // Voice messages need MediaRecorder + getUserMedia; hide the mic
+  // button entirely where they are unavailable.
+  const btn = document.getElementById('voice-btn');
+  if (btn && !voiceSupported()) btn.style.display = 'none';
+}
+
+// ------------------------------------------------- foreground web notifications
+// When the user enables "Browser notifications" (Settings → Notifications)
+// and grants permission, NEW notifications that arrive through the existing
+// realtime listeners while the app is open also pop a Web Notification.
+// The seen-id set is seeded on first sight so history never replays; only
+// notifications created after this session started can pop.
+//
+// FUTURE (FCM): background push (app closed) would plug in here — it
+// needs Firebase Cloud Messaging plus a server-side sender (Cloud
+// Functions on Blaze) calling the FCM API for the user's registration
+// tokens. Out of scope on the Spark plan; foreground-only by design.
+const seenNotificationIds = new Set();
+let notifWatchStartedAt = 0;
+function maybeBrowserNotify(d, user) {
+  if (!('Notification' in window)) return;
+  const mine = (d.notifications || []).filter((n) => n.userId === user.id);
+  if (!notifWatchStartedAt) {
+    notifWatchStartedAt = Date.now();
+    for (const n of mine) seenNotificationIds.add(n.id);
+    return;
+  }
+  if (!user.settings?.browserNotifications || Notification.permission !== 'granted') {
+    for (const n of mine) seenNotificationIds.add(n.id);
+    return;
+  }
+  for (const n of mine) {
+    if (seenNotificationIds.has(n.id)) continue;
+    seenNotificationIds.add(n.id);
+    if (n.read || n.actorId === user.id || Number(n.createdAt) < notifWatchStartedAt) continue;
+    try { new Notification('MeetBook', { body: n.text || 'You have a new notification.' }); } catch { /* permission raced */ }
+  }
+  if (seenNotificationIds.size > 1000) { // keep the set bounded
+    const keep = mine.slice(0, 200).map((n) => n.id);
+    seenNotificationIds.clear();
+    for (const id of keep) seenNotificationIds.add(id);
+  }
+}
+
+// ------------------------------------------------------------- voice messages
+// MediaRecorder capture for Messenger voice notes. Audio is stored as a
+// base64 data URL on the message (audio/webm in most browsers), capped at
+// 60 seconds and ~700KB — Firestore documents cap at 1MB, so anything
+// bigger is rejected with a toast instead of being sent.
+const VOICE_MAX_MS = 60_000;
+const VOICE_MAX_DATA_URL = 950_000; // ~700KB of audio once base64-decoded
+let voiceRec = null; // { recorder, stream, chunks, startedAt, timer, convId, blob }
+
+function voiceSupported() {
+  return typeof window !== 'undefined' && 'MediaRecorder' in window && Boolean(navigator.mediaDevices?.getUserMedia);
+}
+
+async function startVoiceRecording(convId) {
+  if (!voiceSupported()) { toast('Voice recording is not supported in this browser.', 'error'); return; }
+  if (voiceRec) return;
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch { toast('Microphone access was denied.', 'error'); return; }
+  const recorder = new MediaRecorder(stream);
+  const rec = { recorder, stream, chunks: [], startedAt: Date.now(), timer: null, convId, blob: null };
+  recorder.ondataavailable = (ev) => { if (ev.data?.size) rec.chunks.push(ev.data); };
+  recorder.onstop = () => {
+    rec.blob = new Blob(rec.chunks, { type: recorder.mimeType || 'audio/webm' });
+    stream.getTracks().forEach((tr) => tr.stop());
+  };
+  voiceRec = rec;
+  recorder.start(250);
+  document.getElementById('voice-ui')?.classList.remove('hidden');
+  document.getElementById('message-form')?.classList.add('hidden');
+  const timeEl = document.getElementById('voice-time');
+  rec.timer = setInterval(() => {
+    const elapsed = Date.now() - rec.startedAt;
+    if (timeEl) timeEl.textContent = `${Math.floor(elapsed / 60000)}:${String(Math.floor(elapsed / 1000) % 60).padStart(2, '0')}`;
+    if (elapsed >= VOICE_MAX_MS && recorder.state === 'recording') recorder.stop(); // hard cap: auto-stop at 60s
+  }, 250);
+}
+
+function endVoiceRecording() {
+  if (!voiceRec) return;
+  clearInterval(voiceRec.timer);
+  if (voiceRec.recorder.state === 'recording') voiceRec.recorder.stop();
+  voiceRec.stream?.getTracks().forEach((tr) => tr.stop());
+}
+
+function resetVoiceUi() {
+  endVoiceRecording();
+  voiceRec = null;
+  document.getElementById('voice-ui')?.classList.add('hidden');
+  document.getElementById('message-form')?.classList.remove('hidden');
+}
+
+async function sendVoiceRecording() {
+  const rec = voiceRec;
+  if (!rec) return;
+  endVoiceRecording();
+  // Give onstop a tick to assemble the blob.
+  await new Promise((r) => setTimeout(r, 60));
+  const blob = rec.blob || new Blob(rec.chunks, { type: 'audio/webm' });
+  const convId = rec.convId;
+  resetVoiceUi();
+  if (!blob.size) { toast('Nothing was recorded.', 'error'); return; }
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  }).catch(() => '');
+  if (!dataUrl) { toast('Could not read the recording.', 'error'); return; }
+  if (dataUrl.length > VOICE_MAX_DATA_URL) {
+    toast('That voice message is too long to send (about 60 seconds max).', 'error');
+    return;
+  }
+  const sent = await handle(api.sendMessage(convId, { text: '', image: '', audio: dataUrl }), 'Voice message sent.');
+  if (sent) { render(); scrollThread(); }
+}
+
+// ------------------------------------------------------------- story viewer
+// Full-screen overlay rendered into its own root (separate from #app and
+// #modal-root, so realtime re-renders never disturb it). The queue is the
+// flattened rail order from views.storyQueueFor: author groups in rail
+// order, each author's stories oldest-first. Opening an author starts at
+// their first unviewed story (or their first story when all are viewed).
+let storySession = null; // { queue: [story], idx }
+
+function storyRootEl() {
+  let root = document.getElementById('story-root');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'story-root';
+    document.body.appendChild(root);
+  }
+  return root;
+}
+
+function openStoryViewer(authorId) {
+  const d = api.data();
+  const user = me();
+  if (!user) return;
+  const queue = V.storyQueueFor(d, user);
+  const mine = queue.map((s, i) => (s.authorId === authorId ? i : -1)).filter((i) => i >= 0);
+  if (!mine.length) return;
+  const start = mine.find((i) => queue[i].authorId !== user.id && !(queue[i].views || []).includes(user.id)) ?? mine[0];
+  storySession = { queue, idx: start };
+  renderStoryViewer();
+}
+
+function closeStoryViewer() {
+  storySession = null;
+  storyRootEl().innerHTML = '';
+}
+
+function storyNav(delta) {
+  if (!storySession) return;
+  const next = storySession.idx + delta;
+  if (next < 0) return;
+  if (next >= storySession.queue.length) { closeStoryViewer(); return; }
+  storySession.idx = next;
+  renderStoryViewer();
+}
+
+function renderStoryViewer() {
+  if (!storySession) return;
+  const d = api.data();
+  const user = me();
+  const s = storySession.queue[storySession.idx];
+  if (!s || !user) { closeStoryViewer(); return; }
+  const byId = V.usersById(d);
+  const author = byId[s.authorId];
+  const isMine = s.authorId === user.id;
+  const authorStories = storySession.queue.filter((q) => q.authorId === s.authorId);
+  const posInAuthor = authorStories.indexOf(s);
+  const viewers = (s.views || []).map((id) => byId[id]).filter(Boolean);
+  const stage = s.image
+    ? `<img class="story-stage-img" src="${escapeHtml(s.image)}" alt="" />${s.text ? `<div class="story-caption">${escapeHtml(s.text)}</div>` : ''}`
+    : `<div class="story-stage-text" style="background:${storyBackgroundCss(s.bg)}"><p>${escapeHtml(s.text)}</p></div>`;
+  storyRootEl().innerHTML = `
+  <div class="story-viewer" role="dialog" aria-modal="true" aria-label="${t('stories')}">
+    <div class="story-top">
+      <div class="story-segments">${authorStories.map((q) => `<span class="story-seg ${authorStories.indexOf(q) <= posInAuthor ? 'done' : ''}"></span>`).join('')}</div>
+      <div class="story-author">
+        ${avatarHtml(author, 34)}
+        <span class="grow"><b>${escapeHtml(author?.name || '')}</b> <span class="story-time">${timeAgo(s.createdAt)}</span></span>
+        ${isMine ? `<button class="story-icon-btn" data-act="story-delete" aria-label="${t('deleteStory')}">🗑️</button>` : ''}
+        <button class="story-icon-btn" data-act="story-close" aria-label="Close">✕</button>
+      </div>
+    </div>
+    <div class="story-stage">
+      ${stage}
+      <button class="story-zone left" data-act="story-prev" aria-label="Previous">‹</button>
+      <button class="story-zone right" data-act="story-next" aria-label="Next">›</button>
+    </div>
+    ${isMine ? `<div class="story-footer">👁 ${viewers.length} ${t('viewers')}${viewers.length ? ` · ${t('seenBy')}: ${viewers.map((v) => escapeHtml(v.name)).join(', ')}` : ` · ${t('noViewersYet')}`}</div>` : ''}
+  </div>`;
+  // Viewing someone else's story records the view (rules allow exactly
+  // this views-only append); fire-and-forget so playback never blocks.
+  if (!isMine) api.markStoryViewed(s.id).catch(() => {});
+}
+
+document.addEventListener('keydown', (e) => {
+  if (!storySession) return;
+  if (e.key === 'Escape') closeStoryViewer();
+  if (e.key === 'ArrowRight') storyNav(1);
+  if (e.key === 'ArrowLeft') storyNav(-1);
+});
+
 function softRender() {
+  if (voiceRec) return; // never re-render mid-recording — it would wipe the recording UI
   const tag = document.activeElement?.tagName;
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)) return; // don't yank focus while typing
   render();
@@ -216,6 +434,9 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'like': await handle(api.toggleLike(postId)); break;
+    case 'poll-vote': await handle(api.votePoll(postId, actEl.dataset.option)); break;
+    case 'toggle-pin': { const pinned = await handle(api.togglePinPost(postId)); if (pinned !== null) toast(pinned ? 'Pinned as announcement.' : 'Announcement unpinned.', 'success'); break; }
+    case 'dismiss-memories': V.uiState.memoriesDismissed = true; render(); break;
     case 'react': await handle(api.toggleReaction(postId, actEl.dataset.emoji)); break;
     case 'share': await handle(api.sharePost(postId), 'Post shared to your timeline.'); break;
     case 'save-post': document.getElementById(`menu-${postId}`)?.classList.add('hidden'); await handle(api.toggleSave(postId), 'Saved list updated.'); break;
@@ -250,15 +471,44 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'feed-more': feedPage = Number(actEl.dataset.page || 2); render(); break;
+    case 'create-story': { const modal = openModal(V.storyFormHtml()); modal.querySelector('[data-close]').onclick = closeModal; break; }
+    case 'view-story': openStoryViewer(actEl.dataset.author); break;
+    case 'story-close': closeStoryViewer(); break;
+    case 'story-prev': storyNav(-1); break;
+    case 'story-next': storyNav(1); break;
+    case 'story-delete': {
+      const current = storySession?.queue[storySession.idx];
+      if (current && await confirmModal('Delete this story?', 'It will be removed immediately for everyone.')) {
+        await handle(api.deleteStory(current.id), 'Story deleted.');
+        storySession.queue = storySession.queue.filter((q) => q.id !== current.id);
+        if (!storySession.queue.length) closeStoryViewer();
+        else { storySession.idx = Math.min(storySession.idx, storySession.queue.length - 1); renderStoryViewer(); }
+      }
+      break;
+    }
     case 'send-request': await handle(api.sendFriendRequest(actEl.dataset.id), 'Friend request sent.'); break;
     case 'accept-request': await handle(api.respondFriendRequest(actEl.dataset.id, true), 'You are now friends!'); break;
     case 'reject-request': await handle(api.respondFriendRequest(actEl.dataset.id, false), 'Request removed.'); break;
     case 'remove-friend': if (await confirmModal('Remove connection?', 'This friendship/request will be removed.')) await handle(api.removeFriendship(actEl.dataset.id), 'Removed.'); break;
     case 'follow': await handle(api.toggleFollow(actEl.dataset.id)); break;
+    case 'toggle-close-friend': { const nowClose = await handle(api.toggleCloseFriend(actEl.dataset.id)); if (nowClose !== null) toast(nowClose ? 'Added to your close friends.' : 'Removed from close friends.', 'success'); break; }
+    case 'create-event': { const modal = openModal(V.eventFormHtml()); modal.querySelector('[data-close]').onclick = closeModal; break; }
+    case 'delete-event': if (await confirmModal('Delete event?', 'The event and its RSVPs will be removed.')) { await handle(api.deleteEvent(actEl.dataset.id), 'Event deleted.'); location.hash = '#/events'; } break;
+    case 'rsvp': await handle(api.toggleEventRsvp(actEl.dataset.id, actEl.dataset.kind)); break;
+    case 'delete-review': if (await confirmModal('Delete your review?', 'Your rating and review text will be removed.')) await handle(api.deleteReview(actEl.dataset.id), 'Review deleted.'); break;
     case 'create-group': { const modal = openModal(V.groupFormHtml(null)); modal.querySelector('[data-close]').onclick = closeModal; break; }
     case 'edit-group': { const g = (d.groups || []).find((x) => x.id === actEl.dataset.id); const modal = openModal(V.groupFormHtml(g)); modal.querySelector('[data-close]').onclick = closeModal; break; }
     case 'delete-group': if (await confirmModal('Delete group?', 'The group and all of its posts will be removed. This cannot be undone.')) { await handle(api.deleteGroup(actEl.dataset.id), 'Group deleted.'); location.hash = '#/groups'; } break;
-    case 'toggle-group-join': await handle(api.toggleGroupMembership(actEl.dataset.id)); break;
+    case 'toggle-group-join': {
+      const result = await handle(api.toggleGroupMembership(actEl.dataset.id));
+      if (result === 'requested') toast('Join request sent — the group creator will review it.', 'success');
+      else if (result === 'withdrawn') toast('Join request withdrawn.', 'success');
+      else if (result === 'joined') toast('You joined the group.', 'success');
+      else if (result === 'left') toast('You left the group.', 'success');
+      break;
+    }
+    case 'approve-group-request': await handle(api.respondGroupRequest(actEl.dataset.id, true), 'Request approved — member added.'); break;
+    case 'reject-group-request': await handle(api.respondGroupRequest(actEl.dataset.id, false), 'Request rejected.'); break;
     case 'remove-member': if (await confirmModal('Remove this member?', 'They will lose access to this group and its posts.')) await handle(api.removeGroupMember(actEl.dataset.group, actEl.dataset.id), 'Member removed.'); break;
     case 'create-page': { const modal = openModal(V.pageFormHtml(null)); modal.querySelector('[data-close]').onclick = closeModal; break; }
     case 'edit-page': { const p = (d.pages || []).find((x) => x.id === actEl.dataset.id); const modal = openModal(V.pageFormHtml(p)); modal.querySelector('[data-close]').onclick = closeModal; break; }
@@ -276,6 +526,10 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'open-conv': await handle(api.markConversationRead(actEl.dataset.id)); location.hash = `#/messages/${actEl.dataset.id}`; render(); break;
+    case 'create-group-chat': { const modal = openModal(V.groupChatFormHtml(d, user)); modal.querySelector('[data-close]').onclick = closeModal; break; }
+    case 'voice-toggle': { const convId = document.getElementById('message-form')?.dataset.conv; if (convId) await startVoiceRecording(convId); break; }
+    case 'voice-cancel': resetVoiceUi(); break;
+    case 'voice-send': await sendVoiceRecording(); break;
     case 'notif-read-all': await handle(api.markAllNotificationsRead(), 'All caught up.'); break;
     case 'notif-open': {
       await handle(api.markNotificationRead(actEl.dataset.id));
@@ -334,8 +588,38 @@ document.addEventListener('submit', async (e) => {
   if (form.id === 'composer-form') {
     const file = fileFrom(form, 'image');
     const image = file ? await api.uploadImage(file, `posts/${user.id}/${Date.now()}_${file.name}`).catch((err) => { toast(err.message, 'error'); return ''; }) : '';
-    const r = await handle(api.createPost({ text: String(fd.get('text') || ''), image, visibility: String(fd.get('visibility') || 'public') }), 'Post published.');
+    const poll = form.querySelector('[name="hasPoll"]')?.checked
+      ? normalisePoll(fd.getAll('pollOption').map((v) => String(v)))
+      : null;
+    if (form.querySelector('[name="hasPoll"]')?.checked && !poll) toast('A poll needs at least two options — posting without the poll.', 'error');
+    const r = await handle(api.createPost({
+      text: String(fd.get('text') || ''), image, visibility: String(fd.get('visibility') || 'public'),
+      poll, location: String(fd.get('location') || ''), feeling: String(fd.get('feeling') || '')
+    }), 'Post published.');
     if (r) { feedPage = 1; render(); }
+    return;
+  }
+  if (form.id === 'event-form') {
+    const coverFile = fileFrom(form, 'cover');
+    const cover = coverFile ? await api.uploadImage(coverFile, `events/${user.id}/${Date.now()}_${coverFile.name}`).catch((err) => { toast(err.message, 'error'); return ''; }) : '';
+    const dateTime = new Date(String(fd.get('dateTime') || '')).getTime();
+    const r = await handle(api.createEvent({
+      title: String(fd.get('title') || ''), description: String(fd.get('description') || ''),
+      dateTime, location: String(fd.get('location') || ''), cover,
+      visibility: String(fd.get('visibility') || 'public')
+    }), 'Event created.');
+    if (r) { closeModal(); location.hash = `#/event/${r.id}`; }
+    return;
+  }
+  if (form.id === 'review-form') {
+    const r = await handle(api.saveReview(form.dataset.page, { rating: Number(fd.get('rating') || 0), text: String(fd.get('text') || '') }), 'Review saved.');
+    if (r) render();
+    return;
+  }
+  if (form.id === 'group-chat-form') {
+    const memberIds = fd.getAll('member').map((v) => String(v));
+    const r = await handle(api.createGroupConversation({ title: String(fd.get('title') || ''), memberIds }), 'Group chat created.');
+    if (r) { closeModal(); location.hash = `#/messages/${r.id}`; }
     return;
   }
   if (form.id === 'groups-search-form') {
@@ -408,9 +692,12 @@ document.addEventListener('submit', async (e) => {
     if (sent) {
       render(); scrollThread();
       // Demo-mode bot replies: the bot answers from its OWN personality+memory.
+      // 1-1 conversations only — bots never auto-reply inside group chats.
       if (!firebaseReady) {
         const conv = api.data().conversations.find((c) => c.id === convId);
-        const otherId = conv?.participants.find((p) => p !== user.id);
+        const otherId = conv && !conv.isGroup && conv.participants.length === 2
+          ? conv.participants.find((p) => p !== user.id)
+          : null;
         const other = api.data().users.find((u) => u.id === otherId);
         if (other?.isBot) {
           setTimeout(() => {
@@ -433,7 +720,13 @@ document.addEventListener('submit', async (e) => {
     return;
   }
   if (form.id === 'edit-profile-form') {
-    const patch = { name: String(fd.get('name')), username: String(fd.get('username')), bio: String(fd.get('bio')) };
+    const patch = {
+      name: String(fd.get('name')), username: String(fd.get('username')), bio: String(fd.get('bio')),
+      nickname: String(fd.get('nickname') || '').trim(),
+      work: String(fd.get('work') || '').trim(), education: String(fd.get('education') || '').trim(),
+      currentCity: String(fd.get('currentCity') || '').trim(), hometown: String(fd.get('hometown') || '').trim(),
+      relationship: String(fd.get('relationship') || ''), website: String(fd.get('website') || '').trim()
+    };
     const avatarFile = fileFrom(form, 'avatar');
     const coverFile = fileFrom(form, 'cover');
     if (avatarFile) patch.avatar = await api.uploadImage(avatarFile, `avatars/${user.id}`).catch((err) => { toast(err.message, 'error'); return user.avatar; });
@@ -446,6 +739,27 @@ document.addEventListener('submit', async (e) => {
     const notifPrefs = {};
     for (const type of ['friend_request', 'like', 'comment', 'reply', 'message', 'mention', 'follow']) notifPrefs[type] = form.querySelector(`[name="${type}"]`)?.checked !== false;
     await handle(api.updateSettings(user.id, { notifPrefs }), 'Preferences saved.');
+    // Browser notifications: enabling asks for permission right away;
+    // the flag is stored either way so the toggle reflects the choice.
+    const wantBrowser = form.querySelector('[name="browserNotifications"]')?.checked === true;
+    if (wantBrowser && 'Notification' in window && Notification.permission === 'default') {
+      await Notification.requestPermission().catch(() => 'denied');
+    }
+    if (wantBrowser && 'Notification' in window && Notification.permission !== 'granted') {
+      toast('Browser notifications are blocked for this site — allow them in your browser settings.', 'error');
+    }
+    await handle(api.updateSettings(user.id, { browserNotifications: wantBrowser }));
+    return;
+  }
+  if (form.id === 'privacy-prefs-form') {
+    await handle(api.updateSettings(user.id, { defaultPostPrivacy: String(fd.get('defaultPostPrivacy') || 'public') }), 'Privacy saved.');
+    return;
+  }
+  if (form.id === 'story-form') {
+    const file = fileFrom(form, 'image');
+    const image = file ? await api.uploadImage(file, `stories/${user.id}/${Date.now()}_${file.name}`).catch((err) => { toast(err.message, 'error'); return ''; }) : '';
+    const r = await handle(api.createStory({ text: String(fd.get('text') || ''), image, bg: String(fd.get('bg') || 'sunset'), visibility: String(fd.get('visibility') || 'public') }), 'Story posted — it will disappear in 24 hours.');
+    if (r) closeModal();
     return;
   }
   if (form.id === 'bot-form') {
@@ -478,8 +792,11 @@ document.addEventListener('submit', async (e) => {
   }
 });
 
-// Composer image preview + locale select + maintenance toggle (change events)
+// Composer image preview + poll toggle + locale select + maintenance toggle (change events)
 document.addEventListener('change', async (e) => {
+  if (e.target.name === 'hasPoll' && e.target.closest('#composer-form')) {
+    document.getElementById('poll-fields')?.classList.toggle('hidden', !e.target.checked);
+  }
   if (e.target.id === 'locale-select') {
     prefs.locale = e.target.value; savePrefs(); applyPrefs(); render();
   }
@@ -498,6 +815,17 @@ document.addEventListener('change', async (e) => {
 
 // Mark a conversation read when its thread is opened.
 document.addEventListener('meetbook:route', () => {});
+
+// Conversation-list search: pure DOM filter over the rendered conv items
+// (matched on the other person's name, stored lowercase in data-search),
+// so typing never triggers a re-render that would lose input focus.
+document.addEventListener('input', (e) => {
+  if (e.target.id !== 'conv-search') return;
+  const q = e.target.value.trim().toLowerCase();
+  document.querySelectorAll('.conv-item[data-search]').forEach((el) => {
+    el.style.display = !q || (el.dataset.search || '').includes(q) ? '' : 'none';
+  });
+});
 
 // ------------------------------------------------------------- PWA
 window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferredInstallPrompt = e; softRender(); });

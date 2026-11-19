@@ -120,6 +120,41 @@ service cloud.firestore {
       allow delete: if signedIn() && (resource.data.authorId == request.auth.uid || isAdmin());
     }
 
+    // ----------------------------------------------------------- stories
+    // Stories are photo/text only and live for 24 hours (expiry is a
+    // client-side filter on createdAt; the rules govern access). The
+    // read rule uses the same PROVABLE shape as posts — the audience is
+    // denormalized at creation (friends stories snapshot the author's
+    // friend ids into audienceIds), so the client's three listeners
+    // (public / authorId == me / audienceIds contains me) are allowed.
+    match /stories/{storyId} {
+      allow read: if signedIn() && (
+        resource.data.authorId == request.auth.uid
+        || isAdmin()
+        || resource.data.get('visibility', 'public') == 'public'
+        || request.auth.uid in resource.data.get('audienceIds', [])
+      );
+      // A story starts life with an empty views list — nobody can
+      // pre-populate viewers.
+      allow create: if signedIn()
+        && request.resource.data.authorId == request.auth.uid
+        && request.resource.data.get('views', []).size() == 0;
+      // The author (and admins) manage the story; anyone else signed in
+      // may ONLY append their own uid to views — the diff pins every
+      // other field, the hasAll + size + membership checks make it an
+      // append of exactly the caller's uid, mirroring the groups/pages
+      // membership-update pattern.
+      allow update: if isAdmin()
+        || (signedIn() && resource.data.authorId == request.auth.uid)
+        || (signedIn()
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['views'])
+            && request.resource.data.get('views', []).hasAll(resource.data.get('views', []))
+            && request.resource.data.get('views', []).size() == resource.data.get('views', []).size() + 1
+            && request.auth.uid in request.resource.data.get('views', [])
+            && !(request.auth.uid in resource.data.get('views', [])));
+      allow delete: if signedIn() && (resource.data.authorId == request.auth.uid || isAdmin());
+    }
+
     // ------------------------------------------------------------ groups
     // Membership lives on the group document (members array, creator in
     // createdBy). Public groups are readable by any signed-in user;
@@ -171,10 +206,14 @@ service cloud.firestore {
     }
 
     // ---------------------------------------------------- conversations
+    // 1-1 chats have exactly 2 participants; GROUP chats (isGroup) have
+    // 2+ and must name their creator (createdBy == caller).
     match /conversations/{convId} {
       allow read: if signedIn() && (request.auth.uid in resource.data.participants || isAdmin());
       allow create: if signedIn() && request.auth.uid in request.resource.data.participants
-        && request.resource.data.participants.size() == 2;
+        && request.resource.data.participants.size() >= 2
+        && (request.resource.data.get('isGroup', false) == false
+            || request.resource.data.get('createdBy', '') == request.auth.uid);
       allow update: if signedIn() && request.auth.uid in resource.data.participants;
       allow delete: if isAdmin();
     }
@@ -198,6 +237,84 @@ service cloud.firestore {
         && request.resource.data.senderId == resource.data.senderId
         && request.resource.data.get('participants', []) == resource.data.get('participants', []);
       allow delete: if isAdmin();
+    }
+
+    // ----------------------------------------------------------- events
+    // Mirrors the posts rule: the audience is denormalized at creation
+    // (postAudience), so the read rule is PROVABLE from the client's
+    // three listeners (visibility == 'public' / createdBy == me /
+    // audienceIds contains me) — it only inspects fields on the event
+    // itself. RSVP updates ride an engagement branch that pins every
+    // content/audience field and leaves only going/interested writable.
+    match /events/{eventId} {
+      allow read: if signedIn() && (
+        resource.data.createdBy == request.auth.uid
+        || isAdmin()
+        || resource.data.get('visibility', 'public') == 'public'
+        || request.auth.uid in resource.data.get('audienceIds', [])
+      );
+      allow create: if signedIn()
+        && request.resource.data.createdBy == request.auth.uid;
+      allow update: if isAdmin()
+        || (signedIn() && resource.data.createdBy == request.auth.uid)
+        || (signedIn()
+            && request.resource.data.createdBy == resource.data.createdBy
+            && request.resource.data.title == resource.data.title
+            && request.resource.data.description == resource.data.description
+            && request.resource.data.dateTime == resource.data.dateTime
+            && request.resource.data.location == resource.data.location
+            && request.resource.data.cover == resource.data.cover
+            && request.resource.data.visibility == resource.data.visibility
+            && request.resource.data.get('audienceIds', []) == resource.data.get('audienceIds', []));
+      allow delete: if signedIn() && (resource.data.createdBy == request.auth.uid || isAdmin());
+    }
+
+    // ----------------------------------------------------------- reviews
+    // Page reviews are public to signed-in users. The read rule is
+    // deliberately field-INDEPENDENT (signedIn only) so the client's
+    // where('pageId', '==', X) list query stays provable. One review per
+    // user per page is a client-level invariant (the app upserts).
+    match /reviews/{reviewId} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.authorId == request.auth.uid
+        && request.resource.data.rating >= 1
+        && request.resource.data.rating <= 5;
+      allow update: if signedIn()
+        && (resource.data.authorId == request.auth.uid || isAdmin())
+        && request.resource.data.authorId == resource.data.authorId
+        && request.resource.data.pageId == resource.data.pageId
+        && request.resource.data.rating >= 1
+        && request.resource.data.rating <= 5;
+      allow delete: if signedIn() && (resource.data.authorId == request.auth.uid || isAdmin());
+    }
+
+    // ----------------------------------------------------- groupRequests
+    // Join requests for PRIVATE groups. groupOwnerId (the group creator)
+    // is denormalized onto the request at creation, so both list queries
+    // the client runs — where('userId','==',me) for "my requests" and
+    // where('groupOwnerId','==',me) for the creator's queue — are
+    // provable from the request document's own fields.
+    match /groupRequests/{requestId} {
+      allow read: if signedIn()
+        && (resource.data.userId == request.auth.uid
+            || resource.data.groupOwnerId == request.auth.uid
+            || isAdmin());
+      allow create: if signedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.status == 'pending';
+      // Only the group owner (or an admin) decides; the pinned fields
+      // keep the request's identity intact — only status may change.
+      allow update: if signedIn()
+        && (resource.data.groupOwnerId == request.auth.uid || isAdmin())
+        && request.resource.data.userId == resource.data.userId
+        && request.resource.data.groupId == resource.data.groupId
+        && request.resource.data.groupOwnerId == resource.data.groupOwnerId;
+      // The requester may withdraw their own request.
+      allow delete: if signedIn()
+        && (resource.data.userId == request.auth.uid
+            || resource.data.groupOwnerId == request.auth.uid
+            || isAdmin());
     }
 
     // ----------------------------------------------------- notifications

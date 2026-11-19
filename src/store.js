@@ -5,7 +5,7 @@
 import { uid } from './utils.js';
 import { normaliseBot, DEFAULT_BOT_LIMITS } from './botLogic.js';
 
-const KEY = 'meetbook_demo_v3';
+const KEY = 'meetbook_demo_v5';
 const listeners = new Set();
 
 export function subscribe(fn) {
@@ -21,13 +21,18 @@ function emit() {
 
 const now = Date.now();
 const H = 3600_000;
+// Exactly one calendar year ago today — seeds the Memories card (the demo
+// user's own "on this day" post).
+const yearAgoDate = new Date(now);
+yearAgoDate.setFullYear(yearAgoDate.getFullYear() - 1);
+const yearAgo = yearAgoDate.getTime();
 
 function seed() {
   const users = [
-    { id: 'u_admin', name: 'MeetBook Admin', username: 'admin.team', email: 'admin@meetbook.app', password: 'admin123', bio: 'Platform administrator.', avatar: '', cover: '', role: 'admin', isBot: false, online: true, createdAt: now - 90 * 24 * H, followers: [], following: [], settings: {} },
-    { id: 'u_ayesha', name: 'Ayesha Rahman', username: 'ayesha.r', email: 'ayesha@example.com', password: 'demo123', bio: 'Photographer 📷 | Dhaka | Chasing light and stories.', avatar: '', cover: '', role: 'user', isBot: false, online: true, createdAt: now - 60 * 24 * H, followers: [], following: [], settings: {} },
-    { id: 'u_tanvir', name: 'Tanvir Hasan', username: 'tanvir.h', email: 'tanvir@example.com', password: 'demo123', bio: 'Software engineer. Coffee first, code second.', avatar: '', cover: '', role: 'user', isBot: false, online: false, createdAt: now - 45 * 24 * H, followers: [], following: [], settings: {} },
-    { id: 'u_priya', name: 'Priya Das', username: 'priya.d', email: 'priya@example.com', password: 'demo123', bio: 'Book lover and amateur chef. Here for good conversations.', avatar: '', cover: '', role: 'user', isBot: false, online: true, createdAt: now - 30 * 24 * H, followers: [], following: [], settings: {} }
+    { id: 'u_admin', name: 'MeetBook Admin', username: 'admin.team', email: 'admin@meetbook.app', password: 'admin123', bio: 'Platform administrator.', avatar: '', cover: '', work: 'MeetBook', education: '', currentCity: '', hometown: '', relationship: '', website: '', nickname: '', role: 'admin', isBot: false, online: true, createdAt: now - 90 * 24 * H, followers: [], following: [], closeFriends: [], settings: {} },
+    { id: 'u_ayesha', name: 'Ayesha Rahman', username: 'ayesha.r', email: 'ayesha@example.com', password: 'demo123', bio: 'Photographer 📷 | Dhaka | Chasing light and stories.', avatar: '', cover: '', work: 'Freelance Photographer', education: 'University of Dhaka', currentCity: 'Dhaka', hometown: 'Chattogram', relationship: 'Single', website: '', nickname: 'Ash', role: 'user', isBot: false, online: true, createdAt: now - 60 * 24 * H, followers: [], following: [], closeFriends: ['u_tanvir'], settings: {} },
+    { id: 'u_tanvir', name: 'Tanvir Hasan', username: 'tanvir.h', email: 'tanvir@example.com', password: 'demo123', bio: 'Software engineer. Coffee first, code second.', avatar: '', cover: '', work: 'Software Engineer', education: 'BUET', currentCity: 'Dhaka', hometown: 'Khulna', relationship: 'In a relationship', website: '', nickname: '', role: 'user', isBot: false, online: false, createdAt: now - 45 * 24 * H, followers: [], following: [], closeFriends: [], settings: {} },
+    { id: 'u_priya', name: 'Priya Das', username: 'priya.d', email: 'priya@example.com', password: 'demo123', bio: 'Book lover and amateur chef. Here for good conversations.', avatar: '', cover: '', work: 'School Teacher', education: 'Eden Mohila College', currentCity: 'Dhaka', hometown: 'Dhaka', relationship: 'Married', website: '', nickname: '', role: 'user', isBot: false, online: true, createdAt: now - 30 * 24 * H, followers: [], following: [], closeFriends: [], settings: {} }
   ];
 
   const botDefs = [
@@ -37,7 +42,7 @@ function seed() {
   ];
   const bots = botDefs.map((b, i) => normaliseBot({ ...b, active: true, limits: { ...DEFAULT_BOT_LIMITS }, createdAt: now - (20 - i) * 24 * H }));
   for (const b of bots) {
-    users.push({ id: b.id, name: b.name, username: b.username, email: '', password: '', bio: b.bio, avatar: '', cover: '', role: 'bot', isBot: true, botId: b.id, online: true, createdAt: b.createdAt, followers: [], following: [], settings: {} });
+    users.push({ id: b.id, name: b.name, username: b.username, email: '', password: '', bio: b.bio, avatar: '', cover: '', work: '', education: '', currentCity: '', hometown: '', relationship: '', website: '', nickname: '', role: 'bot', isBot: true, botId: b.id, online: true, createdAt: b.createdAt, followers: [], following: [], closeFriends: [], settings: {} });
   }
 
   const posts = [
@@ -53,7 +58,14 @@ function seed() {
     // group's privacy is folded into visibility 'private' + members audience.
     { id: 'p_g2', authorId: 'u_priya', groupId: 'g_kitchen', pageId: '', pageName: '', pageAvatar: '', text: 'Circle only 🤫 — the secret to my mishti doi is a pinch of cardamom in the milk before it sets. Please do not share this outside the group!', image: '', visibility: 'private', audienceIds: ['u_priya', 'u_ayesha'], createdAt: now - 5 * H, editedAt: 0, likes: ['u_ayesha'], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [] },
     { id: 'p_pg1', authorId: 'u_priya', groupId: '', pageId: 'pg_eats', pageName: 'Dhaka Eats', pageAvatar: '', text: 'This week\'s find: a tiny cart near New Market serving the fluffiest fuchka in the city. Full review coming this weekend!', image: '', visibility: 'public', audienceIds: [], createdAt: now - 6 * H, editedAt: 0, likes: ['u_ayesha', 'u_tanvir'], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [] },
-    { id: 'p_pg2', authorId: 'u_tanvir', groupId: '', pageId: 'pg_tech', pageName: 'Tech Tonic', pageAvatar: '', text: 'Open-source pick of the week: a tiny static-site generator that builds in milliseconds. Simple tools, done well.', image: '', visibility: 'public', audienceIds: [], createdAt: now - 9 * H, editedAt: 0, likes: ['bot_nova'], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [] }
+    { id: 'p_pg2', authorId: 'u_tanvir', groupId: '', pageId: 'pg_tech', pageName: 'Tech Tonic', pageAvatar: '', text: 'Open-source pick of the week: a tiny static-site generator that builds in milliseconds. Simple tools, done well.', image: '', visibility: 'public', audienceIds: [], createdAt: now - 9 * H, editedAt: 0, likes: ['bot_nova'], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [] },
+    // Poll post: votes are a { uid: optionId } map, exactly as votePoll writes.
+    { id: 'p_poll', authorId: 'u_tanvir', text: 'Serious question for Dhaka people: what is the best season in this city?', image: '', visibility: 'public', audienceIds: [], createdAt: now - 1.2 * H, editedAt: 0, likes: [], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [], poll: { options: [ { id: 'opt1', text: 'Winter' }, { id: 'opt2', text: 'Monsoon' }, { id: 'opt3', text: 'Spring' } ], votes: { u_ayesha: 'opt1', u_priya: 'opt1', bot_nova: 'opt2' } } },
+    // Check-in + feeling post.
+    { id: 'p_feel', authorId: 'u_ayesha', text: 'Finally visited after years of walking past it. Some places hold the whole city\'s memory.', image: '', visibility: 'public', audienceIds: [], createdAt: now - 50 * 60000, editedAt: 0, likes: ['u_priya'], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [], location: 'Lalbagh Fort, Dhaka', feeling: 'grateful' },
+    // Memory post: Ayesha's own post from exactly one year ago today — the
+    // home-feed Memories card surfaces it for her ("1 year ago today").
+    { id: 'p_memory', authorId: 'u_ayesha', text: 'One year ago today I picked up a camera again after a long break. Best decision I made that year. 📷', image: '', visibility: 'public', audienceIds: [], createdAt: yearAgo, editedAt: 0, likes: ['u_tanvir'], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [] }
   ];
 
   const groups = [
@@ -66,10 +78,22 @@ function seed() {
     { id: 'pg_tech', name: 'Tech Tonic', category: 'Technology', about: 'Gadget news, coding tips and open-source highlights in plain language.', avatar: '', cover: '', ownerId: 'u_tanvir', followers: ['u_ayesha', 'u_priya', 'bot_nova'], createdAt: now - 35 * 24 * H }
   ];
 
+  // Stories are photo/text only and expire after 24h. audienceIds mirrors
+  // createStory: friends stories snapshot the author's accepted friends
+  // (Tanvir's are u_ayesha via f_1 and u_priya via f_3); public ones [].
+  const stories = [
+    { id: 'st_1', authorId: 'u_ayesha', image: '', text: 'Golden hour walk by the river 🌇', bg: 'sunset', visibility: 'public', audienceIds: [], views: ['u_priya'], createdAt: now - 1 * H },
+    { id: 'st_2', authorId: 'u_priya', image: '', text: 'Mishti doi experiment #3 — wish me luck! 🍮', bg: 'grape', visibility: 'public', audienceIds: [], views: [], createdAt: now - 3 * H },
+    { id: 'st_3', authorId: 'u_tanvir', image: '', text: 'Friends only: deployment day, no spoilers 🚀', bg: 'ocean', visibility: 'friends', audienceIds: ['u_ayesha', 'u_priya'], views: [], createdAt: now - 5 * H },
+    // Already expired (>24h old) — the rail/viewer must never render it.
+    { id: 'st_old', authorId: 'u_ayesha', image: '', text: 'Yesterday\'s story — gone by design.', bg: 'ember', visibility: 'public', audienceIds: [], views: [], createdAt: now - 26 * H }
+  ];
+
   return {
     users,
     sessionUid: '',
     posts,
+    stories,
     groups,
     pages,
     friendships: [
@@ -79,11 +103,28 @@ function seed() {
     ],
     blocks: [], // {by, target}
     conversations: [
-      { id: 'conv_1', participants: ['u_ayesha', 'bot_sage'], createdAt: now - 26 * H }
+      { id: 'conv_1', participants: ['u_ayesha', 'bot_sage'], createdAt: now - 26 * H },
+      // Group chat: >2 participants, isGroup + title + createdBy. Messages
+      // carry the same denormalized participants array as 1-1 chats.
+      { id: 'conv_grp', participants: ['u_ayesha', 'u_tanvir', 'u_priya'], isGroup: true, title: 'Weekend Plans', createdBy: 'u_ayesha', createdAt: now - 30 * H }
     ],
     messages: [
-      { id: 'm_1', conversationId: 'conv_1', participants: ['u_ayesha', 'bot_sage'], senderId: 'bot_sage', text: 'Hello! I am Sage, an AI bot. Ask me about books or study tips any time.', image: '', createdAt: now - 26 * H, status: 'read', readBy: ['bot_sage'] }
+      { id: 'm_1', conversationId: 'conv_1', participants: ['u_ayesha', 'bot_sage'], senderId: 'bot_sage', text: 'Hello! I am Sage, an AI bot. Ask me about books or study tips any time.', image: '', createdAt: now - 26 * H, status: 'read', readBy: ['bot_sage'] },
+      { id: 'm_g1', conversationId: 'conv_grp', participants: ['u_ayesha', 'u_tanvir', 'u_priya'], senderId: 'u_priya', text: 'Photo walk this Saturday? The river light was unreal last week.', image: '', createdAt: now - 8 * H, status: 'read', readBy: ['u_priya', 'u_ayesha'] },
+      { id: 'm_g2', conversationId: 'conv_grp', participants: ['u_ayesha', 'u_tanvir', 'u_priya'], senderId: 'u_tanvir', text: 'In! I will bring the spare lens this time.', image: '', createdAt: now - 7.5 * H, status: 'read', readBy: ['u_tanvir', 'u_priya'] }
     ],
+    // Events: audienceIds mirrors createEvent — the friends event snapshots
+    // Priya's accepted friends (u_ayesha via f_2, u_tanvir via f_3).
+    events: [
+      { id: 'ev_1', title: 'Dhaka Photo Walk: Old Town at Golden Hour', description: 'Bring any camera (phones welcome). We meet at the Lalbagh Fort gate, walk the old town lanes, and end with cha at a rooftop near the river.', dateTime: now + 3 * 24 * H, location: 'Lalbagh Fort gate, Dhaka', cover: '', createdBy: 'u_ayesha', visibility: 'public', audienceIds: [], going: ['u_tanvir', 'u_priya'], interested: ['bot_pixel'], createdAt: now - 2 * 24 * H },
+      { id: 'ev_2', title: 'Mishti Doi Tasting (Friends Only)', description: 'Three batches, blind tasting, honest scores. Loser washes the handis.', dateTime: now + 6 * 24 * H, location: 'Priya\'s home kitchen', cover: '', createdBy: 'u_priya', visibility: 'friends', audienceIds: ['u_ayesha', 'u_tanvir'], going: ['u_ayesha'], interested: ['u_tanvir'], createdAt: now - 1 * 24 * H }
+    ],
+    reviews: [
+      { id: 'rev_1', pageId: 'pg_eats', authorId: 'u_ayesha', rating: 5, text: 'The fuchka cart tip alone was worth following this page. Honest, specific reviews.', createdAt: now - 2 * 24 * H },
+      { id: 'rev_2', pageId: 'pg_eats', authorId: 'u_tanvir', rating: 4, text: 'Great finds around New Market. Would love a map view of all the carts!', createdAt: now - 1 * 24 * H },
+      { id: 'rev_3', pageId: 'pg_tech', authorId: 'u_priya', rating: 5, text: 'Explains tech in plain language. My students read it too.', createdAt: now - 3 * 24 * H }
+    ],
+    groupRequests: [], // {groupId, groupOwnerId, userId, status: 'pending'|'approved'|'rejected', createdAt}
     notifications: [],
     reports: [],
     bots,
@@ -110,7 +151,15 @@ function load() {
     const raw = localStorage.getItem(KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (parsed && Array.isArray(parsed.users) && Array.isArray(parsed.posts)) return parsed;
+      if (parsed && Array.isArray(parsed.users) && Array.isArray(parsed.posts)) {
+        // Tolerate states saved before a feature landed: default the
+        // newer collections so views never read undefined.
+        for (const key of ['stories', 'groups', 'pages', 'events', 'reviews', 'groupRequests']) {
+          if (!Array.isArray(parsed[key])) parsed[key] = [];
+        }
+        for (const u of parsed.users) if (!Array.isArray(u.closeFriends)) u.closeFriends = [];
+        return parsed;
+      }
     }
   } catch { /* corrupted storage -> reseed */ }
   return seed();

@@ -1,5 +1,5 @@
 // Shared UI components: avatars, toasts, modals, post cards.
-import { escapeHtml, initials, avatarColor, timeAgo } from './utils.js';
+import { escapeHtml, initials, avatarColor, timeAgo, pollResults, feelingByKey } from './utils.js';
 import { t } from './i18n.js';
 
 export function toast(message, type = 'info') {
@@ -73,18 +73,26 @@ export function postCardHtml(post, ctx) {
   const comments = (post.comments || []).map((c) => commentHtml(c, post, ctx)).join('');
   const sharedNote = post.sharedFrom ? `<div class="shared-note">🔁 Shared from ${escapeHtml(usersById[post.sharedFrom]?.name || 'a post')}</div>` : '';
   const groupNote = group && ctx.showGroupContext !== false ? `<div class="shared-note">🏘️ Posted in <a href="#/group/${group.id}">${escapeHtml(group.name)}</a></div>` : '';
-  const visIcon = post.visibility === 'friends' ? '👥' : (post.visibility === 'only-me' || post.visibility === 'private') ? '🔒' : '🌍';
+  const pinnedNote = post.pinned && post.groupId ? `<div class="pinned-note">📌 ${t('announcement')}</div>` : '';
+  const visIcon = post.visibility === 'friends' ? '👥' : post.visibility === 'close' ? '⭐' : (post.visibility === 'only-me' || post.visibility === 'private') ? '🔒' : '🌍';
+  // Facebook-style header suffix: "— feeling grateful 🙏 at Lalbagh Fort".
+  const feelingObj = feelingByKey(post.feeling);
+  const feelBits = [];
+  if (feelingObj) feelBits.push(`${t('feelingLabel')} ${feelingObj.label} ${feelingObj.emoji}`);
+  if (post.location) feelBits.push(`at <b>${escapeHtml(post.location)}</b>`);
+  const feelSuffix = feelBits.length ? ` <span class="post-feeling">— ${feelBits.join(' ')}</span>` : '';
   const authorBlock = page
     ? `<a href="#/page/${page.id}" class="row gap-sm">${avatarHtml({ name: page.name, username: page.name, avatar: page.avatar }, 44)}<span>
         <span class="user-name">${escapeHtml(page.name)} <span class="badge">${t('pageLabel')}</span></span><br/>
         <span class="muted small">${escapeHtml(page.category || t('pageLabel'))} · ${timeAgo(post.createdAt)} · ${visIcon}${post.editedAt ? ' · edited' : ''}</span>
       </span></a>`
     : `<a href="#/profile/${post.authorId}" class="row gap-sm">${avatarHtml(author, 44)}<span>
-        ${userNameHtml(author)}<br/>
+        ${userNameHtml(author)}${feelSuffix}<br/>
         <span class="muted small">@${escapeHtml(author?.username || '')} · ${timeAgo(post.createdAt)} · ${visIcon}${post.editedAt ? ' · edited' : ''}</span>
       </span></a>`;
   return `
   <article class="card post-card" data-post="${post.id}">
+    ${pinnedNote}
     ${sharedNote}
     ${groupNote}
     <header class="post-head">
@@ -93,6 +101,7 @@ export function postCardHtml(post, ctx) {
         <button class="icon-btn" data-menu="${post.id}" aria-label="Post options">•••</button>
         <div class="menu hidden" id="menu-${post.id}">
           ${post.authorId === me?.id ? `<button data-act="edit-post">✏️ ${t('edit')}</button><button data-act="delete-post">🗑️ ${t('delete')}</button>` : ''}
+          ${post.groupId && group?.createdBy === me?.id ? `<button data-act="toggle-pin">📌 ${post.pinned ? t('unpinAnnouncement') : t('pinAnnouncement')}</button>` : ''}
           <button data-act="save-post">${saved ? '🔖 ' + t('saved') : '🔖 ' + t('save')}</button>
           ${post.authorId !== me?.id ? `<button data-act="report-post">🚩 ${t('report')}</button>` : ''}
         </div>
@@ -100,6 +109,7 @@ export function postCardHtml(post, ctx) {
     </header>
     <p class="post-text">${linkify(post.text)}</p>
     ${post.image ? `<img class="post-image" src="${escapeHtml(post.image)}" alt="Post photo" loading="lazy" />` : ''}
+    ${post.poll ? pollBlockHtml(post, me) : ''}
     <div class="post-stats muted small">
       <span>${post.likes?.length || 0} likes</span>
       ${reactionLine ? `<span>${escapeHtml(reactionLine)}</span>` : ''}
@@ -121,6 +131,22 @@ export function postCardHtml(post, ctx) {
       <button class="btn btn-primary btn-sm" type="submit">${t('send')}</button>
     </form>
   </article>`;
+}
+
+// Poll block on a post card: each option is a vote button with a
+// percentage bar behind it; the viewer's current choice is highlighted
+// and clicking another option changes the vote (votes are a uid map).
+function pollBlockHtml(post, meUser) {
+  const res = pollResults(post);
+  const myVote = post.poll?.votes?.[meUser?.id] || '';
+  return `<div class="poll">
+    ${res.options.map((o) => `<button class="poll-option ${myVote === o.id ? 'mine' : ''}" data-act="poll-vote" data-option="${o.id}" aria-pressed="${myVote === o.id}">
+      <span class="poll-bar" style="width:${o.pct}%"></span>
+      <span class="poll-option-text">${escapeHtml(o.text)}${myVote === o.id ? ' ✓' : ''}</span>
+      <span class="poll-pct">${o.pct}%</span>
+    </button>`).join('')}
+    <p class="muted small poll-total">${res.totalVotes} ${t('voters')}</p>
+  </div>`;
 }
 
 function commentHtml(c, post, ctx) {
