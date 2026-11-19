@@ -40,6 +40,28 @@ export function confirmModal(title, body) {
   });
 }
 
+// Admin confirmation dialog with an OPTIONAL reason field (Super Admin
+// Pack A): resolves { confirmed: true, reason } on confirm, or null on
+// cancel. The reason is stored on the audit-log entry for the action.
+export function adminActionModal({ title, body = '', confirmLabel = 'Confirm', danger = true } = {}) {
+  return new Promise((resolve) => {
+    const modal = openModal(`
+      <h3>${escapeHtml(title)}</h3>
+      ${body ? `<p class="muted">${escapeHtml(body)}</p>` : ''}
+      <label>${t('reasonLabel')}<input name="admin-reason" maxlength="200" placeholder="${t('reasonPlaceholder')}" autocomplete="off" /></label>
+      <div class="row gap end">
+        <button class="btn btn-ghost" data-no>${t('cancel')}</button>
+        <button class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-yes>${escapeHtml(confirmLabel)}</button>
+      </div>`);
+    modal.querySelector('[data-no]').onclick = () => { closeModal(); resolve(null); };
+    modal.querySelector('[data-yes]').onclick = () => {
+      const reason = modal.querySelector('[name="admin-reason"]')?.value?.trim() || '';
+      closeModal();
+      resolve({ confirmed: true, reason });
+    };
+  });
+}
+
 export function avatarHtml(user, size = 40) {
   if (!user) return '';
   if (user.avatar) return `<img class="avatar" style="width:${size}px;height:${size}px" src="${escapeHtml(user.avatar)}" alt="${escapeHtml(user.name)}" loading="lazy" />`;
@@ -50,11 +72,20 @@ export function userNameHtml(user) {
   if (!user) return '<span class="muted">Unknown user</span>';
   // Badges are joined with explicit spaces — concatenated badge spans
   // with nothing between them render (and extract) as one run-on word.
+  // The verified ✓ (users.verified, set from Admin → Users) renders
+  // everywhere names appear through this helper.
   const badges = [
+    user.verified ? `<span class="badge badge-verified" title="${t('verified')}">✓</span>` : '',
     user.isBot ? `<span class="badge badge-bot" title="This is an AI bot account">${t('aiBot')}</span>` : '',
-    user.role === 'admin' ? '<span class="badge badge-admin">Admin</span>' : ''
+    (user.role === 'admin' || user.role === 'superadmin') ? '<span class="badge badge-admin">Admin</span>' : ''
   ].filter(Boolean).join(' ');
   return `<span class="user-name">${escapeHtml(user.name)}${badges ? ` ${badges}` : ''}</span>`;
+}
+
+// Small ✓ badge for the hand-rolled name markup in comment threads
+// (kept in step with userNameHtml's verified treatment).
+export function verifiedBadgeHtml(user) {
+  return user?.verified ? ` <span class="badge badge-verified" title="${t('verified')}">✓</span>` : '';
 }
 
 export function postCardHtml(post, ctx) {
@@ -167,14 +198,14 @@ function commentHtml(c, post, ctx) {
     const ra = usersById[r.authorId];
     return `<div class="comment reply">
       ${avatarHtml(ra, 28)}
-      <div class="comment-body"><b>${escapeHtml(ra?.name || '')}</b> ${ra?.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''} ${linkify(r.text)}
+      <div class="comment-body"><b>${escapeHtml(ra?.name || '')}</b>${verifiedBadgeHtml(ra)} ${ra?.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''} ${linkify(r.text)}
       <div class="muted small">${timeAgo(r.createdAt)}${r.authorId === me?.id || post.authorId === me?.id ? ` · <button class="link-btn" data-act="delete-comment" data-comment="${r.id}">delete</button>` : ''}</div></div>
     </div>`;
   }).join('');
   return `<div class="comment">
     ${avatarHtml(author, 32)}
     <div class="comment-body">
-      <b>${escapeHtml(author?.name || '')}</b> ${author?.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''} ${linkify(c.text)}
+      <b>${escapeHtml(author?.name || '')}</b>${verifiedBadgeHtml(author)} ${author?.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''} ${linkify(c.text)}
       <div class="muted small">${timeAgo(c.createdAt)} · <button class="link-btn" data-act="reply-toggle" data-comment="${c.id}">Reply</button>${c.authorId === me?.id || post.authorId === me?.id ? ` · <button class="link-btn" data-act="delete-comment" data-comment="${c.id}">delete</button>` : ''}</div>
       <form class="reply-form hidden" data-reply-form="${c.id}">
         <input name="text" placeholder="Write a reply…" autocomplete="off" maxlength="500" />

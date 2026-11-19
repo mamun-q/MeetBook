@@ -6,9 +6,17 @@ rules_version = '2';
 //
 // Enforcement model:
 //  - A request is "signed in" when request.auth != null.
-//  - A user is an ADMIN when their users/{uid} document has role == 'admin'
-//    (checked server-side here via get(), and again in Cloud Functions —
-//    never by frontend code alone).
+//  - Staff roles live on users/{uid}.role: 'analyst' (read-only),
+//    'moderator', 'admin' and 'superadmin' (checked server-side here via
+//    get(), and again in Cloud Functions — never by frontend code alone).
+//    isAdmin() means admin-or-above; role/isBot changes are pinned to
+//    superadmins in the users update rule.
+//  - ACCOUNT STATUS: users.status ∈ 'active' | 'suspended' | 'banned'
+//    (absent means active). writerStatusOk() gates the create rules of
+//    user-generated content on the WRITER's own status, so a suspended
+//    or banned account cannot create anything new. It reads the writer's
+//    own doc via get() — only ever used on single-document create paths,
+//    never in read/list rules, so provable queries are unaffected.
 //  - Bot collections are writable only by admins from the client; the real
 //    bot engine writes with the Admin SDK from Cloud Functions, which
 //    bypasses these rules under controlled backend permissions.
@@ -44,7 +52,27 @@ service cloud.firestore {
     function isAdmin() {
       return signedIn()
         && exists(/databases/$(database)/documents/users/$(request.auth.uid))
-        && userDoc(request.auth.uid).data.get('role', 'user') == 'admin';
+        && userDoc(request.auth.uid).data.get('role', 'user') in ['admin', 'superadmin'];
+    }
+    function isSuperAdmin() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && userDoc(request.auth.uid).data.get('role', 'user') == 'superadmin';
+    }
+    // Moderator or above — report review and moderation reads/writes.
+    function isModerator() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && userDoc(request.auth.uid).data.get('role', 'user') in ['moderator', 'admin', 'superadmin'];
+    }
+    // True when the WRITER's own account status allows creating content:
+    // status absent (pre-status accounts) or 'active'. Suspended and
+    // banned writers are denied at every create rule that calls this.
+    // When a bot write rides an admin-as-bot branch, the writer IS the
+    // admin, so the admin's own status is what is checked.
+    function writerStatusOk() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && userDoc(request.auth.uid).data.get('status', 'active') == 'active';
     }
     // True when the given uid belongs to a bot account (users/{uid} with
     // isBot == true). Used by the narrow admin-as-bot write branches
@@ -58,9 +86,18 @@ service cloud.firestore {
     // ------------------------------------------------------------ users
     match /users/{uid} {
       allow read: if signedIn();
+      // Self-registration is gated on the platform setting
+      // config/app.registrationOpen (Pack C): when an admin closes
+      // registration, new self sign-ups are refused here server-side.
+      // The exists() guard matters — get() on a missing config doc
+      // would error and deny EVERY sign-up; a missing doc means the
+      // setting was never saved, which means registration is open.
+      // The admin-creates-bot branch below is deliberately NOT gated.
       allow create: if (isSelf(uid)
           && request.resource.data.get('role', 'user') == 'user'
-          && request.resource.data.get('isBot', false) == false)
+          && request.resource.data.get('isBot', false) == false
+          && (!exists(/databases/$(database)/documents/config/app)
+              || get(/databases/$(database)/documents/config/app).data.get('registrationOpen', true) == true))
         // An admin may create a BOT's profile document (the public users
         // doc every bot account needs so it can author posts, appear in
         // search and hold conversations). Pinned to isBot docs with the
@@ -68,12 +105,15 @@ service cloud.firestore {
         || (isAdmin()
           && request.resource.data.get('isBot', false) == true
           && request.resource.data.get('role', 'user') == 'bot');
-      // Users may edit their own profile, but may not grant themselves a
-      // role or turn themselves into a bot — those fields are admin-only.
-      allow update: if (isSelf(uid)
+      // The role and isBot fields may only be CHANGED by a superadmin —
+      // they are pinned to their current values for everyone else,
+      // including plain admins and self-updates. Profile fields, account
+      // status and the verified flag ride the second branch (self, or an
+      // admin managing another account) with role/isBot held constant.
+      allow update: if isSuperAdmin()
+        || ((isSelf(uid) || isAdmin())
           && request.resource.data.get('role', 'user') == resource.data.get('role', 'user')
-          && request.resource.data.get('isBot', false) == resource.data.get('isBot', false))
-        || isAdmin();
+          && request.resource.data.get('isBot', false) == resource.data.get('isBot', false));
       allow delete: if isSelf(uid) || isAdmin();
     }
 
@@ -90,7 +130,7 @@ service cloud.firestore {
     match /friendships/{id} {
       allow read: if signedIn()
         && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid || isAdmin());
-      allow create: if signedIn() && request.resource.data.from == request.auth.uid
+      allow create: if signedIn() && writerStatusOk() && request.resource.data.from == request.auth.uid
         && request.resource.data.status == 'pending';
       allow update: if signedIn()
         && (resource.data.to == request.auth.uid || resource.data.from == request.auth.uid || isAdmin());
@@ -125,6 +165,7 @@ service cloud.firestore {
       // BOT account (isBotUser check on the author doc) — plain feed
       // posts only: no group posts and no page posts as a bot.
       allow create: if signedIn()
+        && writerStatusOk()
         && request.resource.data.get('likes', []).size() == 0
         && ((request.resource.data.authorId == request.auth.uid
              && (request.resource.data.get('groupId', '') == ''
@@ -168,6 +209,7 @@ service cloud.firestore {
       // A story starts life with an empty views list — nobody can
       // pre-populate viewers.
       allow create: if signedIn()
+        && writerStatusOk()
         && request.resource.data.authorId == request.auth.uid
         && request.resource.data.get('views', []).size() == 0;
       // The author (and admins) manage the story; anyone else signed in
@@ -199,6 +241,7 @@ service cloud.firestore {
             || resource.data.createdBy == request.auth.uid
             || isAdmin());
       allow create: if signedIn()
+        && writerStatusOk()
         && request.resource.data.createdBy == request.auth.uid
         && request.auth.uid in request.resource.data.get('members', []);
       allow update: if isAdmin()
@@ -221,7 +264,7 @@ service cloud.firestore {
     // add/remove THEMSELVES through a followers-only update.
     match /pages/{pageId} {
       allow read: if signedIn();
-      allow create: if signedIn() && request.resource.data.ownerId == request.auth.uid;
+      allow create: if signedIn() && writerStatusOk() && request.resource.data.ownerId == request.auth.uid;
       allow update: if isAdmin()
         || (signedIn() && resource.data.ownerId == request.auth.uid)
         || (signedIn()
@@ -241,7 +284,7 @@ service cloud.firestore {
     // 2+ and must name their creator (createdBy == caller).
     match /conversations/{convId} {
       allow read: if signedIn() && (request.auth.uid in resource.data.participants || isAdmin());
-      allow create: if signedIn() && request.auth.uid in request.resource.data.participants
+      allow create: if signedIn() && writerStatusOk() && request.auth.uid in request.resource.data.participants
         && request.resource.data.participants.size() >= 2
         && (request.resource.data.get('isGroup', false) == false
             || request.resource.data.get('createdBy', '') == request.auth.uid);
@@ -258,6 +301,7 @@ service cloud.firestore {
     match /messages/{msgId} {
       allow read: if signedIn() && (request.auth.uid in resource.data.get('participants', []) || isAdmin());
       allow create: if signedIn()
+        && writerStatusOk()
         && ((request.resource.data.senderId == request.auth.uid
              && request.auth.uid in request.resource.data.get('participants', [])
              && request.auth.uid in get(/databases/$(database)/documents/conversations/$(request.resource.data.conversationId)).data.participants)
@@ -292,6 +336,7 @@ service cloud.firestore {
         || request.auth.uid in resource.data.get('audienceIds', [])
       );
       allow create: if signedIn()
+        && writerStatusOk()
         && request.resource.data.createdBy == request.auth.uid;
       allow update: if isAdmin()
         || (signedIn() && resource.data.createdBy == request.auth.uid)
@@ -315,6 +360,7 @@ service cloud.firestore {
     match /reviews/{reviewId} {
       allow read: if signedIn();
       allow create: if signedIn()
+        && writerStatusOk()
         && request.resource.data.authorId == request.auth.uid
         && request.resource.data.rating >= 1
         && request.resource.data.rating <= 5;
@@ -339,6 +385,7 @@ service cloud.firestore {
             || resource.data.groupOwnerId == request.auth.uid
             || isAdmin());
       allow create: if signedIn()
+        && writerStatusOk()
         && request.resource.data.userId == request.auth.uid
         && request.resource.data.status == 'pending';
       // Only the group owner (or an admin) decides; the pinned fields
@@ -364,11 +411,37 @@ service cloud.firestore {
     }
 
     // ----------------------------------------------------------- reports
+    // Report review is the moderator tier's core job, so reads and
+    // decision updates open at isModerator(); deletion stays admin-only.
+    // Pack B lifecycle: a report is created with status 'pending' (the
+    // pre-Pack-B pin was 'open' — the legacy status vocabulary), then
+    // moderators move it through 'review' / 'resolved' / 'rejected' /
+    // 'escalated' via the update branch. The Pack B fields (category,
+    // decision, appeal, evidence) ride the same branches — no other
+    // field is pinned, so they need no rule change.
     match /reports/{id} {
-      allow read: if isAdmin();
+      allow read: if isModerator();
       allow create: if signedIn() && request.resource.data.reporterId == request.auth.uid
-        && request.resource.data.status == 'open';
-      allow update, delete: if isAdmin();
+        && request.resource.data.status == 'pending';
+      allow update: if isModerator();
+      allow delete: if isAdmin();
+    }
+
+    // --------------------------------------------------------- adminLogs
+    // Super Admin audit trail: one entry per privileged admin action
+    // (user suspend/ban/role/delete, report decisions, maintenance…),
+    // written by api.logAdminAction. Readable by admins and superadmins
+    // only — moderators and analysts are excluded. Entries are
+    // append-only (no updates); only a superadmin may delete. CREATE
+    // opens at isModerator() (Pack B) so moderator report decisions are
+    // audited too — the entry must still name its own author
+    // (adminId == request.auth.uid), so nobody can forge another
+    // staff member's audit entries.
+    match /adminLogs/{id} {
+      allow read: if isAdmin();
+      allow create: if isModerator() && request.resource.data.adminId == request.auth.uid;
+      allow update: if false;
+      allow delete: if isSuperAdmin();
     }
 
     // -------------------------------------------------------------- bots
@@ -408,6 +481,17 @@ service cloud.firestore {
     // admin's browser fetches it to call Gemini directly (src/gemini.js).
     match /botSecrets/{id} {
       allow read, write: if isAdmin();
+    }
+
+    // ----------------------------------------------------- announcements
+    // Platform announcements (Pack C): written by admins from the
+    // Announce module, read by every signed-in user — the home feed
+    // renders the active ones as a dismissible banner. The read rule
+    // is field-independent (signedIn only) so the client's ordered
+    // list listener stays provable.
+    match /announcements/{id} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
     }
 
     // ------------------------------------------------------------- config

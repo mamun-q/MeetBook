@@ -28,10 +28,26 @@ function scheduleFlush(colName) {
   });
 }
 
+// Real Firestore REJECTS undefined field values ("Unsupported field
+// value: undefined") instead of dropping them — an earlier fake version
+// silently skipped undefined, which masked a real bug (saveBot writing
+// `id: undefined` into the bots payload). Walk payloads deeply and
+// throw exactly like the SDK so this bug class fails tests.
+function assertNoUndefined(value, path) {
+  if (value === undefined) {
+    throw new Error(`Function setDoc() called with invalid data. Unsupported field value: undefined (found in field ${path || '(root)'})`);
+  }
+  if (Array.isArray(value)) {
+    value.forEach((v, i) => assertNoUndefined(v, `${path}[${i}]`));
+  } else if (value && typeof value === 'object' && !(value instanceof Date)) {
+    for (const [k, v] of Object.entries(value)) assertNoUndefined(v, path ? `${path}.${k}` : k);
+  }
+}
+
 function applyData(existing, data, merge) {
   const out = merge && existing ? { ...existing } : {};
   for (const [k, val] of Object.entries(data || {})) {
-    if (val === undefined) continue;
+    if (val === undefined) throw new Error(`Unsupported field value: undefined (found in field ${k})`);
     if (val && typeof val === 'object' && val.__arrayOp) {
       const arr = Array.isArray(out[k]) ? [...out[k]] : [];
       if (val.__arrayOp === 'union') { if (!arr.includes(val.value)) arr.push(val.value); }
@@ -47,6 +63,7 @@ function applyData(existing, data, merge) {
 }
 
 function writeDoc(col, id, data, merge) {
+  assertNoUndefined(data, '');
   const map = colMap(col);
   map.set(id, applyData(map.get(id), data, merge));
   scheduleFlush(col);
@@ -119,6 +136,10 @@ export async function deleteDoc(ref) {
 }
 export async function getDoc(ref) { return docSnap(ref.__col, ref.__id); }
 export async function getDocs(q) { return querySnap(q.__col, q.__constraints || []); }
+export async function getCountFromServer(q) {
+  const rows = runQuery(q.__col, q.__constraints || []);
+  return { data: () => ({ count: rows.length }) };
+}
 export function onSnapshot(ref, cb, errCb) {
   const l = { col: ref.__col, docId: ref.__id || null, constraints: ref.__constraints || [], cb, errCb };
   listeners.add(l);

@@ -1,7 +1,8 @@
 // HTML generators for every route. Pure string builders: they read the shared
 // dataset (api.data()) and never touch the DOM directly — main.js renders
 // and binds events centrally.
-import { escapeHtml, timeAgo, canViewPost, canViewGroup, canViewGroupPost, isGroupMember, searchByName, truncate, paginate, groupStoriesByAuthor, canViewStory, storyBackgroundCss, STORY_BACKGROUNDS, memoriesFor, upcomingEvents, canViewEvent, averageRating, FEELINGS, plural, mutualFriendCount } from './utils.js';
+import { escapeHtml, timeAgo, canViewPost, canViewGroup, canViewGroupPost, isGroupMember, searchByName, truncate, paginate, groupStoriesByAuthor, canViewStory, storyBackgroundCss, STORY_BACKGROUNDS, memoriesFor, upcomingEvents, canViewEvent, averageRating, FEELINGS, plural, mutualFriendCount, isStaff, canModerate, isAdminRole, accountStatus, canManageUser, canChangeRole, ASSIGNABLE_ROLES, platformStats, analyticsSeries, spamSuspects, reportStatus, reportCategory, reportNeedsAttention, countPostComments, botConversationSummaries, recentClientErrors, REPORT_CATEGORIES, REPORT_OUTCOMES } from './utils.js';
+import { GEMINI_MODEL, botModel } from './gemini.js';
 import { t } from './i18n.js';
 import { avatarHtml, userNameHtml, postCardHtml, emptyState } from './components.js';
 import { friendIdsOf, blockedIdsOf } from './store.js';
@@ -112,6 +113,7 @@ export function feedView(d, meUser, page = 1) {
   <div class="layout">
     <aside class="col-left">${leftRail(d, meUser)}</aside>
     <main class="col-main">
+      ${announcementsHtml(d, meUser)}
       ${storiesRailHtml(d, meUser, ctx)}
       ${memoriesHtml(d, meUser, ctx)}
       <div class="card composer">
@@ -159,6 +161,30 @@ export function feedView(d, meUser, page = 1) {
     </main>
     <aside class="col-right">${rightRail(d, meUser)}</aside>
   </div>`;
+}
+
+// ------------------------------------------------------------- ANNOUNCEMENTS
+// Active platform announcements (Pack C) as dismissible banner cards
+// at the top of the home feed. Dismissal is remembered per user in
+// users.settings.dismissedAnnouncements (main.js writes it through
+// api.updateSettings), so a dismissed banner never comes back for
+// that user, on any device.
+export function announcementsHtml(d, meUser) {
+  const dismissed = new Set(meUser.settings?.dismissedAnnouncements || []);
+  const active = (d.announcements || [])
+    .filter((a) => a.active !== false && !dismissed.has(a.id))
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  if (!active.length) return '';
+  return active.map((a) => `<div class="card announcement-banner">
+    <div class="row gap-sm">
+      <span aria-hidden="true">📣</span>
+      <div class="grow"><b>${escapeHtml(a.title)}</b>
+        <p class="small">${escapeHtml(a.body)}</p>
+        <span class="muted small">${escapeHtml(a.createdByName || '')} · ${timeAgo(a.createdAt)}</span>
+      </div>
+      <button class="icon-btn" data-act="dismiss-announcement" data-id="${a.id}" aria-label="${t('announceDismiss')}" title="${t('announceDismiss')}">✕</button>
+    </div>
+  </div>`).join('');
 }
 
 // ------------------------------------------------------------------ MEMORIES
@@ -259,7 +285,7 @@ export function leftRail(d, meUser) {
     <a class="rail-item" href="#/messages">💬 ${t('messages')}</a>
     <a class="rail-item" href="#/saved">🔖 ${t('saved')} posts</a>
     <a class="rail-item" href="#/notifications">🔔 ${t('notifications')}</a>
-    ${meUser.role === 'admin' ? `<a class="rail-item" href="#/admin">🛡️ ${t('admin')}</a><a class="rail-item" href="#/bots">🤖 ${t('bots')}</a>` : ''}
+    ${isStaff(meUser) ? `<a class="rail-item" href="#/admin">🛡️ ${t('admin')}</a>` : ''}${isAdminRole(meUser) ? `<a class="rail-item" href="#/admin/bots">🤖 ${t('bots')}</a>` : ''}
     <a class="rail-item" href="#/settings">⚙️ ${t('settings')}</a>
     <a class="rail-item" href="#/help">❓ ${t('help')}</a>
   </div>`;
@@ -834,6 +860,7 @@ function messageHtml(m, meUser, byId, isGroup = false) {
       ${m.audio ? `<audio class="msg-audio" controls preload="metadata" src="${escapeHtml(m.audio)}"></audio>` : ''}
       ${m.text ? `<p>${escapeHtml(m.text)}</p>` : ''}
       <span class="msg-meta">${timeAgo(m.createdAt)} ${status}</span>
+      ${mine ? '' : `<button class="link-btn msg-report-btn" data-act="report-message" data-id="${m.id}" title="${t('report')}" aria-label="${t('report')}">🚩</button>`}
     </div>
   </div>`;
 }
@@ -976,54 +1003,512 @@ export function settingsView(d, meUser, prefs) {
 }
 
 // ------------------------------------------------------------------ ADMIN
-export function adminView(d, meUser, mode) {
-  const byId = usersById(d);
-  const openReports = d.reports.filter((r) => r.status === 'open');
-  const today = new Date().toDateString();
-  const postsToday = d.posts.filter((p) => new Date(p.createdAt).toDateString() === today).length;
-  return `<div class="page">
-    <h2>🛡️ Admin Dashboard</h2>
+// Super Admin Control Center (Pack A shell). main.js routes #/admin/*
+// through adminShell() with one module view per route; Pack B (analytics,
+// content, reports upgrade) and Pack C (bot tabs, announcements, site
+// settings, health) add their modules as further shell routes — reuse
+// adminShell, the utils role helpers and api.logAdminAction.
+export function roleLabel(role) {
+  const key = { user: 'roleUser', analyst: 'roleAnalyst', moderator: 'roleModerator', admin: 'roleAdmin', superadmin: 'roleSuperadmin', bot: 'aiBot' }[role];
+  return key ? t(key) : String(role || '');
+}
+
+export function adminShell(d, meUser, active, content) {
+  const openReports = (d.reports || []).filter((r) => reportNeedsAttention(r)).length;
+  const links = [
+    { key: 'overview', href: '#/admin', icon: '📊', label: t('adminOverview'), show: isStaff(meUser) },
+    { key: 'analytics', href: '#/admin/analytics', icon: '📈', label: t('adminAnalytics'), show: isStaff(meUser) },
+    { key: 'users', href: '#/admin/users', icon: '👥', label: t('adminUsers'), show: isAdminRole(meUser) },
+    { key: 'content', href: '#/admin/content', icon: '🗂️', label: t('adminContent'), show: canModerate(meUser) },
+    { key: 'bots', href: '#/admin/bots', icon: '🤖', label: t('adminBots'), show: isAdminRole(meUser) },
+    { key: 'reports', href: '#/admin/reports', icon: '🚩', label: t('adminReports'), show: canModerate(meUser), badge: openReports },
+    { key: 'announce', href: '#/admin/announce', icon: '📣', label: t('adminAnnounce'), show: isAdminRole(meUser) },
+    { key: 'security', href: '#/admin/security', icon: '🔐', label: t('adminSecurity'), show: isAdminRole(meUser) },
+    { key: 'settings', href: '#/admin/settings', icon: '⚙️', label: t('adminSettings'), show: isAdminRole(meUser) },
+    { key: 'health', href: '#/admin/health', icon: '🩺', label: t('adminHealth'), show: isAdminRole(meUser) }
+  ].filter((l) => l.show);
+  return `<div class="admin-layout">
+    <aside class="admin-sidebar">
+      <div class="admin-side-head"><span class="admin-side-title">🛡️ ${t('adminPanel')}</span><span class="badge badge-admin">${escapeHtml(roleLabel(meUser.role))}</span></div>
+      <nav class="admin-nav">${links.map((l) => `<a class="admin-nav-item ${active === l.key ? 'active' : ''}" href="${l.href}"><span class="admin-nav-icon">${l.icon}</span><span class="grow">${l.label}</span>${l.badge ? `<span class="nav-badge static">${l.badge}</span>` : ''}</a>`).join('')}</nav>
+      <p class="muted small admin-side-note">${escapeHtml(meUser.name)} · @${escapeHtml(meUser.username)}</p>
+    </aside>
+    <div class="admin-main">${content}</div>
+  </div>`;
+}
+
+export function adminDeniedView() {
+  return `<div class="card empty-state"><div class="empty-icon">🔒</div><p class="muted">${t('accessDenied')}</p></div>`;
+}
+
+// #/admin — overview dashboard (Pack B). Every number comes from
+// utils.platformStats over the dataset the admin client actually
+// holds, upgraded per-metric by api.loadAdminStats server aggregates
+// in live mode; a metric served from the loaded subset is labelled
+// "from loaded data" rather than presented as a platform total.
+export function adminOverviewView(d, meUser, mode) {
+  const s = platformStats(d, Date.now(), d.adminStats || null);
+  const readOnly = !isAdminRole(meUser); // analysts (and moderators) get no action controls
+  const note = (metric) => (mode.firebase && s.sources[metric] === 'loaded' ? ` · ${t('statFromLoaded')}` : '');
+  const stat = (value, label, metric = '') => `<div class="card stat"><b>${value}</b><span>${label}${metric ? note(metric) : ''}</span></div>`;
+  return `<h2>🛡️ ${t('adminOverview')}</h2>
     <div class="stat-grid">
-      <div class="card stat"><b>${d.users.filter((u) => !u.isBot).length}</b><span>Users</span></div>
-      <div class="card stat"><b>${d.bots.length}</b><span>AI Bots</span></div>
-      <div class="card stat"><b>${d.posts.length}</b><span>Posts (${postsToday} today)</span></div>
-      <div class="card stat"><b>${openReports.length}</b><span>Open reports</span></div>
-      <div class="card stat"><b>${d.messages.length}</b><span>Messages</span></div>
-      <div class="card stat"><b>${d.aiUsage?.callsToday || 0}</b><span>AI calls today</span></div>
+      ${stat(s.totalUsers, t('statUsers'))}
+      ${stat(s.newToday, t('statNewToday'))}
+      ${stat(s.new7d, t('statNew7d'))}
+      ${stat(s.new30d, t('statNew30d'))}
+      ${stat(s.onlineNow, t('statOnlineNow'))}
+      ${stat(s.activeUsers7d, t('statActiveUsers'))}
+      ${stat(s.totalPosts, t('statPosts'), 'posts')}
+      ${stat(s.totalComments, t('statComments'), 'comments')}
+      ${stat(s.totalLikes, t('statLikes'), 'likes')}
+      ${stat(s.totalMessages, t('statMessages'), 'messages')}
+      ${stat(s.totalBots, t('statBots'))}
+      ${stat(s.activeBots, t('statBotsActive'))}
+      ${stat(s.disabledBots, t('statBotsDisabled'))}
+      ${stat(s.pendingReports, t('statPendingReports'))}
     </div>
     <div class="card stack">
       <h3>System status</h3>
       <p>Mode: <b>${mode.firebase ? 'Live Firebase' : 'Demo / offline'}</b> · Project: <b>${escapeHtml(mode.projectId)}</b> · Auth: ${mode.firebase ? 'Firebase Authentication' : 'Local demo accounts'} · Firestore: ${mode.firebase ? 'connected' : 'local store'} · Storage: ${mode.firebase ? 'Storage with compressed data-URL fallback (Blaze enables full Storage)' : 'local data URLs'}</p>
-      <label class="row gap-sm"><input type="checkbox" id="maintenance-toggle" ${d.config?.maintenanceMode ? 'checked' : ''} /> <span class="grow">Maintenance mode (shows a maintenance banner to non-admin users)</span></label>
-      <div class="row gap wrap"><a class="btn btn-primary btn-sm" href="#/bots">🤖 Open Bot Admin Panel</a><button class="btn btn-ghost btn-sm" data-act="reset-demo">Reset demo data</button></div>
+      ${readOnly ? '' : `<label class="row gap-sm"><input type="checkbox" id="maintenance-toggle" ${d.config?.maintenanceMode ? 'checked' : ''} /> <span class="grow">Maintenance mode (shows a maintenance banner to non-admin users)</span></label>
+      <div class="row gap wrap"><a class="btn btn-primary btn-sm" href="#/admin/bots">🤖 Open Bot Admin Panel</a><button class="btn btn-ghost btn-sm" data-act="reset-demo">Reset demo data</button></div>`}
       <p class="muted small">Admin rights are enforced server-side: Firestore rules check users/{uid}.role and Cloud Functions verify admin before privileged actions. This page is only the interface.</p>
+    </div>`;
+}
+
+// ----------------------------------------------------- analytics (B)
+// Dependency-free inline SVG charts over utils.analyticsSeries. Bars
+// carry <title> tooltips (day + value); the full series is also in the
+// data table under the charts, and the CSV export (main.js) downloads
+// exactly the series on screen.
+const CHART_W = 720;
+const CHART_H = 132;
+function svgBarStack(rows, segments, height = CHART_H) {
+  const max = Math.max(1, ...rows.map((r) => segments.reduce((n, s) => n + (Number(r[s.key]) || 0), 0)));
+  const bw = CHART_W / Math.max(1, rows.length);
+  const base = height - 14;
+  const rects = [];
+  rows.forEach((r, i) => {
+    let y = base;
+    for (const s of segments) {
+      const v = Number(r[s.key]) || 0;
+      if (!v) continue;
+      const h = Math.max(1.5, (v / max) * (base - 10));
+      y -= h;
+      rects.push(`<rect x="${(i * bw + 0.5).toFixed(1)}" y="${y.toFixed(1)}" width="${Math.max(1, bw - 1).toFixed(1)}" height="${h.toFixed(1)}" fill="${s.color}"><title>${escapeHtml(r.day)} · ${escapeHtml(s.label)}: ${v}</title></rect>`);
+    }
+  });
+  return `<svg class="chart" viewBox="0 0 ${CHART_W} ${height}" role="img" preserveAspectRatio="none"><line x1="0" y1="${base}" x2="${CHART_W}" y2="${base}" class="chart-axis"/>${rects.join('')}</svg>
+    <div class="row gap wrap chart-legend">${segments.map((s) => `<span class="small"><span class="chart-swatch" style="background:${s.color}"></span>${escapeHtml(s.label)}</span>`).join('')}<span class="muted small grow right">max ${max}/day</span></div>`;
+}
+function svgLine(rows, key, height = CHART_H) {
+  const max = Math.max(1, ...rows.map((r) => Number(r[key]) || 0));
+  const base = height - 14;
+  const stepX = rows.length > 1 ? CHART_W / (rows.length - 1) : CHART_W;
+  const y = (v) => base - ((Number(v) || 0) / max) * (base - 10);
+  const pts = rows.map((r, i) => `${(i * stepX).toFixed(1)},${y(r[key]).toFixed(1)}`).join(' ');
+  const dots = rows.length <= 31 ? rows.map((r, i) => `<circle cx="${(i * stepX).toFixed(1)}" cy="${y(r[key]).toFixed(1)}" r="2.4" class="chart-dot"><title>${escapeHtml(r.day)}: ${r[key]}</title></circle>`).join('') : '';
+  return `<svg class="chart" viewBox="0 0 ${CHART_W} ${height}" role="img" preserveAspectRatio="none"><line x1="0" y1="${base}" x2="${CHART_W}" y2="${base}" class="chart-axis"/><polygon points="0,${base} ${pts} ${CHART_W},${base}" class="chart-area"/><polyline points="${pts}" class="chart-line"/>${dots}</svg>
+    <div class="row gap wrap chart-legend"><span class="muted small grow right">max ${max}</span></div>`;
+}
+
+// #/admin/analytics — platform analytics (analyst+). Aggregates only.
+export function adminAnalyticsView(d, meUser, filters = {}) {
+  const days = [7, 30, 90, 365].includes(Number(filters.days)) ? Number(filters.days) : 30;
+  const rows = analyticsSeries(d, days);
+  const rangeBtn = (n) => `<a class="btn ${n === days ? 'btn-primary' : 'btn-ghost'} btn-sm" href="#/admin/analytics?days=${n}">${t(`last${n}Days`)}</a>`;
+  const chartCard = (title, body, noteText = '') => `<div class="card stack chart-card"><h3>${title}</h3>${body}${noteText ? `<p class="muted small">${noteText}</p>` : ''}</div>`;
+  const tableRows = [...rows].reverse();
+  return `<h2>📈 ${t('adminAnalytics')}</h2>
+    <div class="row gap wrap admin-filter card">
+      ${rangeBtn(7)}${rangeBtn(30)}${rangeBtn(90)}${rangeBtn(365)}
+      <span class="spacer"></span>
+      <button class="btn btn-ghost btn-sm" data-act="admin-export-analytics" data-days="${days}">⬇️ ${t('exportCsv')}</button>
     </div>
-    <div class="card stack">
-      <h3>Reports queue (${openReports.length} open)</h3>
-      ${d.reports.map((r) => `<div class="row gap-sm wrap"><span class="badge ${r.status === 'open' ? 'badge-warn' : ''}">${escapeHtml(r.status)}</span><span class="grow">${escapeHtml(r.targetType)} · ${escapeHtml(r.reason)} · by ${escapeHtml(byId[r.reporterId]?.name || '')} · ${timeAgo(r.createdAt)}</span>${r.status === 'open' ? `<button class="btn btn-danger btn-sm" data-act="report-action" data-id="${r.id}" data-action="remove-post">Remove post</button><button class="btn btn-ghost btn-sm" data-act="report-action" data-id="${r.id}" data-action="dismiss">Dismiss</button>` : ''}</div>`).join('') || '<p class="muted">No reports.</p>'}
+    <p class="muted small">${t('analyticsNote')}</p>
+    <div class="chart-grid">
+      ${chartCard(`📈 ${t('chartUserGrowth')}`, svgLine(rows, 'totalUsers'))}
+      ${chartCard(`👥 ${t('chartRegistrations')}`, svgBarStack(rows, [{ key: 'registrations', color: '#1877f2', label: t('colRegistrations') }]))}
+      ${chartCard(`📝 ${t('chartPostsPerDay')}`, svgBarStack(rows, [{ key: 'posts', color: '#2e9e5b', label: t('statPosts') }]))}
+      ${chartCard(`❤️ ${t('chartEngagement')}`, svgBarStack(rows, [{ key: 'engagement', color: '#e5534b', label: t('colEngagement') }]), t('chartEngagementNote'))}
+      ${chartCard(`🤖 ${t('chartBotVsHuman')}`, svgBarStack(rows, [
+        { key: 'humanPosts', color: '#1877f2', label: t('colHumanPosts') },
+        { key: 'botPosts', color: '#8957e5', label: t('colBotPosts') }
+      ]))}
+      ${chartCard(`🚩 ${t('chartReports')}`, svgBarStack(rows, [
+        { key: 'reportsPending', color: '#e0a800', label: t('reportStatusPending') },
+        { key: 'reportsReview', color: '#1877f2', label: t('reportStatusReview') },
+        { key: 'reportsResolved', color: '#2e9e5b', label: t('reportStatusResolved') },
+        { key: 'reportsRejected', color: '#d64545', label: t('reportStatusRejected') },
+        { key: 'reportsEscalated', color: '#8957e5', label: t('reportStatusEscalated') }
+      ]))}
     </div>
-    <div class="card stack">
-      <h3>User management</h3>
+    <div class="card">
       <div class="table-wrap"><table class="table">
-        <thead><tr><th>User</th><th>Username</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead>
-        <tbody>${d.users.map((u) => `<tr>
-          <td>${avatarHtml(u, 28)} ${escapeHtml(u.name)} ${u.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''}</td>
-          <td>@${escapeHtml(u.username)}</td><td>${escapeHtml(u.role)}</td><td>${u.online ? 'online' : 'offline'}</td>
-          <td>${u.id !== meUser.id && !u.isBot ? `<button class="btn btn-ghost btn-sm" data-act="admin-role" data-id="${u.id}" data-role="${u.role === 'admin' ? 'user' : 'admin'}">${u.role === 'admin' ? 'Make user' : 'Make admin'}</button>` : ''}</td>
-        </tr>`).join('')}</tbody>
+        <thead><tr><th>${t('colDay')}</th><th>${t('colRegistrations')}</th><th>${t('colTotalUsers')}</th><th>${t('statPosts')}</th><th>${t('colEngagement')}</th><th>${t('colBotPosts')}</th><th>${t('colHumanPosts')}</th><th>${t('colReports')}</th></tr></thead>
+        <tbody>${tableRows.map((r) => `<tr><td>${escapeHtml(r.day)}</td><td>${r.registrations}</td><td>${r.totalUsers}</td><td>${r.posts}</td><td>${r.engagement}</td><td>${r.botPosts}</td><td>${r.humanPosts}</td><td>${r.reportsTotal}</td></tr>`).join('')}</tbody>
       </table></div>
-    </div>
+    </div>`;
+}
+
+// ------------------------------------------------------- content (B)
+// #/admin/content — moderation over the posts the admin client has
+// loaded: Posts (search/filter/paginate/delete), Comments (flattened,
+// delete), Possible spam (labelled heuristics, same delete actions).
+export function adminContentView(d, meUser, filters = {}) {
+  const tab = ['posts', 'comments', 'spam'].includes(filters.tab) ? filters.tab : 'posts';
+  const byId = usersById(d);
+  const tabLink = (key, label, count) => `<a class="btn ${tab === key ? 'btn-primary' : 'btn-ghost'} btn-sm" href="#/admin/content?tab=${key}">${label} (${count})</a>`;
+  const flatComments = [];
+  for (const p of d.posts || []) {
+    for (const c of p.comments || []) {
+      flatComments.push({ post: p, entry: c, isReply: false });
+      for (const r of c.replies || []) flatComments.push({ post: p, entry: r, isReply: true });
+    }
+  }
+  flatComments.sort((a, b) => (b.entry.createdAt || 0) - (a.entry.createdAt || 0));
+  const suspects = tab === 'spam' ? spamSuspects(d.posts || []) : [];
+  let body = '';
+  if (tab === 'posts') {
+    const q = String(filters.q || '').trim().toLowerCase();
+    const kindF = filters.kind || 'all';
+    const list = (d.posts || []).filter((p) => {
+      const author = byId[p.authorId];
+      if (kindF === 'human' && author?.isBot) return false;
+      if (kindF === 'bot' && !author?.isBot) return false;
+      if (q && !`${p.text || ''} ${author?.name || ''} ${author?.username || ''}`.toLowerCase().includes(q)) return false;
+      return true;
+    }).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    const pageSize = 25;
+    const totalPages = Math.max(1, Math.ceil(list.length / pageSize));
+    const page = Math.min(Math.max(1, Number(filters.page) || 1), totalPages);
+    const rowsPage = list.slice((page - 1) * pageSize, page * pageSize);
+    const pageHref = (n) => `#/admin/content?tab=posts&q=${encodeURIComponent(filters.q || '')}&kind=${kindF}&page=${n}`;
+    body = `<form id="admin-content-filter" class="card admin-filter">
+        <input type="hidden" name="tab" value="posts" />
+        <input name="q" value="${escapeHtml(filters.q || '')}" placeholder="${t('userSearchPlaceholder')}" autocomplete="off" />
+        <select name="kind" aria-label="${t('allAuthors')}">
+          <option value="all" ${kindF === 'all' ? 'selected' : ''}>${t('allAuthors')}</option>
+          <option value="human" ${kindF === 'human' ? 'selected' : ''}>${t('humans')}</option>
+          <option value="bot" ${kindF === 'bot' ? 'selected' : ''}>${t('bots')}</option>
+        </select>
+        <button class="btn btn-primary btn-sm" type="submit">Search</button>
+      </form>
+      <div class="card"><div class="table-wrap"><table class="table">
+        <thead><tr><th>Author</th><th>${t('statPosts')}</th><th>💬</th><th>❤️</th><th>${t('auditTime')}</th><th>${t('actionsLabel')}</th></tr></thead>
+        <tbody>${rowsPage.map((p) => { const a = byId[p.authorId]; return `<tr>
+          <td><a class="row gap-sm" href="#/profile/${p.authorId}">${avatarHtml(a, 28)}<span>${escapeHtml(a?.name || '?')}</span></a>${a?.isBot ? ` <span class="badge badge-bot">${t('aiBot')}</span>` : ''}</td>
+          <td><a href="#/profile/${p.authorId}">${escapeHtml(truncate(p.text || '', 120))}</a></td>
+          <td>${countPostComments(p)}</td><td>${(p.likes || []).length}</td>
+          <td>${timeAgo(p.createdAt)}</td>
+          <td><button class="btn btn-danger btn-sm" data-act="admin-content-delete-post" data-id="${p.id}">${t('delete')}</button></td>
+        </tr>`; }).join('') || `<tr><td colspan="6" class="muted center">${t('noContentFound')}</td></tr>`}</tbody>
+      </table></div>
+      <div class="row gap admin-pager">
+        ${page > 1 ? `<a class="btn btn-ghost btn-sm" href="${pageHref(page - 1)}">${t('prevPage')}</a>` : ''}
+        <span class="muted small grow center">${t('pageLabelOf')} ${page} / ${totalPages} · ${list.length}</span>
+        ${page < totalPages ? `<a class="btn btn-ghost btn-sm" href="${pageHref(page + 1)}">${t('nextPage')}</a>` : ''}
+      </div></div>`;
+  } else if (tab === 'comments') {
+    const pageSize = 25;
+    const totalPages = Math.max(1, Math.ceil(flatComments.length / pageSize));
+    const page = Math.min(Math.max(1, Number(filters.page) || 1), totalPages);
+    const rowsPage = flatComments.slice((page - 1) * pageSize, page * pageSize);
+    const pageHref = (n) => `#/admin/content?tab=comments&page=${n}`;
+    body = `<div class="card"><div class="table-wrap"><table class="table">
+      <thead><tr><th>Author</th><th>${t('comment')}</th><th>${t('statPosts')}</th><th>${t('auditTime')}</th><th>${t('actionsLabel')}</th></tr></thead>
+      <tbody>${rowsPage.map(({ post, entry, isReply }) => { const a = byId[entry.authorId]; const pa = byId[post.authorId]; return `<tr>
+        <td><a class="row gap-sm" href="#/profile/${entry.authorId}">${avatarHtml(a, 28)}<span>${escapeHtml(a?.name || '?')}</span></a>${a?.isBot ? ` <span class="badge badge-bot">${t('aiBot')}</span>` : ''}</td>
+        <td>${isReply ? '↩️ ' : ''}${escapeHtml(truncate(entry.text || '', 140))}</td>
+        <td><a href="#/profile/${post.authorId}">${escapeHtml(truncate(post.text || '', 60))}</a> <span class="muted small">· ${escapeHtml(pa?.name || '')}</span></td>
+        <td>${timeAgo(entry.createdAt)}</td>
+        <td><button class="btn btn-danger btn-sm" data-act="admin-content-delete-comment" data-post="${post.id}" data-id="${entry.id}">${t('delete')}</button></td>
+      </tr>`; }).join('') || `<tr><td colspan="5" class="muted center">${t('noContentFound')}</td></tr>`}</tbody>
+    </table></div>
+    <div class="row gap admin-pager">
+      ${page > 1 ? `<a class="btn btn-ghost btn-sm" href="${pageHref(page - 1)}">${t('prevPage')}</a>` : ''}
+      <span class="muted small grow center">${t('pageLabelOf')} ${page} / ${totalPages} · ${flatComments.length}</span>
+      ${page < totalPages ? `<a class="btn btn-ghost btn-sm" href="${pageHref(page + 1)}">${t('nextPage')}</a>` : ''}
+    </div></div>`;
+  } else {
+    const flagLabel = { repeat: t('flagRepeat'), links: t('flagLinks'), burst: t('flagBurst') };
+    body = `<p class="muted">⚠️ ${t('spamHeuristicNote')}</p>
     <div class="card stack">
-      <h3>Post moderation (recent)</h3>
-      ${[...d.posts].sort((a, b) => b.createdAt - a.createdAt).slice(0, 10).map((p) => `<div class="row gap-sm"><span class="grow">${escapeHtml(p.text.slice(0, 90))} <span class="muted small">— ${escapeHtml(byId[p.authorId]?.name || '')}</span></span><button class="btn btn-danger btn-sm" data-act="admin-delete-post" data-id="${p.id}">Remove</button></div>`).join('') || '<p class="muted">No posts.</p>'}
+      ${suspects.map(({ post, flags }) => { const a = byId[post.authorId]; return `<div class="row gap-sm wrap">
+        ${avatarHtml(a, 32)}
+        <span class="grow"><a href="#/profile/${post.authorId}"><b>${escapeHtml(a?.name || '?')}</b></a> · ${timeAgo(post.createdAt)}<br/><a href="#/profile/${post.authorId}">${escapeHtml(truncate(post.text || '', 160))}</a></span>
+        ${flags.map((f) => `<span class="badge badge-warn">${escapeHtml(flagLabel[f] || f)}</span>`).join('')}
+        <button class="btn btn-danger btn-sm" data-act="admin-content-delete-post" data-id="${post.id}">${t('delete')}</button>
+      </div>`; }).join('') || `<p class="muted">${t('noContentFound')}</p>`}
+    </div>`;
+  }
+  return `<h2>🗂️ ${t('adminContent')}</h2>
+    <div class="row gap wrap">
+      ${tabLink('posts', `📝 ${t('contentPostsTab')}`, (d.posts || []).length)}
+      ${tabLink('comments', `💬 ${t('contentCommentsTab')}`, flatComments.length)}
+      ${tabLink('spam', `🛡️ ${t('contentSpamTab')}`, spamSuspects(d.posts || []).length)}
     </div>
-  </div>`;
+    ${body}`;
+}
+
+// -------------------------------------------------- reports center (B)
+export function reportCategoryLabel(cat) {
+  const key = { fake: 'reportCatFake', harassment: 'reportCatHarassment', spam: 'reportCatSpam', inappropriate: 'reportCatInappropriate', impersonation: 'reportCatImpersonation', bot: 'reportCatBot', other: 'reportCatOther' }[cat];
+  return key ? t(key) : String(cat || '');
+}
+export function reportStatusLabel(status) {
+  const key = { pending: 'reportStatusPending', review: 'reportStatusReview', resolved: 'reportStatusResolved', rejected: 'reportStatusRejected', escalated: 'reportStatusEscalated' }[status];
+  return key ? t(key) : String(status || '');
+}
+export function reportOutcomeLabel(outcome) {
+  const key = { none: 'outcomeNone', 'content-removed': 'outcomeContentRemoved', 'user-warned': 'outcomeUserWarned', 'user-suspended': 'outcomeUserSuspended' }[outcome];
+  return key ? t(key) : String(outcome || '');
+}
+export function appealStatusLabel(status) {
+  const key = { none: 'appealNone', requested: 'appealRequested', accepted: 'appealAccepted', declined: 'appealDeclined' }[status];
+  return key ? t(key) : String(status || '');
+}
+
+// User-side report dialog (post / user / message): a category select +
+// a free-text reason. Message reports additionally snapshot the single
+// reported message as evidence inside api.reportContent.
+export function reportFormHtml(targetType, targetId) {
+  return `<h3>🚩 ${t('reportDialogTitle')}</h3>
+  <form id="report-form" data-type="${escapeHtml(targetType)}" data-id="${escapeHtml(targetId)}" class="stack">
+    <label>${t('categoryLabel')}<select name="category">${REPORT_CATEGORIES.map((c) => `<option value="${c}">${escapeHtml(reportCategoryLabel(c))}</option>`).join('')}</select></label>
+    <label>${t('reportReasonLabel')}<textarea name="reason" rows="3" maxlength="500" required placeholder="${t('reportReasonLabel')}"></textarea></label>
+    <div class="row gap end"><button class="btn btn-ghost" type="button" data-close>${t('cancel')}</button><button class="btn btn-primary" type="submit">${t('reportSubmit')}</button></div>
+  </form>`;
+}
+
+// Resolve dialog: the moderator picks the outcome; side effects
+// (delete content / warn / suspend) run inside api.adminDecideReport.
+export function reportResolveFormHtml(report) {
+  return `<h3>✅ ${t('resolveReport')}</h3>
+  <form id="report-resolve-form" data-id="${escapeHtml(report.id)}" class="stack">
+    <label>${t('outcomeLabel')}<select name="outcome">${REPORT_OUTCOMES.map((o) => `<option value="${o}">${escapeHtml(reportOutcomeLabel(o))}</option>`).join('')}</select></label>
+    <label>${t('reasonLabel')}<input name="reason" maxlength="200" placeholder="${t('reasonPlaceholder')}" autocomplete="off" /></label>
+    <div class="row gap end"><button class="btn btn-ghost" type="button" data-close>${t('cancel')}</button><button class="btn btn-primary" type="submit">${t('resolveReport')}</button></div>
+  </form>`;
+}
+
+// #/admin/reports — the Report Management Center. Status filter tabs
+// with counts; each card shows the category, target, reporter, the
+// user-submitted evidence for message reports (never a conversation),
+// the moderation history (decision record) and appeal controls.
+export function reportsView(d, meUser, filters = {}) {
+  const byId = usersById(d);
+  const statusF = filters.status || 'all';
+  const all = [...(d.reports || [])].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const counts = { all: all.length, pending: 0, review: 0, resolved: 0, rejected: 0, escalated: 0 };
+  for (const r of all) counts[reportStatus(r)] += 1;
+  const list = statusF === 'all' ? all : all.filter((r) => reportStatus(r) === statusF);
+  const tabLink = (key, label) => `<a class="btn ${statusF === key ? 'btn-primary' : 'btn-ghost'} btn-sm" href="#/admin/reports?status=${key}">${label} (${key === 'all' ? counts.all : counts[key] || 0})</a>`;
+  const statusBadge = (st) => `<span class="badge ${st === 'pending' || st === 'escalated' ? 'badge-warn' : st === 'resolved' ? 'badge-ok' : st === 'rejected' ? 'badge-danger' : ''}">${escapeHtml(reportStatusLabel(st))}</span>`;
+  const targetHtml = (r) => {
+    if (r.targetType === 'post') {
+      const p = (d.posts || []).find((x) => x.id === r.targetId);
+      const a = p ? byId[p.authorId] : null;
+      return `${t('statPosts')}: ${p ? `<a href="#/profile/${p.authorId}">${escapeHtml(truncate(p.text || '', 80))}</a> <span class="muted small">· ${escapeHtml(a?.name || '')}</span>` : `<span class="muted">${escapeHtml(r.targetId)}</span>`}`;
+    }
+    if (r.targetType === 'user') {
+      const u = byId[r.targetId];
+      return `${t('roleUser')}: ${u ? `<a href="#/profile/${u.id}">${escapeHtml(u.name)}</a> <span class="muted small">@${escapeHtml(u.username)}</span>` : `<span class="muted">${escapeHtml(r.targetId)}</span>`}`;
+    }
+    if (r.targetType === 'message') {
+      const sender = byId[r.evidence?.senderId];
+      return `${t('messages')}: ${sender ? `<a href="#/profile/${sender.id}">${escapeHtml(sender.name)}</a>` : `<span class="muted">${escapeHtml(r.evidence?.senderId || '')}</span>`}`;
+    }
+    return `${escapeHtml(r.targetType)} · ${escapeHtml(r.targetId)}`;
+  };
+  const card = (r) => {
+    const st = reportStatus(r);
+    const reporter = byId[r.reporterId];
+    const dec = r.decision || null;
+    const appeal = r.appeal?.status || 'none';
+    const actionable = ['pending', 'review', 'escalated'].includes(st);
+    return `<div class="card stack report-card">
+      <div class="row gap-sm wrap">
+        ${statusBadge(st)}
+        <span class="badge">${escapeHtml(reportCategoryLabel(reportCategory(r)))}</span>
+        <span class="grow"><b>${t('targetLabel')}:</b> ${targetHtml(r)}</span>
+        <span class="muted small">${timeAgo(r.createdAt)}</span>
+      </div>
+      <p class="small"><b>${t('reportedByLabel')}:</b> ${reporter ? `<a href="#/profile/${reporter.id}">${escapeHtml(reporter.name)}</a>` : escapeHtml(r.reporterId || '')} · <b>${t('reportReasonLabel')}</b> ${escapeHtml(r.reason || '')}</p>
+      ${r.targetType === 'message' && r.evidence ? `<div class="evidence-box"><span class="muted small">🔒 ${t('evidenceLabel')}</span><blockquote>${escapeHtml(r.evidence.text || '')}</blockquote></div>` : ''}
+      ${dec ? `<p class="small muted">⚖️ ${t('decisionByLabel')}: <b>${escapeHtml(reportOutcomeLabel(dec.outcome || 'none'))}</b> · ${escapeHtml(dec.byName || '')} · ${timeAgo(dec.at)}${dec.reason ? ` · “${escapeHtml(dec.reason)}”` : ''}</p>` : ''}
+      <div class="row gap-sm wrap">
+        <span class="small"><b>${t('appealLabel')}:</b> ${escapeHtml(appealStatusLabel(appeal))}</span>
+        ${appeal === 'accepted' ? `<span class="muted small">${t('appealNoRestore')}</span>` : ''}
+        <span class="spacer"></span>
+        ${appeal !== 'requested' ? `<button class="btn btn-ghost btn-sm" data-act="report-appeal" data-id="${r.id}" data-appeal="requested">${t('appealMarkRequested')}</button>` : ''}
+        ${appeal !== 'accepted' ? `<button class="btn btn-ghost btn-sm" data-act="report-appeal" data-id="${r.id}" data-appeal="accepted">${t('appealAccept')}</button>` : ''}
+        ${appeal !== 'declined' ? `<button class="btn btn-ghost btn-sm" data-act="report-appeal" data-id="${r.id}" data-appeal="declined">${t('appealDecline')}</button>` : ''}
+      </div>
+      ${actionable ? `<div class="row gap-sm wrap">
+        ${st !== 'review' ? `<button class="btn btn-ghost btn-sm" data-act="report-review" data-id="${r.id}">🔍 ${t('markUnderReview')}</button>` : ''}
+        <button class="btn btn-primary btn-sm" data-act="report-resolve-open" data-id="${r.id}">✅ ${t('resolveReport')}</button>
+        <button class="btn btn-ghost btn-sm" data-act="report-reject" data-id="${r.id}">✖ ${t('rejectReport')}</button>
+        ${st !== 'escalated' ? `<button class="btn btn-ghost btn-sm" data-act="report-escalate" data-id="${r.id}">⬆️ ${t('escalateReport')}</button>` : ''}
+      </div>` : ''}
+    </div>`;
+  };
+  return `<h2>🚩 ${t('adminReports')}</h2>
+    <div class="row gap wrap">
+      ${tabLink('all', t('allReports'))}
+      ${tabLink('pending', t('reportStatusPending'))}
+      ${tabLink('review', t('reportStatusReview'))}
+      ${tabLink('resolved', t('reportStatusResolved'))}
+      ${tabLink('rejected', t('reportStatusRejected'))}
+      ${tabLink('escalated', t('reportStatusEscalated'))}
+    </div>
+    <div class="stack">${list.map(card).join('') || `<div class="card empty-state"><p class="muted">${t('noContentFound')}</p></div>`}</div>`;
+}
+
+// #/admin/users — User Management (Pack A). All rows come from the
+// synced users collection; filters + pagination are client-side over
+// that set (25/page). Every action routes through main.js → api admin
+// functions, which re-check the same utils guards and write an audit
+// entry — the buttons hidden here are a convenience, not the control.
+export function adminUsersView(d, meUser, filters = {}) {
+  const q = String(filters.q || '').trim().toLowerCase();
+  const statusF = filters.status || 'all';
+  const roleF = filters.role || 'all';
+  const kindF = filters.kind || 'all';
+  const postCounts = new Map();
+  for (const p of d.posts) postCounts.set(p.authorId, (postCounts.get(p.authorId) || 0) + 1);
+  const list = d.users.filter((u) => {
+    if (kindF === 'humans' && u.isBot) return false;
+    if (kindF === 'bots' && !u.isBot) return false;
+    if (statusF !== 'all' && accountStatus(u) !== statusF) return false;
+    if (roleF !== 'all' && u.role !== roleF) return false;
+    if (q && !`${u.name} ${u.username} ${u.email}`.toLowerCase().includes(q)) return false;
+    return true;
+  }).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const pageSize = 25;
+  const totalPages = Math.max(1, Math.ceil(list.length / pageSize));
+  const page = Math.min(Math.max(1, Number(filters.page) || 1), totalPages);
+  const rows = list.slice((page - 1) * pageSize, page * pageSize);
+  const pageHref = (n) => `#/admin/users?q=${encodeURIComponent(filters.q || '')}&status=${statusF}&role=${roleF}&kind=${kindF}&page=${n}`;
+  const statusBadge = (u) => {
+    const st = accountStatus(u);
+    return st === 'active'
+      ? `<span class="badge badge-ok">${t('statusActive')}</span>`
+      : st === 'suspended'
+        ? `<span class="badge badge-warn">${t('statusSuspended')}</span>`
+        : `<span class="badge badge-danger">${t('statusBanned')}</span>`;
+  };
+  const rowActions = (u) => {
+    if (u.isBot) return '<span class="muted small">🤖</span>';
+    const bits = [];
+    if (canManageUser(meUser, u)) {
+      const st = accountStatus(u);
+      if (st === 'active') bits.push(`<button class="btn btn-ghost btn-sm" data-act="admin-user-suspend" data-id="${u.id}">${t('suspend')}</button>`);
+      if (st === 'suspended') bits.push(`<button class="btn btn-ghost btn-sm" data-act="admin-user-unsuspend" data-id="${u.id}">${t('unsuspend')}</button>`);
+      if (st !== 'banned') bits.push(`<button class="btn btn-ghost btn-sm" data-act="admin-user-ban" data-id="${u.id}">${t('ban')}</button>`);
+      if (st === 'banned') bits.push(`<button class="btn btn-ghost btn-sm" data-act="admin-user-restore" data-id="${u.id}">${t('restore')}</button>`);
+      bits.push(`<button class="btn btn-ghost btn-sm" data-act="admin-user-verify" data-id="${u.id}" data-verified="${u.verified ? '0' : '1'}">${u.verified ? t('unverify') : t('verify')}</button>`);
+    }
+    if (canChangeRole(meUser, u)) {
+      bits.push(`<button class="btn btn-danger btn-sm" data-act="admin-user-delete" data-id="${u.id}">${t('delete')}</button>`);
+    }
+    return bits.length ? `<div class="row gap-sm wrap">${bits.join('')}</div>` : '<span class="muted small">—</span>';
+  };
+  const roleCell = (u) => {
+    if (canChangeRole(meUser, u)) {
+      return `<select class="admin-role-select" data-id="${u.id}" aria-label="${t('roleLabel')}">${ASSIGNABLE_ROLES.map((r) => `<option value="${r}" ${u.role === r ? 'selected' : ''}>${escapeHtml(roleLabel(r))}</option>`).join('')}</select>`;
+    }
+    return `<span class="badge ${u.role === 'superadmin' || u.role === 'admin' ? 'badge-admin' : ''}">${escapeHtml(roleLabel(u.role))}</span>`;
+  };
+  return `<h2>👥 ${t('adminUsers')}</h2>
+    <form id="admin-user-filter" class="card admin-filter">
+      <input name="q" value="${escapeHtml(filters.q || '')}" placeholder="${t('userSearchPlaceholder')}" autocomplete="off" />
+      <select name="status" aria-label="${t('statusLabel')}">
+        <option value="all" ${statusF === 'all' ? 'selected' : ''}>${t('allStatuses')}</option>
+        <option value="active" ${statusF === 'active' ? 'selected' : ''}>${t('statusActive')}</option>
+        <option value="suspended" ${statusF === 'suspended' ? 'selected' : ''}>${t('statusSuspended')}</option>
+        <option value="banned" ${statusF === 'banned' ? 'selected' : ''}>${t('statusBanned')}</option>
+      </select>
+      <select name="role" aria-label="${t('roleLabel')}">
+        <option value="all" ${roleF === 'all' ? 'selected' : ''}>${t('allRoles')}</option>
+        ${ASSIGNABLE_ROLES.map((r) => `<option value="${r}" ${roleF === r ? 'selected' : ''}>${escapeHtml(roleLabel(r))}</option>`).join('')}
+      </select>
+      <select name="kind" aria-label="${t('allKinds')}">
+        <option value="all" ${kindF === 'all' ? 'selected' : ''}>${t('allKinds')}</option>
+        <option value="humans" ${kindF === 'humans' ? 'selected' : ''}>${t('humans')}</option>
+        <option value="bots" ${kindF === 'bots' ? 'selected' : ''}>${t('bots')}</option>
+      </select>
+      <button class="btn btn-primary btn-sm" type="submit">Search</button>
+    </form>
+    <div class="card">
+      <div class="table-wrap"><table class="table admin-users-table">
+        <thead><tr><th>User</th><th>${t('username')}</th><th>${t('email')}</th><th>${t('roleLabel')}</th><th>${t('statusLabel')}</th><th>${t('joinedLabel')}</th><th>${t('postsCount')}</th><th>${t('friendsLabel')}</th><th>${t('actionsLabel')}</th></tr></thead>
+        <tbody>${rows.map((u) => `<tr>
+          <td><a class="row gap-sm" href="#/profile/${u.id}">${avatarHtml(u, 30)}<span>${userNameHtml(u)}</span></a></td>
+          <td>@${escapeHtml(u.username)}</td>
+          <td>${escapeHtml(u.email || '')}</td>
+          <td>${roleCell(u)}</td>
+          <td>${statusBadge(u)}</td>
+          <td>${u.createdAt ? escapeHtml(new Date(u.createdAt).toLocaleDateString()) : '—'}</td>
+          <td>${postCounts.get(u.id) || 0}</td>
+          <td>${friendIdsOfData(d, u.id).size}</td>
+          <td>${rowActions(u)}</td>
+        </tr>`).join('') || `<tr><td colspan="9" class="muted center">${t('noUsersMatch')}</td></tr>`}</tbody>
+      </table></div>
+      <div class="row gap admin-pager">
+        ${page > 1 ? `<a class="btn btn-ghost btn-sm" href="${pageHref(page - 1)}">${t('prevPage')}</a>` : ''}
+        <span class="muted small grow center">${t('pageLabelOf')} ${page} / ${totalPages} · ${list.length}</span>
+        ${page < totalPages ? `<a class="btn btn-ghost btn-sm" href="${pageHref(page + 1)}">${t('nextPage')}</a>` : ''}
+      </div>
+    </div>`;
+}
+
+// #/admin/security — audit log viewer (Pack A). Entries come from the
+// adminLogs collection (admins/superadmins only, enforced by rules);
+// the filter matches the action text, newest first.
+export function adminSecurityView(d, meUser, filters = {}) {
+  const q = String(filters.q || '').trim().toLowerCase();
+  const logs = [...(d.adminLogs || [])]
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+    .filter((l) => !q || String(l.action || '').toLowerCase().includes(q));
+  return `<h2>🔐 ${t('adminSecurity')}</h2>
+    <form id="admin-log-filter" class="card admin-filter">
+      <input name="q" value="${escapeHtml(filters.q || '')}" placeholder="${t('auditFilterPlaceholder')}" autocomplete="off" />
+      <button class="btn btn-primary btn-sm" type="submit">Search</button>
+    </form>
+    <div class="card stack">
+      <h3>${t('auditLog')} (${logs.length})</h3>
+      <div class="table-wrap"><table class="table">
+        <thead><tr><th>${t('auditAdmin')}</th><th>${t('auditAction')}</th><th>${t('auditTarget')}</th><th>${t('auditReason')}</th><th>${t('auditTime')}</th></tr></thead>
+        <tbody>${logs.map((l) => `<tr>
+          <td>${escapeHtml(l.adminName || l.adminId || '')}</td>
+          <td><span class="badge">${escapeHtml(l.action || '')}</span></td>
+          <td>${escapeHtml(l.targetType || '')}${l.targetLabel ? `: ${escapeHtml(l.targetLabel)}` : ''}</td>
+          <td>${escapeHtml(l.reason || '')}</td>
+          <td title="${l.createdAt ? escapeHtml(new Date(l.createdAt).toLocaleString()) : ''}">${timeAgo(l.createdAt)}</td>
+        </tr>`).join('') || `<tr><td colspan="5" class="muted center">${t('noAuditEntries')}</td></tr>`}</tbody>
+      </table></div>
+    </div>`;
+}
+
+// Full-screen notice shown INSTEAD of the app when the signed-in user's
+// own account is suspended or banned (Pack A). Enforcement pairs with
+// the writerStatusOk() create-rule gate in firestore.rules.
+export function accountStatusView(user) {
+  const banned = accountStatus(user) === 'banned';
+  return `<div class="page narrow"><div class="card empty-state">
+    <div class="empty-icon">${banned ? '⛔' : '⏸️'}</div>
+    <h2>${t(banned ? 'accountBannedTitle' : 'accountSuspendedTitle')}</h2>
+    <p class="muted">${t(banned ? 'accountBannedBody' : 'accountSuspendedBody')}</p>
+    <button class="btn btn-primary" data-act="logout">${t('logout')}</button>
+  </div></div>`;
 }
 
 // ------------------------------------------------------------------ BOTS ADMIN
 export function botsView(d, meUser) {
   const globalOn = d.botSettings?.global?.enabled !== false;
-  return `<div class="page">
+  return `<div class="admin-inner">
     <h2>🤖 AI Bot Admin Panel</h2>
     <div class="card stack">
       <div class="row gap wrap">
@@ -1033,6 +1518,12 @@ export function botsView(d, meUser) {
         <button class="btn btn-primary" data-act="bot-new">+ Create bot</button>
       </div>
       <p class="muted small">Status: <b>${globalOn ? 'ENABLED' : 'STOPPED'}</b> · AI usage today: ${d.aiUsage?.callsToday || 0} calls · ~${d.aiUsage?.tokensToday || 0} tokens (template fallback uses 0 provider tokens).</p>
+    </div>
+    <div class="card stack">
+      <h3>🧠 ${t('aiProviderTitle')} — Google Gemini</h3>
+      <p class="small">Status: <b>${d.botSecrets?.geminiApiKey ? t('geminiKeySet') : t('geminiKeyNotSet')}</b> · ${t('aiModelInUse')}: <b>${GEMINI_MODEL}</b> <span class="muted">(platform default — a bot can override it in its own settings)</span></p>
+      <p class="small">${t('aiUsageToday')}: <b>${d.aiUsage?.callsToday || 0}</b> calls · ~<b>${d.aiUsage?.tokensToday || 0}</b> tokens</p>
+      <p class="muted small">${t('aiFallbackNote')}</p>
     </div>
     ${firebaseReady ? `<div class="card stack">
       <h3>🛰️ ${t('botRunnerTitle')}</h3>
@@ -1070,6 +1561,7 @@ function botCardHtml(d, b) {
       <div class="grow"><b>${escapeHtml(b.name)}</b> <span class="badge badge-bot">${t('aiBot')}</span> <span class="badge ${b.active ? 'badge-ok' : 'badge-warn'}">${b.active ? 'Active' : 'Inactive'}</span><br/>
       <span class="muted small">@${escapeHtml(b.username)} · traits: ${escapeHtml(b.personality.traits.join(', '))} · tone: ${escapeHtml(b.personality.tone)} · interests: ${escapeHtml(b.personality.interests.join(', '))}</span></div>
       <button class="btn btn-ghost btn-sm" data-act="bot-toggle" data-id="${b.id}">${b.active ? 'Deactivate' : 'Activate'}</button>
+      <a class="btn btn-ghost btn-sm" href="#/admin/bots/${b.id}">${t('viewDetails')}</a>
       <button class="btn btn-ghost btn-sm" data-act="bot-edit" data-id="${b.id}">Configure</button>
       <button class="btn btn-danger btn-sm" data-act="bot-delete" data-id="${b.id}">${t('delete')}</button>
     </div>
@@ -1082,17 +1574,31 @@ function botCardHtml(d, b) {
   </div>`;
 }
 
+const BOT_MODEL_OPTIONS = ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash'];
+function botModelSelectHtml(current = '') {
+  return `<select name="model">
+    <option value="" ${!current ? 'selected' : ''}>${t('modelDefaultLabel')}</option>
+    ${BOT_MODEL_OPTIONS.map((m) => `<option value="${m}" ${current === m ? 'selected' : ''}>${m}</option>`).join('')}
+  </select>`;
+}
+
 export function botFormHtml(bot = null) {
-  const b = bot || { name: '', username: '', bio: '', personality: { traits: [], tone: '', interests: [], systemPrompt: '' }, limits: { postsPerDay: 3, commentsPerDay: 10, likesPerDay: 20, messagesPerDay: 5 } };
+  const b = bot || { name: '', username: '', bio: '', avatar: '', model: '', personality: { traits: [], tone: '', interests: [], systemPrompt: '' }, limits: { postsPerDay: 3, commentsPerDay: 10, likesPerDay: 20, messagesPerDay: 5 } };
   return `<h3>${bot ? 'Configure bot' : 'Create AI bot'}</h3>
   <form id="bot-form" data-id="${bot?.id || ''}" class="stack">
     <label>Name<input name="name" required maxlength="40" value="${escapeHtml(b.name)}" /></label>
     <label>Username<input name="username" required maxlength="24" value="${escapeHtml(b.username)}" placeholder="name.bot" /></label>
     <label>Bio<input name="bio" maxlength="160" value="${escapeHtml(b.bio)}" /></label>
+    <div class="row gap wrap">
+      ${avatarHtml({ name: b.name || 'Bot', username: b.username, avatar: b.avatar }, 44)}
+      <label class="grow">${t('botAvatarLabel')}<input name="avatarFile" type="file" accept="image/*" /></label>
+    </div>
+    <input type="hidden" name="avatar" value="${escapeHtml(b.avatar || '')}" />
     <label>Personality traits (comma separated)<input name="traits" value="${escapeHtml(b.personality.traits.join(', '))}" /></label>
     <label>Tone<input name="tone" value="${escapeHtml(b.personality.tone)}" /></label>
     <label>Interests (comma separated)<input name="interests" value="${escapeHtml(b.personality.interests.join(', '))}" /></label>
     <label>Individual system prompt<textarea name="systemPrompt" rows="4" maxlength="1000">${escapeHtml(b.personality.systemPrompt)}</textarea></label>
+    <label>${t('botModelLabel')}${botModelSelectHtml(b.model || '')}</label>
     <div class="row gap wrap">
       <label>Posts/day<input name="postsPerDay" type="number" min="0" max="50" value="${b.limits.postsPerDay}" /></label>
       <label>Comments/day<input name="commentsPerDay" type="number" min="0" max="100" value="${b.limits.commentsPerDay}" /></label>
@@ -1102,6 +1608,308 @@ export function botFormHtml(bot = null) {
     <p class="muted small">This bot will always be labelled “AI Bot” and gets its own brain, prompt and memory.</p>
     <div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">${bot ? 'Save bot' : 'Create bot'}</button></div>
   </form>`;
+}
+
+// ------------------------------------------------- BOT DETAILS (Pack C)
+// Bot Control Center details page: #/admin/bots/<botId>?tab=<tab>.
+// Every tab renders from the same synced dataset the list page uses;
+// in live mode api.loadBotAdminData additionally mirrors the bot's
+// brain, memories, counters and conversation metadata on demand.
+const BOT_DETAIL_TABS = ['overview', 'brain', 'personality', 'memory', 'activity', 'conversations', 'usage', 'settings', 'logs'];
+
+function botCountersToday(d, botId) {
+  const c = d.botSettings?.counters?.[botId] || {};
+  return { postsToday: 0, commentsToday: 0, likesToday: 0, messagesToday: 0, lastActionAt: 0, ...c };
+}
+
+function botCountersRows(b, counters) {
+  const row = (label, used, limit) => `<div class="row gap-sm"><span class="grow">${label}</span><b>${used}</b><span class="muted">/ ${limit} per day</span></div>`;
+  return `${row('Posts', counters.postsToday, b.limits.postsPerDay)}
+    ${row('Comments', counters.commentsToday, b.limits.commentsPerDay)}
+    ${row('Likes', counters.likesToday, b.limits.likesPerDay)}
+    ${row('Messages', counters.messagesToday, b.limits.messagesPerDay)}
+    ${counters.lastActionAt ? `<p class="muted small">${t('lastActivityLabel')}: ${timeAgo(counters.lastActionAt)}</p>` : ''}`;
+}
+
+export function botDetailsView(d, meUser, botId, tab = 'overview') {
+  const b = (d.bots || []).find((x) => x.id === botId);
+  if (!b) return `<div class="admin-inner"><p><a href="#/admin/bots">← ${t('adminBots')}</a></p>${emptyState('🤖', 'Bot not found.')}</div>`;
+  const activeTab = BOT_DETAIL_TABS.includes(tab) ? tab : 'overview';
+  const botUser = d.users.find((u) => u.id === b.id) || { name: b.name, username: b.username, avatar: b.avatar };
+  const brain = d.botBrains?.[b.id] || {};
+  const tabLabel = { overview: t('tabOverview'), brain: t('tabBrain'), personality: t('tabPersonality'), memory: t('tabMemory'), activity: t('tabActivity'), conversations: t('tabConversations'), usage: t('tabUsage'), settings: t('tabSettings'), logs: t('tabLogs') };
+  const bodies = {
+    overview: () => botTabOverview(d, b, brain),
+    brain: () => botTabBrain(d, b, brain),
+    personality: () => botTabPersonality(d, b),
+    memory: () => botTabMemory(d, b),
+    activity: () => botTabActivity(d, b),
+    conversations: () => botTabConversations(d, b),
+    usage: () => botTabUsage(d, b, brain),
+    settings: () => botTabSettings(d, b),
+    logs: () => botTabLogs(d, b)
+  };
+  return `<div class="admin-inner">
+    <p><a href="#/admin/bots">← ${t('adminBots')}</a></p>
+    <div class="card stack">
+      <div class="row gap wrap">
+        ${avatarHtml(botUser, 56)}
+        <div class="grow"><h2 style="margin:0">${escapeHtml(b.name)} <span class="badge badge-bot">${t('aiBot')}</span> <span class="badge ${b.active ? 'badge-ok' : 'badge-warn'}">${b.active ? 'Active' : 'Inactive'}</span></h2>
+        <span class="muted small">@${escapeHtml(b.username)} · ${t('botDetails')}</span></div>
+        <button class="btn ${b.active ? 'btn-danger' : 'btn-primary'} btn-sm" data-act="bot-toggle" data-id="${b.id}">${b.active ? 'Deactivate' : 'Activate'}</button>
+      </div>
+      <nav class="row gap wrap bot-tabs">${BOT_DETAIL_TABS.map((key) => `<a class="btn btn-sm ${key === activeTab ? 'btn-primary' : 'btn-ghost'}" href="#/admin/bots/${b.id}?tab=${key}">${tabLabel[key]}</a>`).join('')}</nav>
+    </div>
+    ${bodies[activeTab]()}
+  </div>`;
+}
+
+function botTabOverview(d, b, brain) {
+  const counters = botCountersToday(d, b.id);
+  const summaries = botConversationSummaries(d, b.id);
+  const memories = d.botMemories?.[b.id] || [];
+  const posts = (d.posts || []).filter((p) => p.authorId === b.id).sort((a, z) => (z.createdAt || 0) - (a.createdAt || 0));
+  return `<div class="card stack">
+      <h3>${t('identityLabel')}</h3>
+      <p class="small"><b>${escapeHtml(b.name)}</b> · @${escapeHtml(b.username)}<br/>${escapeHtml(b.bio || '')}</p>
+      <p class="small muted">${t('statusLabel')}: <b>${b.active ? 'Active' : 'Inactive'}</b> · Created: ${b.createdAt ? new Date(b.createdAt).toLocaleDateString() : '—'} · ${t('botModelLabel')}: <b>${escapeHtml(botModel(b))}</b></p>
+    </div>
+    <div class="card stack">
+      <h3>${t('countersToday')}</h3>
+      ${botCountersRows(b, counters)}
+      <p class="small">${t('brainProvider')}: <b>${escapeHtml(brain.provider || '—')}</b> · ${t('brainModel')}: <b>${escapeHtml(brain.model || botModel(b))}</b>${brain.updatedAt ? ` · ${t('brainUpdated')}: ${timeAgo(brain.updatedAt)}` : ''}</p>
+      <p class="small">${t('memoryCountLabel')}: <b>${memories.length}</b> · ${t('conversationCountLabel')}: <b>${summaries.length}</b></p>
+    </div>
+    <div class="card stack">
+      <h3>${t('recentBotPosts')}</h3>
+      ${posts.slice(0, 5).map((p) => `<p class="small">${escapeHtml(truncate(p.text || '', 140))} <span class="muted">${timeAgo(p.createdAt)}</span></p>`).join('') || `<p class="muted">${t('noBotPosts')}</p>`}
+    </div>`;
+}
+
+function botTabBrain(d, b, brain) {
+  return `<div class="card stack">
+    <h3>🧠 ${t('tabBrain')}</h3>
+    <p class="small">${t('brainProvider')}: <b>${escapeHtml(brain.provider || '—')}</b> · ${t('brainModel')}: <b>${escapeHtml(brain.model || botModel(b))}</b>${brain.updatedAt ? ` · ${t('brainUpdated')}: ${timeAgo(brain.updatedAt)}` : ''}</p>
+    <form id="bot-brain-form" data-id="${b.id}" class="stack">
+      <label>System prompt<textarea name="systemPrompt" rows="6" maxlength="1000">${escapeHtml(brain.systemPrompt || b.personality.systemPrompt)}</textarea></label>
+      <p class="muted small">${t('brainNote')}</p>
+      <div class="row gap end"><button class="btn btn-primary" type="submit">${t('brainSave')}</button></div>
+    </form>
+  </div>`;
+}
+
+function botTabPersonality(d, b) {
+  return `<div class="card stack">
+    <h3>🎭 ${t('tabPersonality')}</h3>
+    <form id="bot-personality-form" data-id="${b.id}" class="stack">
+      <label>Bio<input name="bio" maxlength="160" value="${escapeHtml(b.bio)}" /></label>
+      <label>Personality traits (comma separated)<input name="traits" value="${escapeHtml(b.personality.traits.join(', '))}" /></label>
+      <label>Tone<input name="tone" value="${escapeHtml(b.personality.tone)}" /></label>
+      <label>Interests (comma separated)<input name="interests" value="${escapeHtml(b.personality.interests.join(', '))}" /></label>
+      <div class="row gap end"><button class="btn btn-primary" type="submit">${t('save')}</button></div>
+    </form>
+  </div>`;
+}
+
+function botTabMemory(d, b) {
+  const memories = d.botMemories?.[b.id] || [];
+  return `<div class="card stack">
+    <h3>🧾 ${t('tabMemory')} (${memories.length})</h3>
+    ${memories.map((m) => `<div class="row gap-sm"><span class="grow small">${m.pinned ? '📌 ' : ''}${escapeHtml(m.text)}</span><span class="muted small">${timeAgo(m.updatedAt || m.createdAt)}</span><button class="btn btn-ghost btn-sm" data-act="bot-memory-delete" data-bot="${b.id}" data-id="${m.id}">✕</button></div>`).join('') || '<p class="muted small">No memories yet.</p>'}
+    <form class="row gap-sm" data-bot-memory-form="${b.id}"><input name="text" class="grow" placeholder="Add a memory for this bot…" maxlength="300" /><button class="btn btn-primary btn-sm" type="submit">Add</button></form>
+  </div>`;
+}
+
+function botTabActivity(d, b) {
+  const byId = usersById(d);
+  const posts = (d.posts || []).filter((p) => p.authorId === b.id).sort((a, z) => (z.createdAt || 0) - (a.createdAt || 0));
+  const comments = [];
+  for (const p of d.posts || []) {
+    for (const c of p.comments || []) {
+      if (c.authorId === b.id) comments.push({ post: p, comment: c });
+      for (const r of c.replies || []) if (r.authorId === b.id) comments.push({ post: p, comment: r });
+    }
+  }
+  comments.sort((a, z) => (z.comment.createdAt || 0) - (a.comment.createdAt || 0));
+  const replies = (d.messages || []).filter((m) => m.senderId === b.id).length;
+  const acts = (d.botActivities || []).filter((a) => a.botId === b.id);
+  const empty = !posts.length && !comments.length && !acts.length && !replies;
+  return `<div class="card stack">
+    <h3>📜 ${t('tabActivity')}</h3>
+    ${empty ? `<p class="muted">${t('noBotActivity')}</p>` : `
+    <p class="small">${t('botRepliesLabel')}: <b>${replies}</b></p>
+    ${posts.length ? `<h4>${t('recentBotPosts')}</h4>${posts.slice(0, 10).map((p) => `<p class="small">📝 ${escapeHtml(truncate(p.text || '', 140))} <span class="muted">${timeAgo(p.createdAt)}</span></p>`).join('')}` : ''}
+    ${comments.length ? `<h4>${t('botCommentsLabel')}</h4>${comments.slice(0, 10).map(({ post, comment }) => `<p class="small">💬 ${escapeHtml(truncate(comment.text || '', 140))} <span class="muted">on ${escapeHtml(byId[post.authorId]?.name || '')}'s post · ${timeAgo(comment.createdAt)}</span></p>`).join('')}` : ''}
+    ${acts.length ? `<h4>Recent bot activity</h4>${acts.slice(0, 15).map((a) => `<p class="small">• ${escapeHtml(a.action)} — ${escapeHtml(a.detail || '')} <span class="muted">${timeAgo(a.createdAt)} · ${escapeHtml(a.status || '')}</span></p>`).join('')}` : ''}`}
+  </div>`;
+}
+
+function botTabConversations(d, b) {
+  const byId = usersById(d);
+  const summaries = botConversationSummaries(d, b.id);
+  return `<div class="card stack">
+    <h3>💬 ${t('tabConversations')} (${summaries.length})</h3>
+    <p class="muted small">${t('conversationsMetaNote')}</p>
+    ${summaries.map((s) => { const other = byId[s.otherId]; return `<div class="row gap-sm">${avatarHtml(other || { name: s.otherId || '?' }, 36)}<span class="grow"><a href="#/profile/${s.otherId}"><b>${escapeHtml(other?.name || s.otherId)}</b></a><br/><span class="muted small">${s.count} ${t('messagesCountLabel')} · ${t('lastActivityLabel')}: ${s.lastAt ? timeAgo(s.lastAt) : '—'}</span></span></div>`; }).join('') || `<p class="muted">${t('noBotActivity')}</p>`}
+  </div>`;
+}
+
+function botTabUsage(d, b, brain) {
+  const counters = botCountersToday(d, b.id);
+  return `<div class="card stack">
+    <h3>📊 ${t('tabUsage')}</h3>
+    <h4>${t('countersToday')}</h4>
+    ${botCountersRows(b, counters)}
+    <h4>${t('aiProviderTitle')}</h4>
+    <p class="small">${t('brainProvider')}: <b>${escapeHtml(brain.provider || '—')}</b> · ${t('brainModel')}: <b>${escapeHtml(brain.model || botModel(b))}</b></p>
+    <p class="small">${t('aiUsageToday')}: <b>${d.aiUsage?.callsToday || 0}</b> calls · ~<b>${d.aiUsage?.tokensToday || 0}</b> tokens</p>
+    <p class="muted small">${t('usagePlatformNote')}</p>
+  </div>`;
+}
+
+function botTabSettings(d, b) {
+  return `<div class="card stack">
+    <h3>⚙️ ${t('tabSettings')}</h3>
+    <div class="row gap wrap">
+      <span class="grow"><b>${t('statusLabel')}</b><br/><span class="muted small">${b.active ? 'Active' : 'Inactive'}</span></span>
+      <button class="btn ${b.active ? 'btn-danger' : 'btn-primary'}" data-act="bot-toggle" data-id="${b.id}">${b.active ? 'Deactivate' : 'Activate'}</button>
+    </div>
+    <form id="bot-settings-form" data-id="${b.id}" class="stack">
+      <div class="row gap wrap">
+        <label>Posts/day<input name="postsPerDay" type="number" min="0" max="50" value="${b.limits.postsPerDay}" /></label>
+        <label>Comments/day<input name="commentsPerDay" type="number" min="0" max="100" value="${b.limits.commentsPerDay}" /></label>
+        <label>Likes/day<input name="likesPerDay" type="number" min="0" max="200" value="${b.limits.likesPerDay}" /></label>
+        <label>Messages/day<input name="messagesPerDay" type="number" min="0" max="50" value="${b.limits.messagesPerDay}" /></label>
+      </div>
+      <label>${t('botModelLabel')}${botModelSelectHtml(b.model || '')}</label>
+      <div class="row gap end"><button class="btn btn-primary" type="submit">${t('limitsSave')}</button></div>
+    </form>
+  </div>
+  <div class="card stack">
+    <h3>🗑️ ${t('deleteBotTitle')}</h3>
+    <p class="muted small">${t('deleteBotBody')}</p>
+    <div class="row gap end"><button class="btn btn-danger" data-act="bot-delete" data-id="${b.id}">${t('delete')}</button></div>
+  </div>`;
+}
+
+function botTabLogs(d, b) {
+  const logs = (d.botLogs || []).filter((l) => l.botId === b.id);
+  return `<div class="card stack">
+    <h3>🪵 ${t('tabLogs')}</h3>
+    ${logs.map((l) => `<p class="small mono">[${escapeHtml(l.level)}] ${escapeHtml(l.message)} <span class="muted">${timeAgo(l.createdAt)}</span></p>`).join('') || `<p class="muted">${firebaseReady ? t('botLogsEmptyLive') : t('botLogsEmptyDemo')}</p>`}
+  </div>`;
+}
+
+// ------------------------------------------------- ANNOUNCE (Pack C)
+export function adminAnnounceView(d, meUser) {
+  const people = (d.users || []).filter((u) => !u.isBot);
+  const list = [...(d.announcements || [])].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  return `<div class="admin-inner">
+    <h2>📣 ${t('adminAnnounce')}</h2>
+    <div class="card stack">
+      <h3>${t('announceCreateTitle')}</h3>
+      <form id="announcement-form" class="stack">
+        <label>${t('announceTitleLabel')}<input name="title" required maxlength="120" /></label>
+        <label>${t('announceBodyLabel')}<textarea name="body" rows="3" required maxlength="1000"></textarea></label>
+        <div class="row gap end"><button class="btn btn-primary" type="submit">${t('announcePublish')}</button></div>
+      </form>
+      <p class="muted small">${t('announceRateNote')}</p>
+    </div>
+    <div class="card stack">
+      <h3>✉️ ${t('notifyUserTitle')}</h3>
+      <form id="admin-notify-form" class="stack">
+        <label>${t('notifyUserPick')}<select name="userId">${people.map((u) => `<option value="${u.id}">${escapeHtml(u.name)} (@${escapeHtml(u.username)})</option>`).join('')}</select></label>
+        <label>${t('announceTitleLabel')}<input name="title" maxlength="120" /></label>
+        <label>${t('announceBodyLabel')}<textarea name="body" rows="2" required maxlength="1000"></textarea></label>
+        <div class="row gap end"><button class="btn btn-primary" type="submit">${t('notifySend')}</button></div>
+      </form>
+    </div>
+    <div class="card stack">
+      <h3>${t('announceListTitle')}</h3>
+      ${list.map((a) => `<div class="row gap wrap">
+        <div class="grow"><b>${escapeHtml(a.title)}</b> <span class="badge ${a.active !== false ? 'badge-ok' : 'badge-warn'}">${a.active !== false ? t('announceActive') : t('announceInactive')}</span><br/>
+        <span class="small">${escapeHtml(a.body)}</span><br/>
+        <span class="muted small">${escapeHtml(a.createdByName || '')} · ${timeAgo(a.createdAt)}</span></div>
+        <button class="btn btn-ghost btn-sm" data-act="announcement-toggle" data-id="${a.id}" data-on="${a.active !== false ? '0' : '1'}">${a.active !== false ? t('announceInactive') : t('announceActive')}</button>
+        <button class="btn btn-danger btn-sm" data-act="announcement-delete" data-id="${a.id}">${t('delete')}</button>
+      </div>`).join('') || `<p class="muted">${t('announceEmpty')}</p>`}
+    </div>
+  </div>`;
+}
+
+// ------------------------------------------------- PLATFORM SETTINGS (Pack C)
+export function adminSettingsView(d, meUser) {
+  const cfg = d.config || {};
+  return `<div class="admin-inner">
+    <h2>⚙️ ${t('adminSettings')}</h2>
+    <form id="platform-settings-form" class="card stack">
+      <label>${t('settingsPlatformName')}<input name="platformName" maxlength="40" value="${escapeHtml(cfg.platformName || 'MeetBook')}" /></label>
+      <label class="row gap-sm"><input type="checkbox" name="registrationOpen" ${cfg.registrationOpen === false ? '' : 'checked'} /> <span class="grow">${t('settingsRegistrationOpen')}</span></label>
+      <p class="muted small">${t('settingsRegistrationNote')}</p>
+      <label>${t('settingsDefaultLanguage')}
+        <select name="defaultLanguage">
+          <option value="en" ${cfg.defaultLanguage === 'bn' ? '' : 'selected'}>English</option>
+          <option value="bn" ${cfg.defaultLanguage === 'bn' ? 'selected' : ''}>বাংলা</option>
+        </select>
+      </label>
+      <p class="muted small">${t('settingsDefaultLanguageNote')}</p>
+      <div class="row gap end"><button class="btn btn-primary" type="submit">${t('save')}</button></div>
+    </form>
+    <div class="card stack">
+      <h3>🛠️ Maintenance mode</h3>
+      <label class="row gap-sm"><input type="checkbox" id="maintenance-toggle" ${cfg.maintenanceMode ? 'checked' : ''} /> <span class="grow">Maintenance mode (shows a maintenance banner to non-admin users)</span></label>
+      <p class="muted small">${t('settingsMaintenanceNote')}</p>
+    </div>
+  </div>`;
+}
+
+// ------------------------------------------------- SYSTEM HEALTH (Pack C)
+// Every row is either derived from data this client actually holds or
+// labelled as a static platform fact / an external link — no invented
+// metrics. The Firestore row shows the one-shot probe result that
+// main.js triggers (api.probeFirestoreHealth) when this page opens.
+export function adminHealthView(d, meUser, mode) {
+  const probe = d.healthProbe || null;
+  const s = platformStats(d, Date.now(), d.adminStats || null);
+  const errors = recentClientErrors();
+  const brains = (d.bots || []).map((b) => ({ bot: b, brain: d.botBrains?.[b.id] || {} }));
+  const row = (label, value) => `<div class="row gap-sm"><span class="grow muted">${label}</span><span class="right">${value}</span></div>`;
+  return `<div class="admin-inner">
+    <h2>🩺 ${t('healthTitle')}</h2>
+    <div class="card stack">
+      ${row(t('healthMode'), `<b>${mode.firebase ? t('healthLive') : t('healthDemo')}</b>`)}
+      ${row(t('healthProject'), `<b>${escapeHtml(mode.projectId || '—')}</b>`)}
+      ${row(t('healthFirestore'), !mode.firebase
+        ? `<b>${t('healthDemo')}</b>`
+        : probe
+          ? (probe.ok
+            ? `<b>${t('healthConnected')}</b> · ${probe.ms} ms · ${t('healthLastProbe')}: ${timeAgo(probe.at)}`
+            : `<b>${t('healthCheckFailed')}</b> · ${escapeHtml(probe.error || '')} · ${t('healthLastProbe')}: ${timeAgo(probe.at)}`)
+          : `<span class="muted">${t('healthChecking')}</span>`)}
+      ${row(t('healthAuth'), `<b>${escapeHtml(meUser.name)}</b> · ${escapeHtml(meUser.email || '')} · ${escapeHtml(roleLabel(meUser.role))}`)}
+      ${row(t('healthDeploy'), `<a href="https://github.com/mamun-q/MeetBook/actions" target="_blank" rel="noopener">GitHub Actions ↗</a>`)}
+      <p class="muted small">${t('healthDeployNote')}</p>
+      ${row(t('healthFunctions'), `<span class="muted">${t('healthFunctionsOff')}</span>`)}
+      ${row(t('healthStorage'), `<span class="muted">${t('healthStorageOff')}</span>`)}
+      ${row(t('healthRunner'), mode.firebase
+        ? `<b>${d.botRunner?.active ? t('botRunnerActive') : t('botRunnerInactive')}</b>${d.botRunner?.lastCycleAt ? ` · ${t('botLastCycle')}: ${timeAgo(d.botRunner.lastCycleAt)}` : ''}`
+        : `<span class="muted">${t('healthDemo')}</span>`)}
+      ${row(t('healthGemini'), `<b>${d.botSecrets?.geminiApiKey ? t('geminiKeySet') : t('geminiKeyNotSet')}</b>`)}
+      ${brains.map(({ bot, brain }) => `<div class="row gap-sm"><span class="grow muted small">🤖 ${escapeHtml(bot.name)}</span><span class="small">${escapeHtml(brain.provider || '—')} · ${escapeHtml(brain.model || botModel(bot))}${brain.updatedAt ? ` · ${timeAgo(brain.updatedAt)}` : ''}</span></div>`).join('')}
+    </div>
+    <div class="card stack">
+      <h3>${t('healthDbCounts')}</h3>
+      ${row(t('statUsers'), `<b>${s.totalUsers}</b>`)}
+      ${row(t('statPosts'), `<b>${s.totalPosts}</b>${mode.firebase && s.sources.posts === 'loaded' ? ` <span class="muted small">(${t('statFromLoaded')})</span>` : ''}`)}
+      ${row(t('statMessages'), `<b>${s.totalMessages}</b>${mode.firebase && s.sources.messages === 'loaded' ? ` <span class="muted small">(${t('statFromLoaded')})</span>` : ''}`)}
+      ${row(t('healthConversations'), `<b>${(d.conversations || []).length}</b>${mode.firebase ? ` <span class="muted small">(${t('statFromLoaded')})</span>` : ''}`)}
+      <p class="muted small">${t('healthDbNote')}</p>
+    </div>
+    <div class="card stack">
+      <h3>${t('healthClientErrors')}</h3>
+      ${errors.map((e) => `<p class="small mono">${escapeHtml(e.message)} <span class="muted">${timeAgo(e.at)}</span></p>`).join('') || `<p class="muted">${t('healthNoErrors')}</p>`}
+    </div>
+  </div>`;
 }
 
 // ------------------------------------------------------------------ STATIC PAGES

@@ -7,9 +7,9 @@ import {
   getState, mutate, findUser, userByUsername, friendIdsOf, blockedIdsOf, notify, resetDemo
 } from './store.js';
 import { firebaseReady, auth, db, storage, googleProvider } from './firebase.js';
-import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError } from './utils.js';
+import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate } from './utils.js';
 import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay } from './botLogic.js';
-import { generateGeminiText, canAccessBotSecrets, GEMINI_MODEL } from './gemini.js';
+import { generateGeminiText, canAccessBotSecrets, GEMINI_MODEL, botModel } from './gemini.js';
 
 // --- Firebase imports are dynamic-free static imports of the SDK ---------
 import {
@@ -17,7 +17,7 @@ import {
   sendPasswordResetEmail, signOut, deleteUser, onAuthStateChanged
 } from 'firebase/auth';
 import {
-  collection, doc, setDoc, getDoc, getDocs, addDoc, updateDoc, deleteDoc,
+  collection, doc, setDoc, getDoc, getDocs, getCountFromServer, addDoc, updateDoc, deleteDoc,
   query, where, orderBy, limit, onSnapshot, serverTimestamp, arrayUnion, arrayRemove
 } from 'firebase/firestore';
 import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage';
@@ -47,15 +47,23 @@ export function me() {
   return id ? (data().users.find((u) => u.id === id) || null) : null;
 }
 
+// "Admin" across the app means the admin tier of the Pack A role
+// ladder: role 'admin' OR 'superadmin' (utils.isAdminRole). Moderators
+// and analysts are staff but are NOT admins — gate them with
+// utils.canModerate / utils.isStaff at the call site.
 export function isAdmin(user = me()) {
-  return Boolean(user && user.role === 'admin');
+  return isAdminRole(user);
 }
 
 function blankRemote() {
   return {
     users: [], sessionUid: '', posts: [], stories: [], groups: [], pages: [], friendships: [], blocks: [],
-    conversations: [], messages: [], notifications: [], reports: [], events: [], reviews: [], groupRequests: [],
+    conversations: [], messages: [], notifications: [], reports: [], adminLogs: [], events: [], reviews: [], groupRequests: [],
     bots: [], botBrains: {}, botMemories: {}, botActivities: [], botLogs: [],
+    announcements: [], // Pack C: platform announcements (admin-written, all read)
+    botConvMeta: {}, // Pack C: per-bot conversation metadata (loadBotAdminData)
+    healthProbe: null, // Pack C: last Firestore connectivity probe (probeFirestoreHealth)
+    adminStats: null, // Pack B: staff-only server aggregates (loadAdminStats)
     botSettings: { global: { enabled: true }, counters: {} },
     botSecrets: { geminiApiKey: '' },
     botRunner: { live: true, active: false, lastCycleAt: 0, lastSummary: '' },
@@ -70,6 +78,16 @@ function blankRemote() {
 export async function register({ name, username, email, password, dob = '', gender = '' }) {
   const v = validateUsername(username);
   if (!v.ok) throw new Error(v.error);
+  // Platform settings (Pack C): closed registration refuses new
+  // accounts. Client-side this reads the synced config (always
+  // available in demo mode; in live mode the config listener only runs
+  // after sign-in, so pre-auth it may be unknown) — the Firestore
+  // users-create rule enforces the same gate server-side in live mode,
+  // and its denial is mapped to the friendly message in the catch
+  // below.
+  if (data().config?.registrationOpen === false) {
+    throw new Error('Registration is currently closed. Please try again later.');
+  }
   if (firebaseReady) {
     // Create the Auth account FIRST: Firestore rules only allow signed-in
     // reads, so the username-uniqueness query must run after sign-up (an
@@ -94,6 +112,10 @@ export async function register({ name, username, email, password, dob = '', gend
       await setDoc(doc(db, 'users', cred.user.uid), profile);
     } catch (err) {
       try { await deleteUser(cred.user); } catch { /* rollback is best-effort */ }
+      // The users-create rule denies the profile write when platform
+      // registration is closed (Pack C) — surface that honestly
+      // instead of a raw permission error.
+      if (err?.code === 'permission-denied') throw new Error('Registration is currently closed. Please try again later.');
       throw err;
     }
     return { id: cred.user.uid, ...profile };
@@ -260,7 +282,7 @@ function startRemoteSync() {
   // timeAgo() directly renders a 1970s date. (Stories/events mappers
   // below predate the helper and call tsToMs inline — same effect.)
   const mapUser = (d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt', 'lastSeen']) });
-  onSnapshot(query(collection(db, 'users'), limit(300)), (snap) => { patch((r) => { r.users = snap.docs.map(mapUser); }); void loadBotSecrets(); syncLiveBotRunner(); });
+  onSnapshot(query(collection(db, 'users'), limit(300)), (snap) => { patch((r) => { r.users = snap.docs.map(mapUser); }); void loadBotSecrets(); void loadAdminStats(); syncLiveBotRunner(); });
   // Posts: three provable listeners merged by id (see header note).
   // Comment/reply timestamps are normalised too — they are written as
   // client-side ms today, but a Timestamp shape must never leak through.
@@ -355,6 +377,11 @@ function startRemoteSync() {
     () => { /* non-admins cannot read bot logs — ignore */ });
   onSnapshot(doc(db, 'botSettings', 'global'), (snap) => patch((r) => { if (snap.exists()) r.botSettings.global = snap.data(); }));
   onSnapshot(doc(db, 'config', 'app'), (snap) => patch((r) => { if (snap.exists()) r.config = { ...r.config, ...snap.data() }; }));
+  // Announcements (Pack C): the read rule is signedIn-only
+  // (field-independent), so a plain ordered listener is provable.
+  onSnapshot(query(collection(db, 'announcements'), orderBy('createdAt', 'desc'), limit(50)),
+    (snap) => patch((r) => { r.announcements = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }),
+    () => { /* listener rejected — leave the mirrored set untouched */ });
   if (remoteUid) {
     onSnapshot(query(collection(db, 'posts'), where('authorId', '==', remoteUid)),
       (snap) => { ownPosts = snap.docs.map(mapPost); mergePosts(); },
@@ -410,6 +437,10 @@ function startRemoteSync() {
       (snap) => { memberGroups = snap.docs.map(mapGroup); mergeGroups(); });
     onSnapshot(query(collection(db, 'reports'), orderBy('createdAt', 'desc'), limit(100)),
       (snap) => patch((r) => { r.reports = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }), () => { /* non-admins cannot read reports — ignore */ });
+    // Audit trail: readable by admins/superadmins only (rules), so the
+    // listener simply never delivers for anyone else.
+    onSnapshot(query(collection(db, 'adminLogs'), orderBy('createdAt', 'desc'), limit(200)),
+      (snap) => patch((r) => { r.adminLogs = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }), () => { /* moderators/analysts cannot read the audit log — ignore */ });
   }
 }
 
@@ -745,11 +776,31 @@ export async function deleteComment(postId, commentId) {
   });
 }
 
-export async function reportContent(targetType, targetId, reason) {
+export async function reportContent(targetType, targetId, reason, opts = {}) {
   const user = me(); if (!user) throw new Error('Sign in to report content.');
-  const report = { reporterId: user.id, targetType, targetId, reason: String(reason || 'Inappropriate content'), status: 'open', createdAt: Date.now() };
-  if (firebaseReady) { await addDoc(collection(db, 'reports'), report); return; }
-  mutate((s) => { s.reports.unshift({ id: genId('rep'), ...report }); });
+  const category = REPORT_CATEGORIES.includes(opts.category) ? opts.category : 'other';
+  const report = {
+    reporterId: user.id, targetType, targetId,
+    reason: String(reason || 'Inappropriate content'),
+    category, status: 'pending', decision: null, appeal: { status: 'none' },
+    createdAt: Date.now()
+  };
+  // MESSAGE reports carry evidence: ONLY the single message the user
+  // submitted (its id, a text snapshot and its sender) — never the
+  // surrounding conversation, which stays private (see Pack B spec §6).
+  if (targetType === 'message') {
+    const msg = data().messages.find((m) => m.id === targetId);
+    report.evidence = {
+      messageId: targetId,
+      text: String(msg?.text || ''),
+      senderId: msg?.senderId || '',
+      conversationId: msg?.conversationId || ''
+    };
+  }
+  if (firebaseReady) { await addDoc(collection(db, 'reports'), report); return report; }
+  let saved = null;
+  mutate((s) => { saved = { id: genId('rep'), ...report }; s.reports.unshift(saved); });
+  return saved;
 }
 
 // -------------------------------------------------------------------------
@@ -1322,31 +1373,288 @@ export async function markNotificationRead(id) {
 // -------------------------------------------------------------------------
 // ADMIN
 // -------------------------------------------------------------------------
-export async function adminSetRole(userId, role) {
-  if (firebaseReady) { await updateDoc(doc(db, 'users', userId), { role }); return; }
-  mutate((s) => { const u = s.users.find((x) => x.id === userId); if (u) u.role = role; });
+// PLATFORM AGGREGATES (Pack B): the mirrored dataset only holds the
+// signed-in user's own messages and a subset of posts, so Overview
+// totals that must be platform-wide come from one-shot server queries
+// — getCountFromServer for posts/messages, plus a bounded posts scan
+// (newest 500) for the comments/likes sums. Staff-only: the load is
+// gated on utils.isStaff(me()) and each query settles independently,
+// so a tier that may not read a collection (e.g. an analyst scanning
+// posts) simply falls back to mirror numbers for that metric —
+// utils.platformStats flags the source per metric and the UI labels
+// fallbacks "from loaded data". Nothing is ever estimated.
+const ADMIN_STATS_POST_SCAN = 500;
+let adminStatsLoadedFor = '';
+export async function loadAdminStats() {
+  if (!firebaseReady) return null;
+  const user = me();
+  if (!user || !isStaff(user)) return null;
+  if (adminStatsLoadedFor === user.id && remote?.adminStats) return remote.adminStats;
+  adminStatsLoadedFor = user.id;
+  const settle = async (p) => { try { return await p; } catch { return null; } };
+  const [postsCount, messagesCount, postsSnap] = await Promise.all([
+    settle(getCountFromServer(collection(db, 'posts'))),
+    settle(getCountFromServer(collection(db, 'messages'))),
+    settle(getDocs(query(collection(db, 'posts'), orderBy('createdAt', 'desc'), limit(ADMIN_STATS_POST_SCAN))))
+  ]);
+  let commentsTotal = null;
+  let likesTotal = null;
+  if (postsSnap) {
+    commentsTotal = 0;
+    likesTotal = 0;
+    for (const snap of postsSnap.docs) {
+      const p = snap.data();
+      commentsTotal += countPostComments(p);
+      likesTotal += (p.likes || []).length;
+    }
+  }
+  const stats = {
+    postsTotal: postsCount ? postsCount.data().count : null,
+    messagesTotal: messagesCount ? messagesCount.data().count : null,
+    commentsTotal,
+    likesTotal,
+    scannedPosts: postsSnap ? postsSnap.size : 0,
+    loadedAt: Date.now()
+  };
+  if (!remote) return stats;
+  remote.adminStats = stats;
+  document.dispatchEvent(new CustomEvent('meetbook:data'));
+  return stats;
 }
 
-export async function adminResolveReport(reportId, action) {
+
+// AUDIT LOG (Pack A): every privileged admin mutation in this module —
+// and in later Super Admin packs — records what happened through
+// logAdminAction(). Entries land in the adminLogs collection
+// { adminId, adminName, action, targetType, targetId, targetLabel,
+// reason, createdAt }: readable by admins/superadmins only, append-only
+// (rules), deletable by superadmins. The write is best-effort in live
+// mode: a failed audit write must never mask the action's own outcome,
+// but in demo mode it is part of the same atomic mutation.
+//   target: { type: 'user'|'post'|'report'|'config'|…, id, label }
+export async function logAdminAction(action, target = {}, reason = '') {
+  const actor = me();
+  if (!actor) return null;
+  const entry = {
+    adminId: actor.id,
+    adminName: actor.name || '',
+    action: String(action || ''),
+    targetType: String(target.type || ''),
+    targetId: String(target.id || ''),
+    targetLabel: String(target.label || ''),
+    reason: String(reason || ''),
+    createdAt: Date.now()
+  };
   if (firebaseReady) {
-    if (action === 'remove-post') {
-      const rep = data().reports.find((r) => r.id === reportId);
-      if (rep?.targetType === 'post') await deleteDoc(doc(db, 'posts', rep.targetId));
-    }
-    await updateDoc(doc(db, 'reports', reportId), { status: action === 'dismiss' ? 'dismissed' : 'actioned' });
+    try {
+      const ref = await addDoc(collection(db, 'adminLogs'), entry);
+      return { id: ref.id, ...entry };
+    } catch { return null; /* audit is best-effort live; the action already happened */ }
+  }
+  let saved = null;
+  mutate((s) => {
+    if (!Array.isArray(s.adminLogs)) s.adminLogs = [];
+    saved = { id: genId('alog'), ...entry };
+    s.adminLogs.unshift(saved);
+  });
+  return saved;
+}
+
+// Shared guard for user-management actions. Throws a clear error when
+// the signed-in actor may not manage the target at all; the specific
+// gates (superadmin-only, self-protection, superadmin protection, bots
+// excluded) live in utils.canManageUser / utils.canChangeRole so the UI
+// hides exactly what the API would refuse.
+function requireUserManager(userId, { superOnly = false } = {}) {
+  const actor = me();
+  if (!actor) throw new Error('Sign in first.');
+  const target = data().users.find((u) => u.id === userId);
+  if (!target) throw new Error('User not found.');
+  const allowed = superOnly ? canChangeRole(actor, target) : canManageUser(actor, target);
+  if (!allowed) {
+    if (target.isBot) throw new Error('Bot accounts are managed in the Bot panel.');
+    if (actor.id === target.id) throw new Error('You cannot manage your own account.');
+    if (target.role === 'superadmin') throw new Error('Super admin accounts cannot be managed.');
+    if (superOnly) throw new Error('Only super admins can do that.');
+    throw new Error('Admins only.');
+  }
+  return { actor, target };
+}
+
+async function writeUserPatch(userId, patch) {
+  if (firebaseReady) { await updateDoc(doc(db, 'users', userId), patch); return; }
+  mutate((s) => { const u = s.users.find((x) => x.id === userId); if (u) Object.assign(u, patch); });
+}
+
+// Change a user's role. SUPERADMIN ONLY (the Firestore users rule pins
+// role changes to superadmins as well) — plain admins can no longer
+// grant or revoke roles. Logged as 'set-role'.
+export async function adminSetRole(userId, role, reason = '') {
+  const { target } = requireUserManager(userId, { superOnly: true });
+  if (!ASSIGNABLE_ROLES.includes(role)) throw new Error('Unknown role.');
+  await writeUserPatch(userId, { role });
+  await logAdminAction('set-role', { type: 'user', id: userId, label: `${target.name} → ${role}` }, reason);
+}
+
+// Suspend / ban / restore a user (status: 'suspended' | 'banned' |
+// 'active'). Enforcement is real: the Firestore create rules refuse new
+// content from non-active writers (writerStatusOk) and the client shows
+// a full-screen status notice instead of the app. Logged with the
+// caller-supplied action label ('suspend-user', 'ban-user', …).
+export async function adminSetUserStatus(userId, status, reason = '', action = '') {
+  const { target } = requireUserManager(userId);
+  if (!['active', 'suspended', 'banned'].includes(status)) throw new Error('Unknown account status.');
+  await writeUserPatch(userId, { status });
+  await logAdminAction(action || `set-status-${status}`, { type: 'user', id: userId, label: target.name }, reason);
+}
+
+// Toggle the verified flag (users.verified). The ✓ badge renders
+// app-wide from userNameHtml. Logged as 'verify-user'/'unverify-user'.
+export async function adminSetVerified(userId, verified, reason = '') {
+  const { target } = requireUserManager(userId);
+  await writeUserPatch(userId, { verified: Boolean(verified) });
+  await logAdminAction(verified ? 'verify-user' : 'unverify-user', { type: 'user', id: userId, label: target.name }, reason);
+}
+
+// Delete a user account (SUPERADMIN ONLY): removes the users doc and
+// the user's own posts. NOTE: on the Spark plan the Firebase Auth
+// record itself cannot be deleted from the client (that needs the
+// Admin SDK / Cloud Functions), so a deleted user could still
+// authenticate — but with no profile doc the app treats them as
+// signed-out, and their content is gone. Logged as 'delete-user'.
+export async function adminDeleteUser(userId, reason = '') {
+  const { target } = requireUserManager(userId, { superOnly: true });
+  const ownPosts = data().posts.filter((p) => p.authorId === userId);
+  if (firebaseReady) {
+    for (const p of ownPosts) { try { await deleteDoc(doc(db, 'posts', p.id)); } catch { /* best-effort cleanup */ } }
+    await deleteDoc(doc(db, 'users', userId));
+  } else {
+    mutate((s) => {
+      s.users = s.users.filter((u) => u.id !== userId);
+      s.posts = s.posts.filter((p) => p.authorId !== userId);
+    });
+  }
+  await logAdminAction('delete-user', { type: 'user', id: userId, label: target.name }, reason);
+}
+
+// -------------------------------------------------------------------------
+// CONTENT MODERATION + REPORTS CENTER (Pack B)
+// -------------------------------------------------------------------------
+// Delete a post as a moderator action (the Content module and report
+// outcomes route here): the deletion itself is the ordinary deletePost
+// path; this wrapper adds the moderator gate + the audit entry.
+export async function adminDeletePost(postId, reason = '') {
+  const actor = me();
+  if (!actor || !canModerate(actor)) throw new Error('Moderators only.');
+  const post = data().posts.find((p) => p.id === postId);
+  await deletePost(postId);
+  await logAdminAction('delete-post', { type: 'post', id: postId, label: truncate(post?.text || '', 60) }, reason);
+}
+
+// Delete a comment or reply as a moderator action: deleteComment already
+// rebuilds the post's comments array without the entry (the posts update
+// rule allows admin updates; in live mode a moderator who is neither the
+// comment author nor the post author may be refused by that rule, and
+// the error surfaces to the UI). Adds the gate + audit entry.
+export async function adminDeleteComment(postId, commentId, reason = '') {
+  const actor = me();
+  if (!actor || !canModerate(actor)) throw new Error('Moderators only.');
+  const post = data().posts.find((p) => p.id === postId);
+  let label = '';
+  for (const c of post?.comments || []) {
+    if (c.id === commentId) label = c.text || '';
+    for (const r of c.replies || []) if (r.id === commentId) label = r.text || '';
+  }
+  await deleteComment(postId, commentId);
+  await logAdminAction('delete-comment', { type: 'post', id: postId, label: truncate(label, 60) }, reason);
+}
+
+// Send a moderation warning to a user through the ordinary notifications
+// path (the same collection/prefs pipeline as likes and comments).
+async function sendModerationWarning(userId, actor, reason) {
+  const text = reason
+    ? `A moderator warned you about a community-guideline violation: ${reason}`
+    : 'A moderator warned you about a community-guideline violation. Please review the community guidelines.';
+  if (firebaseReady) {
+    await addDoc(collection(db, 'notifications'), { userId, type: 'warning', actorId: actor.id, text, postId: '', conversationId: '', read: false, createdAt: Date.now() });
     return;
   }
-  mutate((s) => {
-    const rep = s.reports.find((r) => r.id === reportId);
-    if (!rep) return;
-    if (action === 'remove-post' && rep.targetType === 'post') s.posts = s.posts.filter((p) => p.id !== rep.targetId);
-    rep.status = action === 'dismiss' ? 'dismissed' : 'actioned';
-  });
+  notify(userId, 'warning', actor.id, text);
+}
+
+// The user a report decision acts on: the reported user themselves, the
+// author of a reported post, or the sender of a reported message
+// (from the evidence snapshot — never by reading the conversation).
+function reportTargetUserId(rep) {
+  if (!rep) return '';
+  if (rep.targetType === 'user') return rep.targetId;
+  if (rep.targetType === 'post') return data().posts.find((p) => p.id === rep.targetId)?.authorId || '';
+  if (rep.targetType === 'message') return rep.evidence?.senderId || '';
+  return '';
+}
+
+async function writeReportPatch(reportId, patch) {
+  if (firebaseReady) { await updateDoc(doc(db, 'reports', reportId), patch); return; }
+  mutate((s) => { const r = s.reports.find((x) => x.id === reportId); if (r) Object.assign(r, patch); });
+}
+
+// Record a moderator decision on a report. decision ∈
+// 'review' | 'resolve' | 'reject' | 'escalate'; 'resolve' carries an
+// outcome ∈ REPORT_OUTCOMES. Side effects run BEFORE the decision is
+// saved, so a refused side effect (e.g. a moderator choosing
+// 'user-suspended' — suspension is gated by canManageUser inside
+// adminSetUserStatus) fails the whole decision instead of recording a
+// decision that never happened. Every successful decision updates the
+// report doc (status + decision record) AND writes an audit entry.
+export async function adminDecideReport(reportId, decision, { reason = '', outcome = 'none' } = {}) {
+  const actor = me();
+  if (!actor || !canModerate(actor)) throw new Error('Moderators only.');
+  const rep = data().reports.find((r) => r.id === reportId);
+  if (!rep) throw new Error('Report not found.');
+  if (!['review', 'resolve', 'reject', 'escalate'].includes(decision)) throw new Error('Unknown decision.');
+  const finalOutcome = decision === 'resolve' && ['content-removed', 'user-warned', 'user-suspended'].includes(outcome) ? outcome : 'none';
+  if (decision === 'resolve') {
+    if (finalOutcome === 'content-removed') {
+      if (rep.targetType === 'post') await deletePost(rep.targetId);
+      else if (rep.targetType === 'message') {
+        if (firebaseReady) await deleteDoc(doc(db, 'messages', rep.targetId));
+        else mutate((s) => { s.messages = s.messages.filter((m) => m.id !== rep.targetId); });
+      }
+    } else if (finalOutcome === 'user-warned') {
+      const targetId = reportTargetUserId(rep);
+      if (targetId && targetId !== actor.id) await sendModerationWarning(targetId, actor, reason);
+    } else if (finalOutcome === 'user-suspended') {
+      // Spec: suspension applies when the target is a user, and stays
+      // behind the existing user-management guards.
+      if (rep.targetType === 'user') await adminSetUserStatus(rep.targetId, 'suspended', reason, 'suspend-user');
+    }
+  }
+  const status = { review: 'review', resolve: 'resolved', reject: 'rejected', escalate: 'escalated' }[decision];
+  const record = { byId: actor.id, byName: actor.name || '', at: Date.now(), reason: String(reason || ''), outcome: finalOutcome, action: decision };
+  await writeReportPatch(reportId, { status, decision: record });
+  await logAdminAction(`report-${decision}`, { type: 'report', id: reportId, label: `${rep.targetType}: ${truncate(rep.reason || '', 60)}` }, reason);
+  return { status, decision: record };
+}
+
+// Set a report's appeal status ('requested' | 'accepted' | 'declined' |
+// 'none'). Accepting an appeal does NOT restore removed content — the
+// UI says so; restoration is a separate manual act.
+export async function adminSetReportAppeal(reportId, appealStatus, reason = '') {
+  const actor = me();
+  if (!actor || !canModerate(actor)) throw new Error('Moderators only.');
+  const rep = data().reports.find((r) => r.id === reportId);
+  if (!rep) throw new Error('Report not found.');
+  if (!['requested', 'accepted', 'declined', 'none'].includes(appealStatus)) throw new Error('Unknown appeal status.');
+  const appeal = { status: appealStatus, byId: actor.id, byName: actor.name || '', at: Date.now(), reason: String(reason || '') };
+  await writeReportPatch(reportId, { appeal });
+  await logAdminAction('report-appeal', { type: 'report', id: reportId, label: `${rep.targetType}: ${truncate(rep.reason || '', 60)}` }, reason || appealStatus);
+  return appeal;
 }
 
 export async function adminSetMaintenance(enabled) {
-  if (firebaseReady) { await setDoc(doc(db, 'config', 'app'), { maintenanceMode: enabled }, { merge: true }); return; }
-  mutate((s) => { s.config.maintenanceMode = enabled; });
+  if (firebaseReady) { await setDoc(doc(db, 'config', 'app'), { maintenanceMode: enabled }, { merge: true }); }
+  else mutate((s) => { s.config.maintenanceMode = enabled; });
+  await logAdminAction(enabled ? 'maintenance-on' : 'maintenance-off', { type: 'config', id: 'app', label: 'Maintenance mode' });
 }
 
 // -------------------------------------------------------------------------
@@ -1380,15 +1688,21 @@ async function ensureBotUserDoc(bot) {
 
 export async function saveBot(bot) {
   const b = normaliseBot(bot);
+  const existed = Boolean(b.id) && data().bots.some((x) => x.id === b.id);
   if (firebaseReady) {
     const id = b.id || genId('bot');
     const saved = { ...b, id };
-    await setDoc(doc(db, 'bots', id), { ...saved, id: undefined }, { merge: true });
+    // The document id lives in the doc path, not the payload — and
+    // Firestore rejects undefined field values, so the id key must be
+    // OMITTED from the stored data, never set to undefined.
+    const { id: _omitId, ...botPayload } = saved;
+    await setDoc(doc(db, 'bots', id), botPayload, { merge: true });
     await setDoc(doc(db, 'botBrains', id), { botId: id, systemPrompt: saved.personality.systemPrompt, provider: 'gemini-ready', model: 'template-fallback', updatedAt: Date.now() }, { merge: true });
     // Best-effort: the live runner re-ensures the user doc every cycle,
     // so a hiccup here (e.g. rules not yet republished) must not break
     // saving the bot's configuration.
     try { await ensureBotUserDoc(saved); } catch { /* healed by the runner */ }
+    await logAdminAction(existed ? 'bot-update' : 'bot-create', { type: 'bot', id, label: saved.name });
     return saved;
   }
   mutate((s) => {
@@ -1404,26 +1718,36 @@ export async function saveBot(bot) {
     if (!s.botMemories[b.id]) s.botMemories[b.id] = [];
     s.botLogs.unshift({ id: genId('log'), botId: b.id, level: 'info', message: `Bot ${b.name} saved by admin.`, createdAt: Date.now() });
   });
+  await logAdminAction(existed ? 'bot-update' : 'bot-create', { type: 'bot', id: b.id, label: b.name });
   return b;
 }
 
-export async function deleteBot(botId) {
+// Full bot teardown (Pack C): the bots doc, its brain, its memories
+// and its public users profile. Live deletes of botMemories/users ride
+// the admin branches of their rules and are best-effort individually,
+// so one missing doc cannot strand the rest. Audited as 'bot-delete'.
+export async function deleteBot(botId, reason = '') {
+  const bot = data().bots.find((b) => b.id === botId);
   if (firebaseReady) {
     await deleteDoc(doc(db, 'bots', botId));
     await deleteDoc(doc(db, 'botBrains', botId));
-    return;
+    try { await deleteDoc(doc(db, 'botMemories', botId)); } catch { /* best-effort */ }
+    try { await deleteDoc(doc(db, 'users', botId)); } catch { /* best-effort */ }
+  } else {
+    mutate((s) => {
+      s.bots = s.bots.filter((b) => b.id !== botId);
+      s.users = s.users.filter((u) => u.id !== botId);
+      delete s.botBrains[botId];
+      delete s.botMemories[botId];
+    });
   }
-  mutate((s) => {
-    s.bots = s.bots.filter((b) => b.id !== botId);
-    s.users = s.users.filter((u) => u.id !== botId);
-    delete s.botBrains[botId];
-    delete s.botMemories[botId];
-  });
+  await logAdminAction('bot-delete', { type: 'bot', id: botId, label: bot?.name || botId }, reason);
 }
 
 export async function setGlobalBotEnabled(enabled) {
-  if (firebaseReady) { await setDoc(doc(db, 'botSettings', 'global'), { enabled }, { merge: true }); return; }
-  mutate((s) => { s.botSettings.global.enabled = enabled; });
+  if (firebaseReady) { await setDoc(doc(db, 'botSettings', 'global'), { enabled }, { merge: true }); }
+  else mutate((s) => { s.botSettings.global.enabled = enabled; });
+  await logAdminAction(enabled ? 'bots-enabled' : 'bots-stopped', { type: 'config', id: 'botSettings', label: 'Global bot kill switch' });
 }
 
 export async function addBotMemory(botId, text) {
@@ -1433,9 +1757,11 @@ export async function addBotMemory(botId, text) {
     const snap = await getDoc(ref);
     const items = snap.exists() ? (snap.data().items || []) : [];
     await setDoc(ref, { botId, items: [...items, entry] });
-    return;
+  } else {
+    mutate((s) => { (s.botMemories[botId] = s.botMemories[botId] || []).push(entry); });
   }
-  mutate((s) => { (s.botMemories[botId] = s.botMemories[botId] || []).push(entry); });
+  await logAdminAction('bot-memory-add', { type: 'bot', id: botId, label: data().bots.find((b) => b.id === botId)?.name || botId });
+  return entry;
 }
 
 export async function deleteBotMemory(botId, memoryId) {
@@ -1443,9 +1769,191 @@ export async function deleteBotMemory(botId, memoryId) {
     const ref = doc(db, 'botMemories', botId);
     const snap = await getDoc(ref);
     if (snap.exists()) await setDoc(ref, { botId, items: (snap.data().items || []).filter((m) => m.id !== memoryId) });
-    return;
+  } else {
+    mutate((s) => { if (s.botMemories[botId]) s.botMemories[botId] = s.botMemories[botId].filter((m) => m.id !== memoryId); });
   }
-  mutate((s) => { if (s.botMemories[botId]) s.botMemories[botId] = s.botMemories[botId].filter((m) => m.id !== memoryId); });
+  await logAdminAction('bot-memory-delete', { type: 'bot', id: botId, label: data().bots.find((b) => b.id === botId)?.name || botId });
+}
+
+// -------------------------------------------------------------------------
+// BOT CONTROL CENTER (Pack C) — the bot details page needs the bot's
+// brain, memories, today's counters and conversation metadata. In live
+// mode none of those ride the realtime mirror (brains/memories are
+// per-bot docs; the mirror only holds the admin's own chats), so an
+// admin opening the details page loads them on demand here and mirrors
+// them into the dataset (botBrains / botMemories / botSettings.counters
+// / botConvMeta). Demo mode already holds everything — no-op there.
+// -------------------------------------------------------------------------
+let botAdminDataLoadedFor = '';
+export async function loadBotAdminData(botId) {
+  if (!firebaseReady || !botId) return;
+  const user = me();
+  if (!user || !isAdminRole(user)) return; // brains/memories are admin-only reads
+  if (botAdminDataLoadedFor === botId) return;
+  botAdminDataLoadedFor = botId;
+  const settle = async (p) => { try { return await p; } catch { return null; } };
+  const [brainSnap, memSnap, countersSnap, convSnap, msgSnap] = await Promise.all([
+    settle(getDoc(doc(db, 'botBrains', botId))),
+    settle(getDoc(doc(db, 'botMemories', botId))),
+    settle(getDoc(doc(db, 'botSettings', 'counters'))),
+    settle(getDocs(query(collection(db, 'conversations'), where('participants', 'array-contains', botId), limit(50)))),
+    settle(getDocs(query(collection(db, 'messages'), where('participants', 'array-contains', botId), orderBy('createdAt', 'asc'), limit(500))))
+  ]);
+  if (!remote) return;
+  if (brainSnap?.exists()) remote.botBrains[botId] = { botId, ...normaliseTimeFields(brainSnap.data(), ['updatedAt']) };
+  if (memSnap?.exists()) remote.botMemories[botId] = memSnap.data().items || [];
+  if (countersSnap?.exists()) remote.botSettings.counters = botCountersForDay(countersSnap.data(), counterDayKey());
+  if (convSnap) {
+    const counts = new Map();
+    const lastAt = new Map();
+    for (const md of msgSnap?.docs || []) {
+      const m = md.data();
+      counts.set(m.conversationId, (counts.get(m.conversationId) || 0) + 1);
+      lastAt.set(m.conversationId, Math.max(lastAt.get(m.conversationId) || 0, tsToMs(m.createdAt) || 0));
+    }
+    remote.botConvMeta[botId] = convSnap.docs
+      .map((cd) => ({ id: cd.id, ...cd.data() }))
+      .filter((c) => !c.isGroup && (c.participants || []).length === 2)
+      .map((c) => ({
+        id: c.id,
+        otherId: (c.participants || []).find((p) => p !== botId) || '',
+        isGroup: false,
+        count: counts.get(c.id) || 0,
+        lastAt: lastAt.get(c.id) || tsToMs(c.createdAt) || 0
+      }));
+  }
+  document.dispatchEvent(new CustomEvent('meetbook:data'));
+}
+
+// -------------------------------------------------------------------------
+// ANNOUNCEMENTS (Pack C) — platform announcements in the `announcements`
+// collection { title, body, createdBy, createdByName, createdAt,
+// active }: readable by every signed-in user (the home feed renders
+// active ones as a dismissible banner), writable by admins only
+// (rules). Plus a one-to-one admin notification that rides the normal
+// notifications collection. Every action is audited; announcement
+// creation is rate-guarded to one per minute per admin session so the
+// banner cannot be spammed by a stuck script or a double-click.
+// -------------------------------------------------------------------------
+const ANNOUNCEMENT_MIN_INTERVAL_MS = 60_000;
+let lastAnnouncementAt = 0;
+
+function requireAnnouncementAdmin() {
+  const actor = me();
+  if (!actor || !isAdminRole(actor)) throw new Error('Admins only.');
+  return actor;
+}
+
+export async function createAnnouncement({ title, body }) {
+  const actor = requireAnnouncementAdmin();
+  const cleanTitle = String(title || '').trim();
+  const cleanBody = String(body || '').trim();
+  if (!cleanTitle || !cleanBody) throw new Error('An announcement needs a title and a message.');
+  const nowMs = Date.now();
+  if (nowMs - lastAnnouncementAt < ANNOUNCEMENT_MIN_INTERVAL_MS) {
+    throw new Error('Please wait a minute between announcements.');
+  }
+  lastAnnouncementAt = nowMs;
+  const ann = { title: cleanTitle, body: cleanBody, createdBy: actor.id, createdByName: actor.name || '', createdAt: nowMs, active: true };
+  if (firebaseReady) {
+    const ref = await addDoc(collection(db, 'announcements'), ann);
+    await logAdminAction('announcement-create', { type: 'announcement', id: ref.id, label: cleanTitle });
+    return { id: ref.id, ...ann };
+  }
+  const saved = { id: genId('ann'), ...ann };
+  mutate((s) => { if (!Array.isArray(s.announcements)) s.announcements = []; s.announcements.unshift(saved); });
+  await logAdminAction('announcement-create', { type: 'announcement', id: saved.id, label: cleanTitle });
+  return saved;
+}
+
+export async function setAnnouncementActive(id, active) {
+  requireAnnouncementAdmin();
+  const ann = data().announcements.find((a) => a.id === id);
+  if (firebaseReady) await updateDoc(doc(db, 'announcements', id), { active: Boolean(active) });
+  else mutate((s) => { const a = (s.announcements || []).find((x) => x.id === id); if (a) a.active = Boolean(active); });
+  await logAdminAction(active ? 'announcement-activate' : 'announcement-deactivate', { type: 'announcement', id, label: ann?.title || id });
+}
+
+export async function deleteAnnouncement(id, reason = '') {
+  requireAnnouncementAdmin();
+  const ann = data().announcements.find((a) => a.id === id);
+  if (firebaseReady) await deleteDoc(doc(db, 'announcements', id));
+  else mutate((s) => { s.announcements = (s.announcements || []).filter((a) => a.id !== id); });
+  await logAdminAction('announcement-delete', { type: 'announcement', id, label: ann?.title || id }, reason);
+}
+
+// One-to-one admin notification: a normal notifications doc for a
+// single user (type 'admin'), so it lands in their bell like any other
+// notification. Audited — targeted messages are never sent silently.
+export async function adminNotifyUser(userId, { title = '', body = '' } = {}) {
+  const actor = requireAnnouncementAdmin();
+  const target = data().users.find((u) => u.id === userId);
+  if (!target || target.isBot) throw new Error('Pick a person to notify.');
+  const text = [String(title || '').trim(), String(body || '').trim()].filter(Boolean).join(' — ');
+  if (!text) throw new Error('Write a message first.');
+  const note = { userId, type: 'admin', actorId: actor.id, text, postId: '', conversationId: '', read: false, createdAt: Date.now() };
+  if (firebaseReady) {
+    const ref = await addDoc(collection(db, 'notifications'), note);
+    await logAdminAction('notify-user', { type: 'user', id: userId, label: target.name });
+    return { id: ref.id, ...note };
+  }
+  const saved = { id: genId('n'), ...note };
+  mutate((s) => { s.notifications.unshift(saved); });
+  await logAdminAction('notify-user', { type: 'user', id: userId, label: target.name });
+  return saved;
+}
+
+// -------------------------------------------------------------------------
+// PLATFORM SETTINGS (Pack C) — the config/app document the client
+// already mirrors: platform name, registration gate, default language,
+// alongside the existing maintenanceMode (adminSetMaintenance). Saves
+// are validated here and audited; the registration gate is ALSO
+// enforced by the Firestore users-create rule, so this page is the
+// control, not the only barrier.
+// -------------------------------------------------------------------------
+export async function adminSavePlatformSettings(patch = {}, reason = '') {
+  const actor = me();
+  if (!actor || !isAdminRole(actor)) throw new Error('Admins only.');
+  const clean = {};
+  if (patch.platformName !== undefined) {
+    const name = String(patch.platformName || '').trim().slice(0, 40);
+    if (!name) throw new Error('Platform name cannot be empty.');
+    clean.platformName = name;
+  }
+  if (patch.registrationOpen !== undefined) clean.registrationOpen = Boolean(patch.registrationOpen);
+  if (patch.defaultLanguage !== undefined) {
+    if (!['en', 'bn'].includes(patch.defaultLanguage)) throw new Error('Unknown language.');
+    clean.defaultLanguage = patch.defaultLanguage;
+  }
+  if (!Object.keys(clean).length) throw new Error('Nothing to save.');
+  if (firebaseReady) await setDoc(doc(db, 'config', 'app'), clean, { merge: true });
+  else mutate((s) => { s.config = { ...s.config, ...clean }; });
+  await logAdminAction('settings-save', { type: 'config', id: 'app', label: Object.keys(clean).join(', ') }, reason);
+  return clean;
+}
+
+// -------------------------------------------------------------------------
+// SYSTEM HEALTH (Pack C) — a one-shot Firestore connectivity probe:
+// time a single lightweight read (config/app) and mirror the outcome
+// into the dataset for the Health page. Nothing is fabricated: a
+// failed probe reports the failure, and demo mode never probes (the
+// Health page labels demo as a local store instead).
+// -------------------------------------------------------------------------
+export async function probeFirestoreHealth() {
+  if (!firebaseReady) return null;
+  const started = Date.now();
+  let probe;
+  try {
+    await getDoc(doc(db, 'config', 'app'));
+    probe = { ok: true, ms: Date.now() - started, at: Date.now(), error: '' };
+  } catch (err) {
+    probe = { ok: false, ms: Date.now() - started, at: Date.now(), error: String(err?.code || err?.message || 'read failed') };
+  }
+  if (remote) {
+    remote.healthProbe = probe;
+    document.dispatchEvent(new CustomEvent('meetbook:data'));
+  }
+  return probe;
 }
 
 // -------------------------------------------------------------------------
@@ -1519,7 +2027,7 @@ function recordBotBrain(bot, provider) {
   if (firebaseReady) {
     setDoc(doc(db, 'botBrains', bot.id), {
       botId: bot.id, systemPrompt: bot.personality.systemPrompt, provider,
-      model: provider === 'gemini' ? GEMINI_MODEL : 'template-fallback', updatedAt: Date.now()
+      model: provider === 'gemini' ? botModel(bot) : 'template-fallback', updatedAt: Date.now()
     }, { merge: true }).catch(() => { /* bookkeeping only */ });
     return;
   }
@@ -1530,7 +2038,7 @@ function recordBotBrain(bot, provider) {
       botId: bot.id,
       systemPrompt: bot.personality.systemPrompt,
       provider,
-      model: provider === 'gemini' ? GEMINI_MODEL : 'template-fallback',
+      model: provider === 'gemini' ? botModel(bot) : 'template-fallback',
       updatedAt: Date.now()
     };
   });

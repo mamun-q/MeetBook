@@ -18,6 +18,10 @@ export function normaliseBot(raw = {}) {
     username: (raw.username || '').toLowerCase(),
     avatar: raw.avatar || '',
     bio: raw.bio || '',
+    // Per-bot Gemini model override (Pack C); '' means "platform
+    // default" (gemini.js GEMINI_MODEL). Threaded into the provider
+    // call by generateGeminiText and stamped onto botBrains.
+    model: typeof raw.model === 'string' ? raw.model.trim() : '',
     isBot: true,
     active: raw.active !== false,
     personality: {

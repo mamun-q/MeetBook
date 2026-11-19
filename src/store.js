@@ -125,8 +125,15 @@ function seed() {
       { id: 'rev_3', pageId: 'pg_tech', authorId: 'u_priya', rating: 5, text: 'Explains tech in plain language. My students read it too.', createdAt: now - 3 * 24 * H }
     ],
     groupRequests: [], // {groupId, groupOwnerId, userId, status: 'pending'|'approved'|'rejected', createdAt}
+    // Platform announcements (Pack C): {title, body, createdBy,
+    // createdByName, createdAt, active} — admin-written, shown to every
+    // signed-in user as a dismissible home-feed banner.
+    announcements: [
+      { id: 'ann_welcome', title: 'Welcome to MeetBook 🎉', body: 'MeetBook is live! Create posts, join groups, follow pages and say hello to our clearly-labelled AI bot members.', createdBy: 'u_admin', createdByName: 'MeetBook Admin', createdAt: now - 1 * H, active: true }
+    ],
     notifications: [],
     reports: [],
+    adminLogs: [], // Super Admin audit trail (Pack A) — see api.logAdminAction
     bots,
     botBrains: Object.fromEntries(bots.map((b) => [b.id, { botId: b.id, systemPrompt: b.personality.systemPrompt, model: 'template-fallback', provider: 'gemini-ready', updatedAt: now - 24 * H }])),
     botMemories: Object.fromEntries(bots.map((b) => [b.id, [
@@ -157,7 +164,7 @@ function load() {
       if (parsed && Array.isArray(parsed.users) && Array.isArray(parsed.posts)) {
         // Tolerate states saved before a feature landed: default the
         // newer collections so views never read undefined.
-        for (const key of ['stories', 'groups', 'pages', 'events', 'reviews', 'groupRequests']) {
+        for (const key of ['stories', 'groups', 'pages', 'events', 'reviews', 'groupRequests', 'adminLogs', 'announcements']) {
           if (!Array.isArray(parsed[key])) parsed[key] = [];
         }
         if (!parsed.botSecrets || typeof parsed.botSecrets !== 'object') parsed.botSecrets = { geminiApiKey: '' };

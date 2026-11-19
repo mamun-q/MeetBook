@@ -4,8 +4,8 @@ import * as api from './api.js';
 import { firebaseReady, firebaseConfig } from './firebase.js';
 import { subscribe as storeSubscribe, mutate as demoMutate } from './store.js';
 import { setLocale, t } from './i18n.js';
-import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll } from './utils.js';
-import { toast, openModal, closeModal, confirmModal, avatarHtml } from './components.js';
+import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError } from './utils.js';
+import { toast, openModal, closeModal, confirmModal, adminActionModal, avatarHtml } from './components.js';
 import * as V from './views.js';
 
 // ------------------------------------------------------------- preferences
@@ -51,6 +51,50 @@ function unreadMsgCount(d, user) {
   return d.messages.filter((m) => m.senderId !== user.id && !(m.readBy || []).includes(user.id) && d.conversations.find((c) => c.id === m.conversationId)?.participants.includes(user.id)).length;
 }
 
+// ------------------------------------------------- admin routing (Pack A)
+// #/admin/* lives in the sidebar shell (views.adminShell). Visibility
+// ladder: analyst → overview only; moderator → + reports; admin and
+// superadmin → everything. Non-staff users get the long-standing
+// "Admins only." handling; staff without the tier for a module get the
+// shell's access-denied card. Pack B/C register further sub-routes here.
+function adminRoute(d, user, seg, query) {
+  if (!isStaff(user)) return `<div class="page narrow"><div class="card empty-state"><p>Admins only.</p></div></div>`;
+  const sub = seg[1] || '';
+  const shell = (active, content) => V.adminShell(d, user, active, content);
+  switch (sub) {
+    case '': return shell('overview', V.adminOverviewView(d, user, { firebase: firebaseReady, projectId: firebaseConfig.projectId }));
+    case 'analytics': return shell('analytics', V.adminAnalyticsView(d, user, { days: Number(query.get('days') || 30) }));
+    case 'users': return shell('users', isAdminRole(user) ? V.adminUsersView(d, user, {
+      q: query.get('q') || '', status: query.get('status') || 'all',
+      role: query.get('role') || 'all', kind: query.get('kind') || 'all',
+      page: Number(query.get('page') || 1)
+    }) : V.adminDeniedView());
+    case 'content': return shell('content', canModerate(user) ? V.adminContentView(d, user, {
+      tab: query.get('tab') || 'posts', q: query.get('q') || '',
+      kind: query.get('kind') || 'all', page: Number(query.get('page') || 1)
+    }) : V.adminDeniedView());
+    case 'bots': {
+      if (!isAdminRole(user)) return shell('bots', V.adminDeniedView());
+      // Bot Control Center details page (Pack C): #/admin/bots/<id>?tab=
+      if (seg[2]) {
+        void api.loadBotAdminData(seg[2]); // live: mirror brain/memories/counters/conv meta, then re-render
+        return shell('bots', V.botDetailsView(d, user, seg[2], query.get('tab') || 'overview'));
+      }
+      return shell('bots', V.botsView(d, user));
+    }
+    case 'reports': return shell('reports', canModerate(user) ? V.reportsView(d, user, { status: query.get('status') || 'all' }) : V.adminDeniedView());
+    case 'announce': return shell('announce', isAdminRole(user) ? V.adminAnnounceView(d, user) : V.adminDeniedView());
+    case 'security': return shell('security', isAdminRole(user) ? V.adminSecurityView(d, user, { q: query.get('q') || '' }) : V.adminDeniedView());
+    case 'settings': return shell('settings', isAdminRole(user) ? V.adminSettingsView(d, user) : V.adminDeniedView());
+    case 'health': {
+      if (!isAdminRole(user)) return shell('health', V.adminDeniedView());
+      void api.probeFirestoreHealth(); // one-shot read probe; result mirrors into the dataset
+      return shell('health', V.adminHealthView(d, user, { firebase: firebaseReady, projectId: firebaseConfig.projectId }));
+    }
+    default: return shell('', V.adminDeniedView());
+  }
+}
+
 // ------------------------------------------------------------- rendering
 function headerHtml(d, user) {
   const un = unreadCount(d, user);
@@ -59,7 +103,7 @@ function headerHtml(d, user) {
   // the title attribute covers every width.
   const navItem = (href, icon, label, badge = 0) => `<a class="topnav-link" href="${href}" title="${label}">${icon}${badge ? `<span class="nav-badge">${badge}</span>` : ''}<span class="nav-label">${label}</span></a>`;
   return `<header class="topbar">
-    <a class="brand" href="#/">MeetBook</a>
+    <a class="brand" href="#/">${escapeHtml(d.config?.platformName || 'MeetBook')}</a>
     <form id="search-form" class="search-box" role="search">
       <input name="q" placeholder="${t('searchPlaceholder')}" autocomplete="off" />
       <button class="btn btn-primary btn-sm" type="submit">Search</button>
@@ -73,7 +117,7 @@ function headerHtml(d, user) {
       ${navItem('#/pages', '📄', t('pages'))}
       ${navItem('#/messages', '💬', t('messages'), um)}
       ${navItem('#/notifications', '🔔', t('notifications'), un)}
-      ${user.role === 'admin' ? `${navItem('#/admin', '🛡️', 'Admin')}${navItem('#/bots', '🤖', 'AI Bots')}` : ''}
+      ${isStaff(user) ? navItem('#/admin', '🛡️', 'Admin') : ''}${isAdminRole(user) ? navItem('#/admin/bots', '🤖', 'AI Bots') : ''}
       <button class="icon-btn" data-act="toggle-theme" title="Theme">${prefs.theme === 'dark' ? '☀️' : '🌙'}</button>
       ${deferredInstallPrompt ? '<button class="btn btn-ghost btn-sm install-btn" data-act="install-app">⬇️ Install</button>' : ''}
       <div class="avatar-wrap">
@@ -112,6 +156,7 @@ function bottomNavHtml(d, user, route, seg) {
 export function render() {
   const d = api.data();
   const user = me();
+  const brand = d.config?.platformName || 'MeetBook'; // Platform settings (Pack C)
   const { seg, query } = parseRoute();
   const route = seg[0] || '';
 
@@ -133,7 +178,19 @@ export function render() {
     return;
   }
 
-  const maintenance = d.config?.maintenanceMode && user.role !== 'admin';
+  // Account-status gate (Pack A): a suspended/banned user sees only
+  // the status notice (plus the header, so they can still log out) —
+  // never the app itself. Pairs with the writerStatusOk() create-rule
+  // gate in firestore.rules.
+  if (accountStatus(user) !== 'active') {
+    appEl.innerHTML = `
+    ${headerHtml(d, user)}
+    <div class="shell">${V.accountStatusView(user)}</div>
+    <footer class="footer muted small">${escapeHtml(brand)} · Connect with people and AI friends</footer>`;
+    return;
+  }
+
+  const maintenance = d.config?.maintenanceMode && !isAdminRole(user);
   let body = '';
   switch (route) {
     case '': body = V.feedView(d, user, feedPage); break;
@@ -150,8 +207,8 @@ export function render() {
     case 'search': body = V.searchView(d, user, query.get('q') || ''); break;
     case 'saved': body = V.savedView(d, user); break;
     case 'settings': body = V.settingsView(d, user, prefs); break;
-    case 'admin': body = user.role === 'admin' ? V.adminView(d, user, { firebase: firebaseReady, projectId: firebaseConfig.projectId }) : `<div class="page narrow">${'<div class="card empty-state"><p>Admins only.</p></div>'}</div>`; break;
-    case 'bots': body = user.role === 'admin' ? V.botsView(d, user) : `<div class="page narrow"><div class="card empty-state"><p>Admins only.</p></div></div>`; break;
+    case 'admin': body = adminRoute(d, user, seg, query); break;
+    case 'bots': location.hash = '#/admin/bots'; return; // legacy link → Bot Center inside the admin shell
     case 'help': case 'terms': case 'privacy': case 'guidelines': body = V.staticView(route); break;
     case 'login': case 'register': location.hash = '#/'; return;
     default: body = V.feedView(d, user, feedPage);
@@ -162,7 +219,7 @@ export function render() {
     ${maintenance ? '<div class="maintenance-banner">🛠️ MeetBook is briefly under maintenance. You can browse, but changes may be paused.</div>' : ''}
     ${!firebaseReady ? `<div class="demo-banner">🧪 ${t('demoMode')} — sign in with a demo account or create one. <button class="link-btn" data-act="dismiss-demo">Dismiss</button></div>` : ''}
     <div class="shell">${body}</div>
-    <footer class="footer muted small">MeetBook · Connect with people and AI friends · <a href="#/help">Help</a> · <a href="#/terms">Terms</a> · <a href="#/privacy">Privacy</a> · <a href="#/guidelines">Guidelines</a></footer>
+    <footer class="footer muted small">${escapeHtml(brand)} · Connect with people and AI friends · <a href="#/help">Help</a> · <a href="#/terms">Terms</a> · <a href="#/privacy">Privacy</a> · <a href="#/guidelines">Guidelines</a></footer>
     ${bottomNavHtml(d, user, route, seg)}`;
 
   maybeBrowserNotify(d, user);
@@ -570,13 +627,20 @@ document.addEventListener('click', async (e) => {
     case 'delete-post': if (await confirmModal('Delete post?', 'This post and its comments will be removed.')) await handle(api.deletePost(postId), 'Post deleted.'); break;
     case 'admin-delete-post': if (await confirmModal('Remove this post?', 'Admin moderation: the post will be deleted for everyone.')) await handle(api.deletePost(actEl.dataset.id), 'Post removed.'); break;
     case 'report-post': {
-      const reason = prompt('Why are you reporting this post? (spam, abuse, misinformation…)');
-      if (reason) await handle(api.reportContent('post', postId, reason), 'Thanks — our moderators will review it.');
+      const modal = openModal(V.reportFormHtml('post', postId));
+      modal.querySelector('[data-close]').onclick = closeModal;
       break;
     }
     case 'report-user': {
-      const reason = prompt('Why are you reporting this user?');
-      if (reason) await handle(api.reportContent('user', actEl.dataset.id, reason), 'Thanks — our moderators will review it.');
+      const modal = openModal(V.reportFormHtml('user', actEl.dataset.id));
+      modal.querySelector('[data-close]').onclick = closeModal;
+      break;
+    }
+    case 'report-message': {
+      // Reporting a message snapshots ONLY that message as evidence
+      // (api.reportContent) — the conversation itself stays private.
+      const modal = openModal(V.reportFormHtml('message', actEl.dataset.id));
+      modal.querySelector('[data-close]').onclick = closeModal;
       break;
     }
     case 'delete-comment': {
@@ -670,8 +734,102 @@ document.addEventListener('click', async (e) => {
     }
     case 'change-password': await handle(api.resetPassword(user.email), firebaseReady ? t('resetEmailSent') : undefined); break;
     case 'delete-account': if (await confirmModal('Delete your account?', 'Your profile and posts will be removed. This cannot be undone.')) { await handle(api.deleteAccount(), 'Account deleted.'); location.hash = '#/register'; } break;
-    case 'admin-role': await handle(api.adminSetRole(actEl.dataset.id, actEl.dataset.role), 'Role updated.'); break;
-    case 'report-action': await handle(api.adminResolveReport(actEl.dataset.id, actEl.dataset.action), 'Report handled.'); break;
+    // ---- Super Admin user management (Pack A): every action goes
+    // through a confirmation dialog with an optional reason, and the
+    // api layer re-checks the role guards + writes an audit entry.
+    case 'admin-user-suspend': {
+      const target = d.users.find((u) => u.id === actEl.dataset.id);
+      const r = await adminActionModal({ title: `${t('suspend')} — ${target?.name || ''}`, body: 'They keep their account and content but cannot use MeetBook until unsuspended.', confirmLabel: t('suspend') });
+      if (r) await handle(api.adminSetUserStatus(actEl.dataset.id, 'suspended', r.reason, 'suspend-user'), 'User suspended.');
+      break;
+    }
+    case 'admin-user-unsuspend': {
+      const target = d.users.find((u) => u.id === actEl.dataset.id);
+      const r = await adminActionModal({ title: `${t('unsuspend')} — ${target?.name || ''}`, body: 'They will be able to use MeetBook again right away.', confirmLabel: t('unsuspend'), danger: false });
+      if (r) await handle(api.adminSetUserStatus(actEl.dataset.id, 'active', r.reason, 'unsuspend-user'), 'User unsuspended.');
+      break;
+    }
+    case 'admin-user-ban': {
+      const target = d.users.find((u) => u.id === actEl.dataset.id);
+      const r = await adminActionModal({ title: `${t('ban')} — ${target?.name || ''}`, body: 'Banned users cannot use MeetBook at all. Use for serious or repeated violations.', confirmLabel: t('ban') });
+      if (r) await handle(api.adminSetUserStatus(actEl.dataset.id, 'banned', r.reason, 'ban-user'), 'User banned.');
+      break;
+    }
+    case 'admin-user-restore': {
+      const target = d.users.find((u) => u.id === actEl.dataset.id);
+      const r = await adminActionModal({ title: `${t('restore')} — ${target?.name || ''}`, body: 'The ban will be lifted and the account becomes active again.', confirmLabel: t('restore'), danger: false });
+      if (r) await handle(api.adminSetUserStatus(actEl.dataset.id, 'active', r.reason, 'restore-user'), 'User restored.');
+      break;
+    }
+    case 'admin-user-verify': {
+      const target = d.users.find((u) => u.id === actEl.dataset.id);
+      const verified = actEl.dataset.verified === '1';
+      const r = await adminActionModal({ title: `${verified ? t('verify') : t('unverify')} — ${target?.name || ''}`, body: verified ? 'A ✓ verified badge will appear next to their name across MeetBook.' : 'The ✓ verified badge will be removed from their name.', confirmLabel: verified ? t('verify') : t('unverify'), danger: false });
+      if (r) await handle(api.adminSetVerified(actEl.dataset.id, verified, r.reason), verified ? 'User verified.' : 'Verification removed.');
+      break;
+    }
+    case 'admin-user-delete': {
+      const target = d.users.find((u) => u.id === actEl.dataset.id);
+      const r = await adminActionModal({ title: `${t('delete')} — ${target?.name || ''}`, body: 'PERMANENT: the profile and all of their posts will be deleted. This cannot be undone.', confirmLabel: t('delete') });
+      if (r) await handle(api.adminDeleteUser(actEl.dataset.id, r.reason), 'User deleted.');
+      break;
+    }
+    // ---- Reports Center decisions (Pack B): every decision goes
+    // through a confirmation dialog with an optional reason, and
+    // api.adminDecideReport re-checks the moderator gate, applies any
+    // outcome side effects, updates the report and writes the audit
+    // entry.
+    case 'report-review': {
+      const r = await adminActionModal({ title: t('markUnderReview'), body: 'The report stays in the queue, marked as being looked at.', confirmLabel: t('markUnderReview'), danger: false });
+      if (r) await handle(api.adminDecideReport(actEl.dataset.id, 'review', { reason: r.reason }), 'Report marked under review.');
+      break;
+    }
+    case 'report-resolve-open': {
+      const rep = d.reports.find((x) => x.id === actEl.dataset.id);
+      if (!rep) break;
+      const modal = openModal(V.reportResolveFormHtml(rep));
+      modal.querySelector('[data-close]').onclick = closeModal;
+      break;
+    }
+    case 'report-reject': {
+      const r = await adminActionModal({ title: t('rejectReport'), body: 'The report will be closed with no action taken.', confirmLabel: t('rejectReport') });
+      if (r) await handle(api.adminDecideReport(actEl.dataset.id, 'reject', { reason: r.reason }), 'Report rejected.');
+      break;
+    }
+    case 'report-escalate': {
+      const r = await adminActionModal({ title: t('escalateReport'), body: 'The report will be flagged for senior admin attention.', confirmLabel: t('escalateReport'), danger: false });
+      if (r) await handle(api.adminDecideReport(actEl.dataset.id, 'escalate', { reason: r.reason }), 'Report escalated.');
+      break;
+    }
+    case 'report-appeal': {
+      const appealStatus = actEl.dataset.appeal;
+      const r = await adminActionModal({ title: `${t('appealLabel')} — ${appealStatus}`, body: t('appealNoRestore'), confirmLabel: t('appealLabel'), danger: false });
+      if (r) await handle(api.adminSetReportAppeal(actEl.dataset.id, appealStatus, r.reason), 'Appeal updated.');
+      break;
+    }
+    // ---- Content moderation (Pack B): delete post/comment with a
+    // reason, audited via api.adminDeletePost / adminDeleteComment.
+    case 'admin-content-delete-post': {
+      const r = await adminActionModal({ title: 'Delete this post?', body: 'The post and its comments will be removed for everyone.', confirmLabel: t('delete') });
+      if (r) await handle(api.adminDeletePost(actEl.dataset.id, r.reason), 'Post deleted.');
+      break;
+    }
+    case 'admin-content-delete-comment': {
+      const r = await adminActionModal({ title: 'Delete this comment?', body: 'The comment/reply will be removed from the post.', confirmLabel: t('delete') });
+      if (r) await handle(api.adminDeleteComment(actEl.dataset.post, actEl.dataset.id, r.reason), 'Comment deleted.');
+      break;
+    }
+    case 'admin-export-analytics': {
+      const days = Number(actEl.dataset.days || 30);
+      const csv = seriesToCsv(analyticsSeries(api.data(), days));
+      const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `meetbook-analytics-${days}d.csv`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      break;
+    }
     case 'reset-demo': if (!firebaseReady && await confirmModal('Reset demo data?', 'Local demo data returns to its seeded state.')) { api.resetDemo(); toast('Demo data reset.', 'success'); render(); } else if (firebaseReady) toast('Demo reset is only available in demo mode.', 'error'); break;
     case 'bot-kill-switch': await handle(api.setGlobalBotEnabled(actEl.dataset.on === '1'), actEl.dataset.on === '1' ? 'Bots enabled.' : 'All bots stopped.'); break;
     case 'bot-run-cycle': {
@@ -684,8 +842,32 @@ document.addEventListener('click', async (e) => {
     case 'bot-new': { const modal = openModal(V.botFormHtml(null)); modal.querySelector('[data-close]').onclick = closeModal; break; }
     case 'bot-edit': { const bot = d.bots.find((b) => b.id === actEl.dataset.id); const modal = openModal(V.botFormHtml(bot)); modal.querySelector('[data-close]').onclick = closeModal; break; }
     case 'bot-toggle': { const bot = d.bots.find((b) => b.id === actEl.dataset.id); if (bot) await handle(api.saveBot({ ...bot, active: !bot.active }), bot.active ? 'Bot deactivated.' : 'Bot activated.'); break; }
-    case 'bot-delete': if (await confirmModal('Delete this bot?', 'The bot account, its brain and its memories will be removed.')) await handle(api.deleteBot(actEl.dataset.id), 'Bot deleted.'); break;
+    case 'bot-delete': {
+      // Hard confirm with a reason (Pack C) — the deletion is audited
+      // by api.deleteBot. From a details page, return to the bot list.
+      const r = await adminActionModal({ title: t('deleteBotTitle'), body: t('deleteBotBody'), confirmLabel: t('delete') });
+      if (r) {
+        await handle(api.deleteBot(actEl.dataset.id, r.reason), 'Bot deleted.');
+        if (location.hash.startsWith('#/admin/bots/')) location.hash = '#/admin/bots';
+      }
+      break;
+    }
     case 'bot-memory-delete': await handle(api.deleteBotMemory(actEl.dataset.bot, actEl.dataset.id), 'Memory removed.'); break;
+    // ---- Announcements (Pack C): feed banner dismissal is remembered
+    // per user in their settings; admin toggles/deletes are audited.
+    case 'dismiss-announcement': {
+      if (!user) break;
+      const dismissed = [...new Set([...(user.settings?.dismissedAnnouncements || []), actEl.dataset.id])];
+      await handle(api.updateSettings(user.id, { dismissedAnnouncements: dismissed }));
+      render();
+      break;
+    }
+    case 'announcement-toggle': await handle(api.setAnnouncementActive(actEl.dataset.id, actEl.dataset.on === '1'), actEl.dataset.on === '1' ? 'Announcement activated.' : 'Announcement deactivated.'); break;
+    case 'announcement-delete': {
+      const r = await adminActionModal({ title: t('delete'), body: 'This announcement will be removed for everyone.', confirmLabel: t('delete') });
+      if (r) await handle(api.deleteAnnouncement(actEl.dataset.id, r.reason), 'Announcement deleted.');
+      break;
+    }
     default: break;
   }
 });
@@ -700,6 +882,41 @@ document.addEventListener('submit', async (e) => {
   if (form.id === 'search-form' || form.id === 'search-page-form') {
     const q = String(fd.get('q') || '').trim();
     location.hash = `#/search?q=${encodeURIComponent(q)}`;
+    return;
+  }
+  if (form.id === 'admin-user-filter') {
+    const params = new URLSearchParams({
+      q: String(fd.get('q') || '').trim(), status: String(fd.get('status') || 'all'),
+      role: String(fd.get('role') || 'all'), kind: String(fd.get('kind') || 'all'), page: '1'
+    });
+    location.hash = `#/admin/users?${params.toString()}`;
+    return;
+  }
+  if (form.id === 'admin-log-filter') {
+    location.hash = `#/admin/security?q=${encodeURIComponent(String(fd.get('q') || '').trim())}`;
+    return;
+  }
+  if (form.id === 'admin-content-filter') {
+    const params = new URLSearchParams({
+      tab: 'posts', q: String(fd.get('q') || '').trim(),
+      kind: String(fd.get('kind') || 'all'), page: '1'
+    });
+    location.hash = `#/admin/content?${params.toString()}`;
+    return;
+  }
+  if (form.id === 'report-form') {
+    const reason = String(fd.get('reason') || '').trim();
+    if (!reason) { toast('Please tell us what happened.', 'error'); return; }
+    const r = await handle(api.reportContent(form.dataset.type, form.dataset.id, reason, { category: String(fd.get('category') || 'other') }), 'Thanks — our moderators will review it.');
+    if (r !== null) closeModal();
+    return;
+  }
+  if (form.id === 'report-resolve-form') {
+    const r = await handle(api.adminDecideReport(form.dataset.id, 'resolve', {
+      outcome: String(fd.get('outcome') || 'none'),
+      reason: String(fd.get('reason') || '').trim()
+    }), 'Report resolved.');
+    if (r !== null) closeModal();
     return;
   }
   if (form.id === 'login-form') {
@@ -913,11 +1130,23 @@ document.addEventListener('submit', async (e) => {
   if (form.id === 'bot-form') {
     const split = (v) => String(v || '').split(',').map((s) => s.trim()).filter(Boolean);
     const existing = api.data().bots.find((b) => b.id === form.dataset.id);
+    const botId = form.dataset.id || genId('bot');
+    // Avatar (Pack C): an uploaded file goes through the shared image
+    // pipeline (Storage when available, compressed data-URL fallback
+    // otherwise); no file keeps the avatar already on the bot.
+    let avatar = String(fd.get('avatar') || '');
+    const avatarFile = fileFrom(form, 'avatarFile');
+    if (avatarFile) {
+      avatar = await api.uploadImage(avatarFile, `bots/${botId}/${Date.now()}_${avatarFile.name}`)
+        .catch((err) => { toast(err.message, 'error'); return avatar; });
+    }
     const bot = {
       ...(existing || {}),
-      id: form.dataset.id || genId('bot'),
+      id: botId,
       name: String(fd.get('name')), username: String(fd.get('username')).toLowerCase(),
       bio: String(fd.get('bio') || ''),
+      avatar,
+      model: String(fd.get('model') || ''),
       active: existing ? existing.active : true,
       personality: {
         traits: split(fd.get('traits')), tone: String(fd.get('tone') || 'friendly'),
@@ -931,6 +1160,66 @@ document.addEventListener('submit', async (e) => {
     };
     const r = await handle(api.saveBot(bot), existing ? 'Bot updated.' : 'Bot created.');
     if (r) closeModal();
+    return;
+  }
+  // ---- Bot details tabs (Pack C): each form patches one facet of the
+  // bot through the existing saveBot path (which also refreshes the
+  // botBrains doc and writes the audit entry).
+  if (form.id === 'bot-brain-form') {
+    const existing = api.data().bots.find((b) => b.id === form.dataset.id);
+    if (!existing) { toast('Bot not found.', 'error'); return; }
+    const bot = { ...existing, personality: { ...existing.personality, systemPrompt: String(fd.get('systemPrompt') || '') } };
+    await handle(api.saveBot(bot), 'Brain saved.');
+    return;
+  }
+  if (form.id === 'bot-personality-form') {
+    const split = (v) => String(v || '').split(',').map((s) => s.trim()).filter(Boolean);
+    const existing = api.data().bots.find((b) => b.id === form.dataset.id);
+    if (!existing) { toast('Bot not found.', 'error'); return; }
+    const bot = {
+      ...existing,
+      bio: String(fd.get('bio') || ''),
+      personality: {
+        ...existing.personality,
+        traits: split(fd.get('traits')), tone: String(fd.get('tone') || 'friendly'),
+        interests: split(fd.get('interests'))
+      }
+    };
+    await handle(api.saveBot(bot), 'Personality saved.');
+    return;
+  }
+  if (form.id === 'bot-settings-form') {
+    const existing = api.data().bots.find((b) => b.id === form.dataset.id);
+    if (!existing) { toast('Bot not found.', 'error'); return; }
+    const bot = {
+      ...existing,
+      model: String(fd.get('model') || ''),
+      limits: {
+        ...existing.limits,
+        postsPerDay: Number(fd.get('postsPerDay') || 0), commentsPerDay: Number(fd.get('commentsPerDay') || 0),
+        likesPerDay: Number(fd.get('likesPerDay') || 0), messagesPerDay: Number(fd.get('messagesPerDay') || 0)
+      }
+    };
+    await handle(api.saveBot(bot), 'Bot settings saved.');
+    return;
+  }
+  // ---- Announcements + platform settings (Pack C)
+  if (form.id === 'announcement-form') {
+    const r = await handle(api.createAnnouncement({ title: String(fd.get('title') || ''), body: String(fd.get('body') || '') }), 'Announcement published.');
+    if (r) form.reset();
+    return;
+  }
+  if (form.id === 'admin-notify-form') {
+    const r = await handle(api.adminNotifyUser(String(fd.get('userId') || ''), { title: String(fd.get('title') || ''), body: String(fd.get('body') || '') }), 'Notification sent.');
+    if (r) form.reset();
+    return;
+  }
+  if (form.id === 'platform-settings-form') {
+    await handle(api.adminSavePlatformSettings({
+      platformName: String(fd.get('platformName') || ''),
+      registrationOpen: fd.get('registrationOpen') === 'on',
+      defaultLanguage: String(fd.get('defaultLanguage') || 'en')
+    }), 'Platform settings saved.');
     return;
   }
   if (form.dataset.botMemoryForm) {
@@ -962,6 +1251,16 @@ document.addEventListener('change', async (e) => {
   if (e.target.id === 'maintenance-toggle') {
     await handle(api.adminSetMaintenance(e.target.checked), e.target.checked ? 'Maintenance mode on.' : 'Maintenance mode off.');
   }
+  if (e.target.classList?.contains('admin-role-select')) {
+    // Role changes are superadmin-only (api + rules enforce it) and go
+    // through the same confirm-with-reason dialog as other user actions.
+    const userId = e.target.dataset.id;
+    const role = e.target.value;
+    const target = api.data().users.find((u) => u.id === userId);
+    const r = await adminActionModal({ title: `${t('roleLabel')} — ${target?.name || ''}`, body: `Set this user's role to "${role}"?`, confirmLabel: t('roleLabel'), danger: false });
+    if (r) await handle(api.adminSetRole(userId, role, r.reason), 'Role updated.');
+    render(); // re-sync the select with the stored role either way
+  }
   if (e.target.name === 'image' && e.target.closest('#composer-form')) {
     const file = e.target.files?.[0];
     const preview = document.getElementById('composer-preview');
@@ -985,6 +1284,12 @@ document.addEventListener('input', (e) => {
     el.style.display = !q || (el.dataset.search || '').includes(q) ? '' : 'none';
   });
 });
+
+// Client error collector (Pack C): keep the last 10 uncaught errors
+// on this device (utils.recordClientError, localStorage) so the admin
+// System Health page can show what the client actually hit. Nothing
+// is transmitted anywhere.
+window.addEventListener('error', (e) => { recordClientError(e.message || 'Unknown error'); });
 
 // ------------------------------------------------------------- PWA
 window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferredInstallPrompt = e; softRender(); });

@@ -12,11 +12,20 @@ import { normaliseBot, selectMemories } from './botLogic.js';
 export const GEMINI_MODEL = 'gemini-2.0-flash';
 export const GEMINI_TIMEOUT_MS = 15_000;
 
-// Single source of truth for who may touch botSecrets: admins only.
-// api.js gates every botSecrets read/write on this predicate, and the
-// Firestore rules enforce the same check server-side (isAdmin()).
+// The model a bot actually generates with: its own configured model
+// (Bot Control Center, stored on the bot doc) when set, else the
+// platform default above.
+export function botModel(bot) {
+  const m = typeof bot?.model === 'string' ? bot.model.trim() : '';
+  return m || GEMINI_MODEL;
+}
+
+// Single source of truth for who may touch botSecrets: admins only
+// (admin or superadmin — the Pack A role ladder). api.js gates every
+// botSecrets read/write on this predicate, and the Firestore rules
+// enforce the same check server-side (isAdmin()).
 export function canAccessBotSecrets(user) {
-  return Boolean(user && user.role === 'admin' && !user.isBot);
+  return Boolean(user && (user.role === 'admin' || user.role === 'superadmin') && !user.isBot);
 }
 
 // Prompt shape mirrors the Gemini provider in functions/botEngine.js:
@@ -52,7 +61,7 @@ export async function generateGeminiText({ apiKey, bot, memories = [], context =
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
   const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
-    const res = await doFetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(key)}`, {
+    const res = await doFetch(`https://generativelanguage.googleapis.com/v1beta/models/${botModel(bot)}:generateContent?key=${encodeURIComponent(key)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),

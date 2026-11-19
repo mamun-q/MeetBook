@@ -102,6 +102,267 @@ export function friendlyAuthError(err) {
   return msg;
 }
 
+// --- Roles & account status (Super Admin Control Center, Pack A) --------
+// users.role ∈ 'user' | 'analyst' | 'moderator' | 'admin' | 'superadmin'
+// (bot accounts carry role 'bot'). The helpers below are the single client
+// source of truth for staff gating; firestore.rules enforces the same
+// ladder server-side (isAdmin / isSuperAdmin / isModerator), so hiding a
+// button here is never the only protection. ANALYST is read-only staff:
+// isStaff() is true but every action gate below excludes analysts.
+export const STAFF_ROLES = ['analyst', 'moderator', 'admin', 'superadmin'];
+export const ASSIGNABLE_ROLES = ['user', 'analyst', 'moderator', 'admin', 'superadmin'];
+
+export function isStaff(user) {
+  return Boolean(user) && !user.isBot && STAFF_ROLES.includes(user.role);
+}
+
+// Moderation work: report review and (elsewhere) content actions.
+export function canModerate(user) {
+  return Boolean(user) && !user.isBot && ['moderator', 'admin', 'superadmin'].includes(user.role);
+}
+
+// Full operational admins (the pre-Pack-A "admin" checks map to this).
+export function isAdminRole(user) {
+  return Boolean(user) && !user.isBot && ['admin', 'superadmin'].includes(user.role);
+}
+
+export function isSuperAdmin(user) {
+  return Boolean(user) && !user.isBot && user.role === 'superadmin';
+}
+
+export function isAnalyst(user) {
+  return Boolean(user) && !user.isBot && user.role === 'analyst';
+}
+
+// users.status ∈ 'active' | 'suspended' | 'banned'; an absent/unknown
+// status means active (accounts predate the field).
+export function accountStatus(user) {
+  const s = user?.status;
+  return s === 'suspended' || s === 'banned' ? s : 'active';
+}
+
+// May `actor` run status/verify actions (suspend, ban, restore, verify)
+// on `target`? Admins and superadmins only; never on yourself, never on
+// a bot (bots live in the Bot panel), and never on a superadmin — a
+// superadmin manages admins, but no one manages another superadmin.
+export function canManageUser(actor, target) {
+  if (!isAdminRole(actor) || !target || target.isBot) return false;
+  if (actor.id === target.id) return false;
+  if (target.role === 'superadmin') return false;
+  return true;
+}
+
+// May `actor` change `target`'s role (or delete the account)? Superadmin
+// only, never your own role, never a bot's, and one superadmin cannot
+// demote another superadmin.
+export function canChangeRole(actor, target) {
+  if (!isSuperAdmin(actor) || !target || target.isBot) return false;
+  if (actor.id === target.id) return false;
+  if (target.role === 'superadmin') return false;
+  return true;
+}
+
+// --- Reports, platform stats & analytics (Super Admin Pack B) -----------
+// Report lifecycle (Pack B): 'pending' → 'review' → 'resolved' /
+// 'rejected', with 'escalated' for cases kicked upstairs. Reports filed
+// before Pack B carry the legacy vocabulary ('open' / 'actioned' /
+// 'dismissed') — reportStatus() normalises those onto the new statuses
+// so counts, filters and badges agree everywhere without a migration.
+export const REPORT_STATUSES = ['pending', 'review', 'resolved', 'rejected', 'escalated'];
+export const REPORT_CATEGORIES = ['fake', 'harassment', 'spam', 'inappropriate', 'impersonation', 'bot', 'other'];
+export const REPORT_OUTCOMES = ['none', 'content-removed', 'user-warned', 'user-suspended'];
+
+export function reportStatus(report) {
+  const s = String(report?.status || '');
+  if (s === 'open') return 'pending';
+  if (s === 'actioned') return 'resolved';
+  if (s === 'dismissed') return 'rejected';
+  return REPORT_STATUSES.includes(s) ? s : 'pending';
+}
+
+export function reportCategory(report) {
+  const c = String(report?.category || '');
+  return REPORT_CATEGORIES.includes(c) ? c : 'other';
+}
+
+// Statuses that still need a moderator's attention (nav badge count).
+export function reportNeedsAttention(report) {
+  return ['pending', 'review', 'escalated'].includes(reportStatus(report));
+}
+
+// "Online now" — the same freshness rule as the right rail
+// (views.isFreshOnline): the online flag must be set AND the lastSeen
+// heartbeat younger than 10 minutes; docs without lastSeen fall back to
+// the flag alone.
+export const ONLINE_FRESH_MS = 10 * 60_000;
+export function isOnlineNow(user, now = Date.now()) {
+  if (!user?.online) return false;
+  const seen = Number(user.lastSeen) || 0;
+  if (!seen) return true;
+  return now - seen < ONLINE_FRESH_MS;
+}
+
+// Comments on a post = top-level comments + their replies.
+export function countPostComments(post) {
+  return (post?.comments || []).reduce((n, c) => n + 1 + (c.replies || []).length, 0);
+}
+
+// Every Overview number, computed from the dataset the admin client
+// actually holds. `aggregates` (api.loadAdminStats, live mode only) may
+// carry server-side totals for posts/messages and scan-derived
+// comments/likes sums; any metric it does not cover falls back to the
+// mirrored dataset and is flagged in `sources` ('server' | 'loaded') so
+// the UI can label it honestly instead of inventing precision.
+export function platformStats(d, now = Date.now(), aggregates = null) {
+  const DAY = 24 * 3600_000;
+  const humans = (d.users || []).filter((u) => !u.isBot);
+  const within = (ts, ms) => { const t = Number(ts) || 0; return t > 0 && now - t < ms; };
+  const mirrorComments = (d.posts || []).reduce((n, p) => n + countPostComments(p), 0);
+  const mirrorLikes = (d.posts || []).reduce((n, p) => n + (p.likes || []).length, 0);
+  const serverNum = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const aggPosts = serverNum(aggregates?.postsTotal);
+  const aggMessages = serverNum(aggregates?.messagesTotal);
+  const aggComments = serverNum(aggregates?.commentsTotal);
+  const aggLikes = serverNum(aggregates?.likesTotal);
+  const bots = d.bots || [];
+  return {
+    totalUsers: humans.length,
+    newToday: humans.filter((u) => within(u.createdAt, DAY)).length,
+    new7d: humans.filter((u) => within(u.createdAt, 7 * DAY)).length,
+    new30d: humans.filter((u) => within(u.createdAt, 30 * DAY)).length,
+    onlineNow: humans.filter((u) => isOnlineNow(u, now)).length,
+    activeUsers7d: humans.filter((u) => within(u.lastSeen, 7 * DAY)).length,
+    totalPosts: aggPosts ?? (d.posts || []).length,
+    totalComments: aggComments ?? mirrorComments,
+    totalLikes: aggLikes ?? mirrorLikes,
+    totalMessages: aggMessages ?? (d.messages || []).length,
+    totalBots: bots.length,
+    activeBots: bots.filter((b) => b.active !== false).length,
+    disabledBots: bots.filter((b) => b.active === false).length,
+    pendingReports: (d.reports || []).filter((r) => reportStatus(r) === 'pending').length,
+    sources: {
+      posts: aggPosts !== null ? 'server' : 'loaded',
+      comments: aggComments !== null ? 'server' : 'loaded',
+      likes: aggLikes !== null ? 'server' : 'loaded',
+      messages: aggMessages !== null ? 'server' : 'loaded'
+    }
+  };
+}
+
+// Local-calendar day helpers for the analytics series.
+export function dayStartMs(ts) {
+  const dt = new Date(ts);
+  dt.setHours(0, 0, 0, 0);
+  return dt.getTime();
+}
+export function dayKeyOf(ts) {
+  const dt = new Date(ts);
+  const m = String(dt.getMonth() + 1).padStart(2, '0');
+  const day = String(dt.getDate()).padStart(2, '0');
+  return `${dt.getFullYear()}-${m}-${day}`;
+}
+
+// Per-day analytics series for the last `days` days (oldest → newest),
+// aggregates only — no private user data. Engagement for a day is the
+// likes + comments ON POSTS CREATED THAT DAY (labelled as such in the
+// UI). Reports are grouped by the day they were FILED and their CURRENT
+// status. Bot authorship is read from the author's users doc (isBot).
+export function analyticsSeries(d, days = 30, now = Date.now()) {
+  const span = Math.max(1, Math.min(365, Number(days) || 30));
+  const todayStart = dayStartMs(now);
+  const rows = [];
+  const byDay = new Map();
+  for (let i = span - 1; i >= 0; i--) {
+    const start = todayStart - i * 24 * 3600_000;
+    const row = {
+      day: dayKeyOf(start), start,
+      registrations: 0, totalUsers: 0, posts: 0, engagement: 0,
+      botPosts: 0, humanPosts: 0,
+      reportsPending: 0, reportsReview: 0, reportsResolved: 0, reportsRejected: 0, reportsEscalated: 0, reportsTotal: 0
+    };
+    rows.push(row);
+    byDay.set(row.day, row);
+  }
+  const usersByIdMap = new Map((d.users || []).map((u) => [u.id, u]));
+  const humans = (d.users || []).filter((u) => !u.isBot);
+  for (const u of humans) {
+    const row = byDay.get(dayKeyOf(u.createdAt || 0));
+    if (row) row.registrations += 1;
+  }
+  // Cumulative growth: everyone registered before the series window
+  // counts toward the first day; each later day adds its registrations.
+  let cumulative = humans.filter((u) => dayStartMs(u.createdAt || 0) < rows[0].start).length;
+  for (const row of rows) { cumulative += row.registrations; row.totalUsers = cumulative; }
+  for (const p of d.posts || []) {
+    const row = byDay.get(dayKeyOf(p.createdAt || 0));
+    if (!row) continue;
+    row.posts += 1;
+    row.engagement += (p.likes || []).length + countPostComments(p);
+    if (usersByIdMap.get(p.authorId)?.isBot) row.botPosts += 1; else row.humanPosts += 1;
+  }
+  const statusField = { pending: 'reportsPending', review: 'reportsReview', resolved: 'reportsResolved', rejected: 'reportsRejected', escalated: 'reportsEscalated' };
+  for (const r of d.reports || []) {
+    const row = byDay.get(dayKeyOf(r.createdAt || 0));
+    if (!row) continue;
+    row.reportsTotal += 1;
+    row[statusField[reportStatus(r)]] += 1;
+  }
+  return rows;
+}
+
+export function seriesToCsv(rows) {
+  const header = ['day', 'registrations', 'totalUsers', 'posts', 'engagement', 'botPosts', 'humanPosts', 'reportsTotal', 'reportsPending', 'reportsReview', 'reportsResolved', 'reportsRejected', 'reportsEscalated'];
+  const lines = [header.join(',')];
+  for (const r of rows || []) lines.push(header.map((k) => String(r[k] ?? '')).join(','));
+  return lines.join('\n');
+}
+
+// --- Possible-spam heuristics (Content module) ---------------------------
+// Client-side HEURISTICS over the posts the admin client has loaded —
+// suggestions for human review, never verdicts. A post is flagged when
+// any rule fires:
+//  - 'repeat': its author posted near-identical text 3+ times;
+//  - 'links': the text contains 3+ links;
+//  - 'burst': the author posted 5+ posts inside any 10-minute window.
+// Returns [{ post, flags: [...] }] newest first.
+export function spamSuspects(posts) {
+  const norm = (text) => String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const linkCount = (text) => (String(text || '').match(/https?:\/\/|www\./gi) || []).length;
+  const flagged = new Map();
+  const add = (post, flag) => {
+    if (!flagged.has(post.id)) flagged.set(post.id, { post, flags: [] });
+    const entry = flagged.get(post.id);
+    if (!entry.flags.includes(flag)) entry.flags.push(flag);
+  };
+  const list = [...(posts || [])];
+  // Repeat-text groups per author.
+  const groups = new Map();
+  for (const p of list) {
+    const key = `${p.authorId}::${norm(p.text)}`;
+    if (!norm(p.text)) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  }
+  for (const group of groups.values()) {
+    if (group.length >= 3) for (const p of group) add(p, 'repeat');
+  }
+  for (const p of list) if (linkCount(p.text) >= 3) add(p, 'links');
+  // Burst windows per author.
+  const byAuthor = new Map();
+  for (const p of list) {
+    if (!byAuthor.has(p.authorId)) byAuthor.set(p.authorId, []);
+    byAuthor.get(p.authorId).push(p);
+  }
+  for (const mine of byAuthor.values()) {
+    const sorted = [...mine].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+    for (let i = 0; i < sorted.length; i++) {
+      const window = sorted.filter((p) => (p.createdAt || 0) - (sorted[i].createdAt || 0) < 10 * 60_000 && (p.createdAt || 0) >= (sorted[i].createdAt || 0));
+      if (window.length >= 5) for (const p of window) add(p, 'burst');
+    }
+  }
+  return [...flagged.values()].sort((a, b) => (b.post.createdAt || 0) - (a.post.createdAt || 0));
+}
+
 // --- Pluralisation ----------------------------------------------------------
 // "1 Member" vs "3 Members": plural(3, 'Member', 'Members').
 export function plural(count, singular, pluralForm) {
@@ -572,4 +833,61 @@ export function averageRating(reviews) {
   if (!list.length) return { average: 0, count: 0 };
   const sum = list.reduce((acc, r) => acc + Number(r.rating), 0);
   return { average: Math.round((sum / list.length) * 10) / 10, count: list.length };
+}
+
+// --- Bot conversation summaries (Pack C, Bot Control Center) ---------------
+// Metadata ONLY for the bot details Conversations tab: which 1-1
+// conversations a bot takes part in, how many messages each holds and
+// when the last one landed — never message bodies. Live mode cannot
+// derive this from the mirrored dataset (it only holds the signed-in
+// admin's own chats), so api.loadBotAdminData precomputes it into
+// d.botConvMeta[botId]; when that is present it wins, otherwise the
+// summaries are computed from the synced conversations/messages
+// (demo mode holds everything).
+export function botConversationSummaries(d, botId) {
+  const pre = d?.botConvMeta?.[botId];
+  if (Array.isArray(pre)) {
+    return pre
+      .map((c) => ({ id: c.id, otherId: c.otherId || '', isGroup: Boolean(c.isGroup), count: Number(c.count) || 0, lastAt: Number(c.lastAt) || 0 }))
+      .sort((a, b) => b.lastAt - a.lastAt);
+  }
+  const out = [];
+  for (const conv of d?.conversations || []) {
+    if (conv.isGroup) continue;
+    const parts = conv.participants || [];
+    if (parts.length !== 2 || !parts.includes(botId)) continue;
+    const msgs = (d.messages || []).filter((m) => m.conversationId === conv.id);
+    out.push({
+      id: conv.id,
+      otherId: parts.find((p) => p !== botId) || '',
+      isGroup: false,
+      count: msgs.length,
+      lastAt: msgs.reduce((mx, m) => Math.max(mx, Number(m.createdAt) || 0), Number(conv.createdAt) || 0)
+    });
+  }
+  return out.sort((a, b) => b.lastAt - a.lastAt);
+}
+
+// --- Client error collector (Pack C, System Health) --------------------------
+// A tiny ring of the most recent uncaught errors ON THIS DEVICE, kept in
+// localStorage so the admin Health page can show what the client has
+// actually hit. main.js feeds it from window 'error' events; nothing is
+// ever sent anywhere — it is a local diagnostic, labelled as such.
+const CLIENT_ERRORS_KEY = 'meetbook_client_errors';
+const CLIENT_ERRORS_MAX = 10;
+
+export function recordClientError(message, at = Date.now()) {
+  try {
+    const list = recentClientErrors();
+    list.unshift({ message: String(message || 'Unknown error').slice(0, 300), at: Number(at) || Date.now() });
+    localStorage.setItem(CLIENT_ERRORS_KEY, JSON.stringify(list.slice(0, CLIENT_ERRORS_MAX)));
+  } catch { /* storage unavailable — diagnostics are best-effort */ }
+}
+
+export function recentClientErrors() {
+  try {
+    const raw = localStorage.getItem(CLIENT_ERRORS_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list.filter((e) => e && typeof e.message === 'string') : [];
+  } catch { return []; }
 }
