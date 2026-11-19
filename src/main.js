@@ -26,6 +26,14 @@ let feedPage = 1;
 let deferredInstallPrompt = null;
 const appEl = document.getElementById('app');
 
+// Live-mode auth restoration: until Firebase reports the initial auth
+// state (and, when a session exists, until the mirrored profile doc has
+// loaded), render() shows the boot splash instead of flashing the login
+// form at a user who is actually signed in.
+let authResolved = false;
+let authSessionSeen = false;
+const BOOT_SPLASH_HTML = `<div class="boot-splash"><div class="boot-logo">MeetBook</div><div class="boot-sub">Connect with people and AI friends</div><div class="boot-spinner" aria-hidden="true"></div></div>`;
+
 function parseRoute() {
   const hash = location.hash.replace(/^#\/?/, '');
   const [pathPart, queryPart] = hash.split('?');
@@ -47,6 +55,9 @@ function unreadMsgCount(d, user) {
 function headerHtml(d, user) {
   const un = unreadCount(d, user);
   const um = unreadMsgCount(d, user);
+  // Wide screens (≥1020px, CSS) show a small text label beside each icon;
+  // the title attribute covers every width.
+  const navItem = (href, icon, label, badge = 0) => `<a class="topnav-link" href="${href}" title="${label}">${icon}${badge ? `<span class="nav-badge">${badge}</span>` : ''}<span class="nav-label">${label}</span></a>`;
   return `<header class="topbar">
     <a class="brand" href="#/">MeetBook</a>
     <form id="search-form" class="search-box" role="search">
@@ -55,18 +66,27 @@ function headerHtml(d, user) {
     </form>
     <a class="icon-btn mobile-search" href="#/search" title="Search" aria-label="Search">🔎</a>
     <nav class="topnav">
-      <a href="#/" title="${t('home')}">🏠</a>
-      <a href="#/friends" title="${t('friends')}">👥</a>
-      <a href="#/events" title="${t('events')}">📅</a>
-      <a href="#/groups" title="${t('groups')}">🏘️</a>
-      <a href="#/pages" title="${t('pages')}">📄</a>
-      <a href="#/messages" title="${t('messages')}">💬${um ? `<span class="nav-badge">${um}</span>` : ''}</a>
-      <a href="#/notifications" title="${t('notifications')}">🔔${un ? `<span class="nav-badge">${un}</span>` : ''}</a>
-      ${user.role === 'admin' ? '<a href="#/admin" title="Admin">🛡️</a><a href="#/bots" title="AI Bots">🤖</a>' : ''}
+      ${navItem('#/', '🏠', t('home'))}
+      ${navItem('#/friends', '👥', t('friends'))}
+      ${navItem('#/events', '📅', t('events'))}
+      ${navItem('#/groups', '🏘️', t('groups'))}
+      ${navItem('#/pages', '📄', t('pages'))}
+      ${navItem('#/messages', '💬', t('messages'), um)}
+      ${navItem('#/notifications', '🔔', t('notifications'), un)}
+      ${user.role === 'admin' ? `${navItem('#/admin', '🛡️', 'Admin')}${navItem('#/bots', '🤖', 'AI Bots')}` : ''}
       <button class="icon-btn" data-act="toggle-theme" title="Theme">${prefs.theme === 'dark' ? '☀️' : '🌙'}</button>
       ${deferredInstallPrompt ? '<button class="btn btn-ghost btn-sm install-btn" data-act="install-app">⬇️ Install</button>' : ''}
-      <a href="#/profile/${user.id}" class="row gap-sm topnav-avatar">${avatarHtml(user, 34)}</a>
-      <button class="btn btn-ghost btn-sm logout-btn" data-act="logout">${t('logout')}</button>
+      <div class="avatar-wrap">
+        <button class="avatar-btn topnav-avatar" data-act="avatar-menu" title="${t('accountMenu')}" aria-label="${t('accountMenu')}">${avatarHtml(user, 34)}</button>
+        <div class="menu avatar-menu hidden" id="avatar-menu">
+          <div class="menu-user">${avatarHtml(user, 36)}<span class="grow"><b>${escapeHtml(user.name)}</b><br/><span class="muted small">@${escapeHtml(user.username)}</span></span></div>
+          <a href="#/profile/${user.id}">👤 ${t('myProfile')}</a>
+          <a href="#/saved">🔖 ${t('savedPosts')}</a>
+          <a href="#/settings">⚙️ ${t('settings')}</a>
+          <a href="#/help">❓ ${t('help')}</a>
+          <button data-act="logout">🚪 ${t('logout')}</button>
+        </div>
+      </div>
     </nav>
   </header>`;
 }
@@ -94,6 +114,14 @@ export function render() {
   const user = me();
   const { seg, query } = parseRoute();
   const route = seg[0] || '';
+
+  // Boot gate (live mode only — demo auth is synchronous): splash while
+  // the auth state restores, and while a restored session's profile is
+  // still loading into the mirror.
+  if (firebaseReady && (!authResolved || (authSessionSeen && !user))) {
+    appEl.innerHTML = BOOT_SPLASH_HTML;
+    return;
+  }
 
   if (!user) {
     const mode = route === 'register' ? 'register' : 'login';
@@ -134,7 +162,7 @@ export function render() {
     ${maintenance ? '<div class="maintenance-banner">🛠️ MeetBook is briefly under maintenance. You can browse, but changes may be paused.</div>' : ''}
     ${!firebaseReady ? `<div class="demo-banner">🧪 ${t('demoMode')} — sign in with a demo account or create one. <button class="link-btn" data-act="dismiss-demo">Dismiss</button></div>` : ''}
     <div class="shell">${body}</div>
-    <footer class="footer muted small">MeetBook · People + clearly-labelled AI bots · <a href="#/help">Help</a> · <a href="#/terms">Terms</a> · <a href="#/privacy">Privacy</a> · <a href="#/guidelines">Guidelines</a></footer>
+    <footer class="footer muted small">MeetBook · Connect with people and AI friends · <a href="#/help">Help</a> · <a href="#/terms">Terms</a> · <a href="#/privacy">Privacy</a> · <a href="#/guidelines">Guidelines</a></footer>
     ${bottomNavHtml(d, user, route, seg)}`;
 
   maybeBrowserNotify(d, user);
@@ -276,6 +304,22 @@ async function sendVoiceRecording() {
 // their first unviewed story (or their first story when all are viewed).
 let storySession = null; // { queue: [story], idx }
 
+// Each story shows for 5s: the active progress segment fills over the
+// same duration (CSS animation) and a timer advances the viewer.
+const STORY_DURATION_MS = 5000;
+let storyTimer = null;
+function clearStoryTimer() { if (storyTimer) { clearTimeout(storyTimer); storyTimer = null; } }
+function armStoryTimer() {
+  clearStoryTimer();
+  if (!storySession) return;
+  storyTimer = setTimeout(() => {
+    storyTimer = null;
+    // Never yank the story away mid-reply — re-check shortly instead.
+    if (document.activeElement?.id === 'story-reply-input') { armStoryTimer(); return; }
+    storyNav(1);
+  }, STORY_DURATION_MS);
+}
+
 function storyRootEl() {
   let root = document.getElementById('story-root');
   if (!root) {
@@ -299,6 +343,7 @@ function openStoryViewer(authorId) {
 }
 
 function closeStoryViewer() {
+  clearStoryTimer();
   storySession = null;
   storyRootEl().innerHTML = '';
 }
@@ -330,7 +375,7 @@ function renderStoryViewer() {
   storyRootEl().innerHTML = `
   <div class="story-viewer" role="dialog" aria-modal="true" aria-label="${t('stories')}">
     <div class="story-top">
-      <div class="story-segments">${authorStories.map((q) => `<span class="story-seg ${authorStories.indexOf(q) <= posInAuthor ? 'done' : ''}"></span>`).join('')}</div>
+      <div class="story-segments">${authorStories.map((q, qi) => `<span class="story-seg ${qi < posInAuthor ? 'done' : qi === posInAuthor ? 'active' : ''}"><span class="story-seg-fill"></span></span>`).join('')}</div>
       <div class="story-author">
         ${avatarHtml(author, 34)}
         <span class="grow"><b>${escapeHtml(author?.name || '')}</b> <span class="story-time">${timeAgo(s.createdAt)}</span></span>
@@ -343,8 +388,13 @@ function renderStoryViewer() {
       <button class="story-zone left" data-act="story-prev" aria-label="Previous">‹</button>
       <button class="story-zone right" data-act="story-next" aria-label="Next">›</button>
     </div>
-    ${isMine ? `<div class="story-footer">👁 ${viewers.length} ${t('viewers')}${viewers.length ? ` · ${t('seenBy')}: ${viewers.map((v) => escapeHtml(v.name)).join(', ')}` : ` · ${t('noViewersYet')}`}</div>` : ''}
+    ${isMine ? `<div class="story-footer">👁 ${viewers.length} ${t('viewers')}${viewers.length ? ` · ${t('seenBy')}: ${viewers.map((v) => escapeHtml(v.name)).join(', ')}` : ` · ${t('noViewersYet')}`}</div>` : `
+    <form id="story-reply-form" class="story-reply" data-author="${s.authorId}">
+      <input id="story-reply-input" name="text" maxlength="500" placeholder="${t('storyReplyPlaceholder')}" autocomplete="off" />
+      <button class="btn btn-primary btn-sm" type="submit">${t('send')}</button>
+    </form>`}
   </div>`;
+  armStoryTimer();
   // Viewing someone else's story records the view (rules allow exactly
   // this views-only append); fire-and-forget so playback never blocks.
   if (!isMine) api.markStoryViewed(s.id).catch(() => {});
@@ -352,13 +402,20 @@ function renderStoryViewer() {
 
 document.addEventListener('keydown', (e) => {
   if (!storySession) return;
-  if (e.key === 'Escape') closeStoryViewer();
+  if (e.key === 'Escape') { closeStoryViewer(); return; }
+  // Arrow keys belong to the reply input while the user is typing.
+  if (['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
   if (e.key === 'ArrowRight') storyNav(1);
   if (e.key === 'ArrowLeft') storyNav(-1);
 });
 
 function softRender() {
   if (voiceRec) return; // never re-render mid-recording — it would wipe the recording UI
+  // Signed-out → signed-in transitions must ALWAYS render, even while
+  // focus sits in the login form's inputs: otherwise a successful login
+  // (whose mirror update arrives after the submit handler) leaves the
+  // user staring at the login form until a manual reload.
+  if (!me()) { render(); return; }
   const tag = document.activeElement?.tagName;
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)) return; // don't yank focus while typing
   render();
@@ -413,6 +470,22 @@ document.addEventListener('click', async (e) => {
     return;
   }
 
+  // Account dropdown: closes on any click outside its wrapper, and when
+  // one of its links is followed (the toggle button itself is inside the
+  // wrapper, so it never triggers this close).
+  const avatarMenuEl = document.getElementById('avatar-menu');
+  if (avatarMenuEl && (!e.target.closest('.avatar-wrap') || e.target.closest('.avatar-menu a'))) {
+    avatarMenuEl.classList.add('hidden');
+  }
+
+  // Messenger emoji picker: insert into the message input, keep focus.
+  const emojiBtn = e.target.closest('[data-emoji-insert]');
+  if (emojiBtn) {
+    const input = document.querySelector('#message-form input[name="text"]');
+    if (input) { input.value += emojiBtn.dataset.emojiInsert; input.focus(); }
+    return;
+  }
+
   const actEl = e.target.closest('[data-act]');
   if (!actEl) return;
   const act = actEl.dataset.act;
@@ -423,6 +496,53 @@ document.addEventListener('click', async (e) => {
 
   switch (act) {
     case 'dismiss-demo': actEl.parentElement.remove(); break;
+    case 'avatar-menu': document.getElementById('avatar-menu')?.classList.toggle('hidden'); break;
+    case 'toggle-pw': {
+      const wrap = actEl.closest('.pw-wrap');
+      const input = wrap?.querySelector('input');
+      if (input) {
+        const show = input.type === 'password';
+        input.type = show ? 'text' : 'password';
+        actEl.textContent = show ? '🙈' : '👁️';
+        actEl.setAttribute('aria-label', show ? t('hidePassword') : t('showPassword'));
+        actEl.title = show ? t('hidePassword') : t('showPassword');
+      }
+      break;
+    }
+    case 'pick-photo': actEl.closest('form')?.querySelector('input[type="file"][name="image"]')?.click(); break;
+    case 'remove-composer-photo': {
+      const form = actEl.closest('form');
+      const input = form?.querySelector('input[name="image"]');
+      if (input) input.value = '';
+      const preview = document.getElementById('composer-preview');
+      if (preview) preview.innerHTML = '';
+      break;
+    }
+    case 'poll-add-option': {
+      const list = document.getElementById('poll-options-list');
+      if (!list) break;
+      const rows = list.querySelectorAll('.poll-opt-row');
+      if (rows.length >= 4) { toast('A poll can have up to 4 options.', 'error'); break; }
+      const row = document.createElement('div');
+      row.className = 'row gap-sm poll-opt-row';
+      row.innerHTML = `<input name="pollOption" maxlength="60" placeholder="${t('pollOption')} ${rows.length + 1}" autocomplete="off" /><button type="button" class="btn btn-ghost btn-sm" data-act="poll-remove-option" aria-label="Remove option">✕</button>`;
+      list.appendChild(row);
+      row.querySelector('input')?.focus();
+      break;
+    }
+    case 'poll-remove-option': actEl.closest('.poll-opt-row')?.remove(); break;
+    case 'poll-remove': {
+      const form = actEl.closest('form');
+      const checkbox = form?.querySelector('[name="hasPoll"]');
+      if (checkbox) checkbox.checked = false;
+      document.getElementById('poll-fields')?.classList.add('hidden');
+      const list = document.getElementById('poll-options-list');
+      if (list) list.innerHTML = [1, 2].map((i) => `<div class="row gap-sm poll-opt-row"><input name="pollOption" maxlength="60" placeholder="${t('pollOption')} ${i}" autocomplete="off" /></div>`).join('');
+      const ta = form?.querySelector('textarea[name="text"]');
+      if (ta) ta.placeholder = t('whatsOnYourMind');
+      break;
+    }
+    case 'emoji-toggle': document.getElementById('emoji-panel')?.classList.toggle('hidden'); break;
     case 'toggle-theme': prefs.theme = prefs.theme === 'dark' ? 'light' : 'dark'; savePrefs(); applyPrefs(); render(); break;
     case 'install-app': if (deferredInstallPrompt) { deferredInstallPrompt.prompt(); deferredInstallPrompt = null; } break;
     case 'logout': await handle(api.logout(), 'Logged out.'); location.hash = '#/login'; break;
@@ -487,6 +607,7 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'send-request': await handle(api.sendFriendRequest(actEl.dataset.id), 'Friend request sent.'); break;
+    case 'cancel-request': await handle(api.cancelFriendRequest(actEl.dataset.id), t('requestCancelled')); break;
     case 'accept-request': await handle(api.respondFriendRequest(actEl.dataset.id, true), 'You are now friends!'); break;
     case 'reject-request': await handle(api.respondFriendRequest(actEl.dataset.id, false), 'Request removed.'); break;
     case 'remove-friend': if (await confirmModal('Remove connection?', 'This friendship/request will be removed.')) await handle(api.removeFriendship(actEl.dataset.id), 'Removed.'); break;
@@ -494,7 +615,12 @@ document.addEventListener('click', async (e) => {
     case 'toggle-close-friend': { const nowClose = await handle(api.toggleCloseFriend(actEl.dataset.id)); if (nowClose !== null) toast(nowClose ? 'Added to your close friends.' : 'Removed from close friends.', 'success'); break; }
     case 'create-event': { const modal = openModal(V.eventFormHtml()); modal.querySelector('[data-close]').onclick = closeModal; break; }
     case 'delete-event': if (await confirmModal('Delete event?', 'The event and its RSVPs will be removed.')) { await handle(api.deleteEvent(actEl.dataset.id), 'Event deleted.'); location.hash = '#/events'; } break;
-    case 'rsvp': await handle(api.toggleEventRsvp(actEl.dataset.id, actEl.dataset.kind)); break;
+    case 'rsvp': {
+      const kind = actEl.dataset.kind;
+      const res = await handle(api.toggleEventRsvp(actEl.dataset.id, kind));
+      if (res) toast(!res.active ? t('rsvpRemoved') : kind === 'going' ? t('rsvpGoing') : t('rsvpInterested'), 'success');
+      break;
+    }
     case 'delete-review': if (await confirmModal('Delete your review?', 'Your rating and review text will be removed.')) await handle(api.deleteReview(actEl.dataset.id), 'Review deleted.'); break;
     case 'create-group': { const modal = openModal(V.groupFormHtml(null)); modal.querySelector('[data-close]').onclick = closeModal; break; }
     case 'edit-group': { const g = (d.groups || []).find((x) => x.id === actEl.dataset.id); const modal = openModal(V.groupFormHtml(g)); modal.querySelector('[data-close]').onclick = closeModal; break; }
@@ -542,7 +668,7 @@ document.addEventListener('click', async (e) => {
       modal.querySelector('[data-close]').onclick = closeModal;
       break;
     }
-    case 'change-password': await handle(api.resetPassword(user.email), 'Password reset email sent (live mode). In demo mode use your demo password.'); break;
+    case 'change-password': await handle(api.resetPassword(user.email), firebaseReady ? t('resetEmailSent') : undefined); break;
     case 'delete-account': if (await confirmModal('Delete your account?', 'Your profile and posts will be removed. This cannot be undone.')) { await handle(api.deleteAccount(), 'Account deleted.'); location.hash = '#/register'; } break;
     case 'admin-role': await handle(api.adminSetRole(actEl.dataset.id, actEl.dataset.role), 'Role updated.'); break;
     case 'report-action': await handle(api.adminResolveReport(actEl.dataset.id, actEl.dataset.action), 'Report handled.'); break;
@@ -577,12 +703,32 @@ document.addEventListener('submit', async (e) => {
   }
   if (form.id === 'login-form') {
     const r = await handle(api.login(String(fd.get('email')), String(fd.get('password'))), 'Welcome back!');
-    if (r) location.hash = '#/';
+    if (r) { location.hash = '#/'; render(); }
     return;
   }
   if (form.id === 'register-form') {
-    const r = await handle(api.register({ name: String(fd.get('name')), username: String(fd.get('username')), email: String(fd.get('email')), password: String(fd.get('password')) }), 'Account created — welcome to MeetBook!');
-    if (r) location.hash = '#/';
+    const password = String(fd.get('password'));
+    if (password !== String(fd.get('confirmPassword'))) { toast(t('passwordsDontMatch'), 'error'); return; }
+    const r = await handle(api.register({
+      name: String(fd.get('name')), username: String(fd.get('username')),
+      email: String(fd.get('email')), password,
+      dob: String(fd.get('dob') || ''), gender: String(fd.get('gender') || '')
+    }), 'Account created — welcome to MeetBook!');
+    if (r) { location.hash = '#/'; render(); }
+    return;
+  }
+  if (form.id === 'story-reply-form') {
+    // A story reply becomes a normal 1-1 message with the author,
+    // prefixed so the context survives outside the 24h story window.
+    const text = String(fd.get('text') || '').trim();
+    const authorId = form.dataset.author;
+    if (text && authorId) {
+      const conv = await handle(api.openConversation(authorId));
+      if (conv) {
+        const sent = await handle(api.sendMessage(conv.id, { text: `Replied to your story: ${text}` }));
+        if (sent) { toast(t('storyReplySent'), 'success'); form.reset(); }
+      }
+    }
     return;
   }
   if (form.id === 'composer-form') {
@@ -725,7 +871,8 @@ document.addEventListener('submit', async (e) => {
       nickname: String(fd.get('nickname') || '').trim(),
       work: String(fd.get('work') || '').trim(), education: String(fd.get('education') || '').trim(),
       currentCity: String(fd.get('currentCity') || '').trim(), hometown: String(fd.get('hometown') || '').trim(),
-      relationship: String(fd.get('relationship') || ''), website: String(fd.get('website') || '').trim()
+      relationship: String(fd.get('relationship') || ''), website: String(fd.get('website') || '').trim(),
+      dob: String(fd.get('dob') || ''), gender: String(fd.get('gender') || '')
     };
     const avatarFile = fileFrom(form, 'avatar');
     const coverFile = fileFrom(form, 'cover');
@@ -796,6 +943,9 @@ document.addEventListener('submit', async (e) => {
 document.addEventListener('change', async (e) => {
   if (e.target.name === 'hasPoll' && e.target.closest('#composer-form')) {
     document.getElementById('poll-fields')?.classList.toggle('hidden', !e.target.checked);
+    // In poll mode the composer asks the question the poll answers.
+    const ta = e.target.closest('#composer-form').querySelector('textarea[name="text"]');
+    if (ta) ta.placeholder = e.target.checked ? t('askQuestion') : t('whatsOnYourMind');
   }
   if (e.target.id === 'locale-select') {
     prefs.locale = e.target.value; savePrefs(); applyPrefs(); render();
@@ -808,7 +958,7 @@ document.addEventListener('change', async (e) => {
     const preview = document.getElementById('composer-preview');
     if (file && preview) {
       const url = URL.createObjectURL(file);
-      preview.innerHTML = `<img class="post-image" src="${url}" alt="Selected photo preview" />`;
+      preview.innerHTML = `<div class="composer-preview-wrap"><img class="post-image" src="${url}" alt="Selected photo preview" /><button type="button" class="preview-remove" data-act="remove-composer-photo" aria-label="Remove photo" title="Remove photo">✕</button></div>`;
     }
   }
 });
@@ -835,9 +985,11 @@ if ('serviceWorker' in navigator) {
   });
 }
 
-// Presence heartbeat (demo + live profile flag).
+// Presence heartbeat (demo + live profile flag + lastSeen stamp).
 setInterval(() => { const u = me(); if (u) api.setOnline(u.id, true); }, 60_000);
+// Best-effort sign-off so the Online rail does not keep ghosts around.
+window.addEventListener('beforeunload', () => { const u = me(); if (u) api.setOnline(u.id, false); });
 
 // ------------------------------------------------------------- boot
-api.onAuthReady(() => render());
+api.onAuthReady((u) => { authResolved = true; authSessionSeen = !!u; render(); });
 render();

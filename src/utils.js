@@ -37,7 +37,10 @@ export function escapeHtml(value) {
 }
 
 export function timeAgo(ts, now = Date.now()) {
-  const diff = Math.max(0, now - Number(ts || 0));
+  // Defensive: accept epoch ms, Dates and Firestore Timestamp shapes —
+  // a raw Timestamp reaching here used to render as a 1970s date.
+  const ms = tsToMs(ts);
+  const diff = Math.max(0, now - ms);
   const sec = Math.floor(diff / 1000);
   if (sec < 45) return 'just now';
   const min = Math.floor(sec / 60);
@@ -48,7 +51,86 @@ export function timeAgo(ts, now = Date.now()) {
   if (day < 7) return `${day}d`;
   const week = Math.floor(day / 7);
   if (week < 5) return `${week}w`;
-  return new Date(Number(ts)).toLocaleDateString();
+  return new Date(ms).toLocaleDateString();
+}
+
+// Return a copy of a Firestore document's data with the named time fields
+// converted from Timestamp shapes to epoch milliseconds (tsToMs). The
+// remote mappers in api.js run every mirrored document through this so
+// the rest of the app only ever sees numbers — a pending serverTimestamp()
+// (null) is left untouched and converts to 0 via tsToMs at read time.
+export function normaliseTimeFields(obj, fields) {
+  if (!obj || typeof obj !== 'object') return obj;
+  const out = { ...obj };
+  for (const f of fields || []) {
+    if (out[f] !== undefined && out[f] !== null) out[f] = tsToMs(out[f]);
+  }
+  return out;
+}
+
+// --- Auth errors ----------------------------------------------------------
+// Firebase Auth errors carry machine codes ("auth/invalid-credential")
+// and raw messages like "Firebase: Error (auth/weak-password)." — neither
+// belongs in front of a user. Map the common codes to friendly text; any
+// other Firebase-flavoured message collapses to a generic line, while
+// our own plain-English errors pass through unchanged.
+const AUTH_ERROR_MESSAGES = {
+  'auth/invalid-credential': 'Wrong email or password.',
+  'auth/invalid-login-credentials': 'Wrong email or password.',
+  'auth/user-not-found': 'Wrong email or password.',
+  'auth/wrong-password': 'Wrong email or password.',
+  'auth/email-already-in-use': 'An account with that email already exists.',
+  'auth/weak-password': 'Password is too weak — use at least 6 characters.',
+  'auth/too-many-requests': 'Too many attempts — please wait a few minutes and try again.',
+  'auth/network-request-failed': 'Network problem — check your connection and try again.',
+  'auth/invalid-email': 'That email address looks invalid.',
+  'auth/popup-closed-by-user': 'The sign-in popup was closed before finishing.',
+  'auth/cancelled-popup-request': 'The sign-in popup was closed before finishing.',
+  'auth/user-disabled': 'This account has been disabled.',
+  'auth/operation-not-allowed': 'That sign-in method is not enabled for this app.'
+};
+
+export function friendlyAuthError(err) {
+  if (!err) return 'Something went wrong. Please try again.';
+  const fromMessage = typeof err.message === 'string'
+    ? err.message.match(/\((auth\/[a-z0-9-]+)\)/i)?.[1]
+    : null;
+  const code = err.code || fromMessage || '';
+  if (AUTH_ERROR_MESSAGES[code]) return AUTH_ERROR_MESSAGES[code];
+  const msg = String(err.message || err);
+  if (/^Firebase:/i.test(msg) || /\(auth\//i.test(msg)) return 'Something went wrong. Please try again.';
+  return msg;
+}
+
+// --- Pluralisation ----------------------------------------------------------
+// "1 Member" vs "3 Members": plural(3, 'Member', 'Members').
+export function plural(count, singular, pluralForm) {
+  const n = Number(count) || 0;
+  return `${n} ${n === 1 ? singular : (pluralForm ?? singular)}`;
+}
+
+// --- Mutual friends -----------------------------------------------------------
+// Accepted-friend id set for a user, computed from a friendships array
+// (works on the mirrored dataset in either mode).
+export function acceptedFriendIds(friendships, uidValue) {
+  const ids = new Set();
+  for (const f of friendships || []) {
+    if (f.status !== 'accepted') continue;
+    if (f.from === uidValue) ids.add(f.to);
+    if (f.to === uidValue) ids.add(f.from);
+  }
+  return ids;
+}
+
+// Ids that are accepted friends of BOTH users.
+export function mutualFriends(friendships, aId, bId) {
+  if (!aId || !bId || aId === bId) return [];
+  const aFriends = acceptedFriendIds(friendships, aId);
+  return [...acceptedFriendIds(friendships, bId)].filter((id) => aFriends.has(id));
+}
+
+export function mutualFriendCount(friendships, aId, bId) {
+  return mutualFriends(friendships, aId, bId).length;
 }
 
 export function initials(name) {

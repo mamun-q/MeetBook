@@ -5,7 +5,7 @@
 import { uid } from './utils.js';
 import { normaliseBot, DEFAULT_BOT_LIMITS } from './botLogic.js';
 
-const KEY = 'meetbook_demo_v5';
+const KEY = 'meetbook_demo_v6';
 const listeners = new Set();
 
 export function subscribe(fn) {
@@ -29,10 +29,10 @@ const yearAgo = yearAgoDate.getTime();
 
 function seed() {
   const users = [
-    { id: 'u_admin', name: 'MeetBook Admin', username: 'admin.team', email: 'admin@meetbook.app', password: 'admin123', bio: 'Platform administrator.', avatar: '', cover: '', work: 'MeetBook', education: '', currentCity: '', hometown: '', relationship: '', website: '', nickname: '', role: 'admin', isBot: false, online: true, createdAt: now - 90 * 24 * H, followers: [], following: [], closeFriends: [], settings: {} },
-    { id: 'u_ayesha', name: 'Ayesha Rahman', username: 'ayesha.r', email: 'ayesha@example.com', password: 'demo123', bio: 'Photographer 📷 | Dhaka | Chasing light and stories.', avatar: '', cover: '', work: 'Freelance Photographer', education: 'University of Dhaka', currentCity: 'Dhaka', hometown: 'Chattogram', relationship: 'Single', website: '', nickname: 'Ash', role: 'user', isBot: false, online: true, createdAt: now - 60 * 24 * H, followers: [], following: [], closeFriends: ['u_tanvir'], settings: {} },
-    { id: 'u_tanvir', name: 'Tanvir Hasan', username: 'tanvir.h', email: 'tanvir@example.com', password: 'demo123', bio: 'Software engineer. Coffee first, code second.', avatar: '', cover: '', work: 'Software Engineer', education: 'BUET', currentCity: 'Dhaka', hometown: 'Khulna', relationship: 'In a relationship', website: '', nickname: '', role: 'user', isBot: false, online: false, createdAt: now - 45 * 24 * H, followers: [], following: [], closeFriends: [], settings: {} },
-    { id: 'u_priya', name: 'Priya Das', username: 'priya.d', email: 'priya@example.com', password: 'demo123', bio: 'Book lover and amateur chef. Here for good conversations.', avatar: '', cover: '', work: 'School Teacher', education: 'Eden Mohila College', currentCity: 'Dhaka', hometown: 'Dhaka', relationship: 'Married', website: '', nickname: '', role: 'user', isBot: false, online: true, createdAt: now - 30 * 24 * H, followers: [], following: [], closeFriends: [], settings: {} }
+    { id: 'u_admin', name: 'MeetBook Admin', username: 'admin.team', email: 'admin@meetbook.app', password: 'admin123', bio: 'Platform administrator.', avatar: '', cover: '', work: 'MeetBook', education: '', currentCity: '', hometown: '', relationship: '', website: '', nickname: '', dob: '', gender: '', role: 'admin', isBot: false, online: true, lastSeen: now, createdAt: now - 90 * 24 * H, followers: [], following: [], closeFriends: [], settings: {} },
+    { id: 'u_ayesha', name: 'Ayesha Rahman', username: 'ayesha.r', email: 'ayesha@example.com', password: 'demo123', bio: 'Photographer 📷 | Dhaka | Chasing light and stories.', avatar: '', cover: '', work: 'Freelance Photographer', education: 'University of Dhaka', currentCity: 'Dhaka', hometown: 'Chattogram', relationship: 'Single', website: '', nickname: 'Ash', dob: '1998-03-12', gender: 'Female', role: 'user', isBot: false, online: true, lastSeen: now, createdAt: now - 60 * 24 * H, followers: [], following: [], closeFriends: ['u_tanvir'], settings: {} },
+    { id: 'u_tanvir', name: 'Tanvir Hasan', username: 'tanvir.h', email: 'tanvir@example.com', password: 'demo123', bio: 'Software engineer. Coffee first, code second.', avatar: '', cover: '', work: 'Software Engineer', education: 'BUET', currentCity: 'Dhaka', hometown: 'Khulna', relationship: 'In a relationship', website: '', nickname: '', dob: '1996-07-02', gender: 'Male', role: 'user', isBot: false, online: false, lastSeen: now - 26 * H, createdAt: now - 45 * 24 * H, followers: [], following: [], closeFriends: [], settings: {} },
+    { id: 'u_priya', name: 'Priya Das', username: 'priya.d', email: 'priya@example.com', password: 'demo123', bio: 'Book lover and amateur chef. Here for good conversations.', avatar: '', cover: '', work: 'School Teacher', education: 'Eden Mohila College', currentCity: 'Dhaka', hometown: 'Dhaka', relationship: 'Married', website: '', nickname: '', dob: '', gender: 'Female', role: 'user', isBot: false, online: true, lastSeen: now, createdAt: now - 30 * 24 * H, followers: [], following: [], closeFriends: [], settings: {} }
   ];
 
   const botDefs = [
@@ -42,7 +42,7 @@ function seed() {
   ];
   const bots = botDefs.map((b, i) => normaliseBot({ ...b, active: true, limits: { ...DEFAULT_BOT_LIMITS }, createdAt: now - (20 - i) * 24 * H }));
   for (const b of bots) {
-    users.push({ id: b.id, name: b.name, username: b.username, email: '', password: '', bio: b.bio, avatar: '', cover: '', work: '', education: '', currentCity: '', hometown: '', relationship: '', website: '', nickname: '', role: 'bot', isBot: true, botId: b.id, online: true, createdAt: b.createdAt, followers: [], following: [], closeFriends: [], settings: {} });
+    users.push({ id: b.id, name: b.name, username: b.username, email: '', password: '', bio: b.bio, avatar: '', cover: '', work: '', education: '', currentCity: '', hometown: '', relationship: '', website: '', nickname: '', dob: '', gender: '', role: 'bot', isBot: true, botId: b.id, online: true, lastSeen: now, createdAt: b.createdAt, followers: [], following: [], closeFriends: [], settings: {} });
   }
 
   const posts = [

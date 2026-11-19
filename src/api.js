@@ -7,7 +7,7 @@ import {
   getState, mutate, findUser, userByUsername, friendIdsOf, blockedIdsOf, notify, resetDemo
 } from './store.js';
 import { firebaseReady, auth, db, storage, googleProvider } from './firebase.js';
-import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs } from './utils.js';
+import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError } from './utils.js';
 import { generateTemplatePost, generateTemplateComment, decideBotAction, memoryFromConversation, normaliseBot } from './botLogic.js';
 
 // --- Firebase imports are dynamic-free static imports of the SDK ---------
@@ -64,7 +64,7 @@ function blankRemote() {
 // -------------------------------------------------------------------------
 // AUTH
 // -------------------------------------------------------------------------
-export async function register({ name, username, email, password }) {
+export async function register({ name, username, email, password, dob = '', gender = '' }) {
   const v = validateUsername(username);
   if (!v.ok) throw new Error(v.error);
   if (firebaseReady) {
@@ -73,11 +73,17 @@ export async function register({ name, username, email, password }) {
     // unauthenticated query fails with "Missing or insufficient
     // permissions"). If anything after account creation fails, delete the
     // just-created Auth user so the email is not stranded.
-    const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
+    let cred;
+    try {
+      cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
+    } catch (err) {
+      throw new Error(friendlyAuthError(err));
+    }
     const profile = {
       name: name.trim(), username: v.value, email: email.trim(), bio: '', avatar: '', cover: '',
       work: '', education: '', currentCity: '', hometown: '', relationship: '', website: '', nickname: '',
-      role: 'user', isBot: false, online: true, createdAt: Date.now(), followers: [], following: [], closeFriends: [], settings: {}
+      dob: dob || '', gender: gender || '',
+      role: 'user', isBot: false, online: true, lastSeen: Date.now(), createdAt: Date.now(), followers: [], following: [], closeFriends: [], settings: {}
     };
     try {
       const taken = await getDocs(query(collection(db, 'users'), where('username', '==', v.value)));
@@ -96,7 +102,8 @@ export async function register({ name, username, email, password }) {
     created = {
       id: genId('u'), name: name.trim(), username: v.value, email: email.trim().toLowerCase(), password,
       bio: '', avatar: '', cover: '', work: '', education: '', currentCity: '', hometown: '',
-      relationship: '', website: '', nickname: '', role: 'user', isBot: false, online: true,
+      relationship: '', website: '', nickname: '', dob: dob || '', gender: gender || '',
+      role: 'user', isBot: false, online: true, lastSeen: Date.now(),
       createdAt: Date.now(), followers: [], following: [], closeFriends: [], settings: {}
     };
     s.users.push(created);
@@ -107,8 +114,16 @@ export async function register({ name, username, email, password }) {
 
 export async function login(email, password) {
   if (firebaseReady) {
-    const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
+    let cred;
+    try {
+      cred = await signInWithEmailAndPassword(auth, email.trim(), password);
+    } catch (err) {
+      throw new Error(friendlyAuthError(err));
+    }
     remoteUid = cred.user.uid;
+    // Presence: stamp online + lastSeen (the online rail freshness check
+    // keys off lastSeen). Best-effort — never block the sign-in on it.
+    updateDoc(doc(db, 'users', cred.user.uid), { online: true, lastSeen: Date.now() }).catch(() => {});
     return cred.user;
   }
   let user = null;
@@ -116,6 +131,7 @@ export async function login(email, password) {
     user = s.users.find((u) => u.email === email.trim().toLowerCase() && u.password === password && !u.isBot);
     if (!user) throw new Error('Invalid email or password. Demo accounts: admin@meetbook.app / admin123, ayesha@example.com / demo123');
     user.online = true;
+    user.lastSeen = Date.now();
     s.sessionUid = user.id;
   });
   return user;
@@ -123,7 +139,12 @@ export async function login(email, password) {
 
 export async function loginWithGoogle() {
   if (!firebaseReady) throw new Error('Google sign-in needs Firebase configuration. In demo mode, register or use a demo account.');
-  const cred = await signInWithPopup(auth, googleProvider);
+  let cred;
+  try {
+    cred = await signInWithPopup(auth, googleProvider);
+  } catch (err) {
+    throw new Error(friendlyAuthError(err));
+  }
   remoteUid = cred.user.uid;
   const ref = doc(db, 'users', cred.user.uid);
   const snap = await getDoc(ref);
@@ -132,15 +153,24 @@ export async function loginWithGoogle() {
     await setDoc(ref, {
       name: cred.user.displayName || 'MeetBook User', username: base.slice(0, 24), email: cred.user.email || '',
       bio: '', avatar: cred.user.photoURL || '', cover: '', work: '', education: '', currentCity: '',
-      hometown: '', relationship: '', website: '', nickname: '', role: 'user', isBot: false, online: true,
-      createdAt: Date.now(), followers: [], following: [], closeFriends: [], settings: {}
+      hometown: '', relationship: '', website: '', nickname: '', dob: '', gender: '', role: 'user', isBot: false, online: true,
+      lastSeen: Date.now(), createdAt: Date.now(), followers: [], following: [], closeFriends: [], settings: {}
     });
+  } else {
+    updateDoc(ref, { online: true, lastSeen: Date.now() }).catch(() => {});
   }
   return cred.user;
 }
 
 export async function resetPassword(email) {
-  if (firebaseReady) { await sendPasswordResetEmail(auth, email.trim()); return; }
+  if (firebaseReady) {
+    try {
+      await sendPasswordResetEmail(auth, email.trim());
+    } catch (err) {
+      throw new Error(friendlyAuthError(err));
+    }
+    return;
+  }
   const exists = getState().users.some((u) => u.email === email.trim().toLowerCase());
   if (!exists) throw new Error('No demo account uses that email.');
   // Demo mode cannot send real email; we surface a clear, honest message.
@@ -148,10 +178,16 @@ export async function resetPassword(email) {
 }
 
 export async function logout() {
-  if (firebaseReady) { await signOut(auth); remoteUid = ''; return; }
+  if (firebaseReady) {
+    // Best-effort presence stamp before the session ends.
+    if (remoteUid) {
+      try { await updateDoc(doc(db, 'users', remoteUid), { online: false, lastSeen: Date.now() }); } catch { /* best-effort */ }
+    }
+    await signOut(auth); remoteUid = ''; return;
+  }
   mutate((s) => {
     const u = s.users.find((x) => x.id === s.sessionUid);
-    if (u) u.online = false;
+    if (u) { u.online = false; u.lastSeen = Date.now(); }
     s.sessionUid = '';
   });
 }
@@ -214,9 +250,24 @@ function startRemoteSync() {
   syncStarted = true;
   remote = blankRemote();
   const patch = (fn) => { fn(remote); document.dispatchEvent(new CustomEvent('meetbook:data')); };
-  onSnapshot(query(collection(db, 'users'), limit(300)), (snap) => patch((r) => { r.users = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
+  // TIME NORMALISATION: every mirrored document passes its epoch-ms
+  // fields through normaliseTimeFields — Firestore serverTimestamp()
+  // values arrive as Timestamp objects, and any view that feeds one to
+  // timeAgo() directly renders a 1970s date. (Stories/events mappers
+  // below predate the helper and call tsToMs inline — same effect.)
+  const mapUser = (d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt', 'lastSeen']) });
+  onSnapshot(query(collection(db, 'users'), limit(300)), (snap) => patch((r) => { r.users = snap.docs.map(mapUser); }));
   // Posts: three provable listeners merged by id (see header note).
-  const mapPost = (d) => ({ id: d.id, comments: [], likes: [], reactions: {}, savedBy: [], groupId: '', pageId: '', audienceIds: [], ...d.data() });
+  // Comment/reply timestamps are normalised too — they are written as
+  // client-side ms today, but a Timestamp shape must never leak through.
+  const mapPost = (d) => {
+    const raw = normaliseTimeFields(d.data(), ['createdAt', 'editedAt']);
+    const comments = (raw.comments || []).map((c) => ({
+      ...normaliseTimeFields(c, ['createdAt']),
+      replies: (c.replies || []).map((rep) => normaliseTimeFields(rep, ['createdAt']))
+    }));
+    return { id: d.id, comments: [], likes: [], reactions: {}, savedBy: [], groupId: '', pageId: '', audienceIds: [], ...raw, comments };
+  };
   let ownPosts = [];
   let publicPosts = [];
   let audiencePosts = [];
@@ -267,9 +318,9 @@ function startRemoteSync() {
   // Reviews: the read rule is signedIn-only (field-independent), so a
   // plain listener is provable — same as users/pages.
   onSnapshot(query(collection(db, 'reviews'), orderBy('createdAt', 'desc'), limit(500)),
-    (snap) => patch((r) => { r.reviews = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }),
+    (snap) => patch((r) => { r.reviews = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }),
     () => { /* listener rejected — leave the mirrored set untouched */ });
-  onSnapshot(query(collection(db, 'pages'), limit(200)), (snap) => patch((r) => { r.pages = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
+  onSnapshot(query(collection(db, 'pages'), limit(200)), (snap) => patch((r) => { r.pages = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
   // Groups use two provably-readable queries merged by id (public groups +
   // groups I belong to): a single unfiltered listener would be rejected by
   // the rules because private groups I cannot see exist in the collection.
@@ -280,7 +331,8 @@ function startRemoteSync() {
     for (const g of [...publicGroups, ...memberGroups]) byIdMap.set(g.id, g);
     r.groups = [...byIdMap.values()];
   });
-  onSnapshot(query(collection(db, 'groups'), where('privacy', '==', 'public'), limit(200)), (snap) => { publicGroups = snap.docs.map((d) => ({ id: d.id, ...d.data() })); mergeGroups(); });
+  const mapGroup = (d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) });
+  onSnapshot(query(collection(db, 'groups'), where('privacy', '==', 'public'), limit(200)), (snap) => { publicGroups = snap.docs.map(mapGroup); mergeGroups(); });
   // Friendships: two provable listeners merged by id (from == me, to == me).
   let friendshipsFrom = [];
   let friendshipsTo = [];
@@ -289,12 +341,13 @@ function startRemoteSync() {
     for (const f of [...friendshipsFrom, ...friendshipsTo]) byIdMap.set(f.id, f);
     r.friendships = [...byIdMap.values()];
   });
-  onSnapshot(query(collection(db, 'bots'), limit(100)), (snap) => patch((r) => { r.bots = snap.docs.map((d) => normaliseBot({ id: d.id, ...d.data() })); }));
+  const mapFriendship = (d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) });
+  onSnapshot(query(collection(db, 'bots'), limit(100)), (snap) => patch((r) => { r.bots = snap.docs.map((d) => normaliseBot({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
   onSnapshot(query(collection(db, 'botActivities'), orderBy('createdAt', 'desc'), limit(100)),
-    (snap) => patch((r) => { r.botActivities = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }),
+    (snap) => patch((r) => { r.botActivities = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }),
     () => { /* non-admins cannot read bot activities — ignore */ });
   onSnapshot(query(collection(db, 'botLogs'), orderBy('createdAt', 'desc'), limit(100)),
-    (snap) => patch((r) => { r.botLogs = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }),
+    (snap) => patch((r) => { r.botLogs = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }),
     () => { /* non-admins cannot read bot logs — ignore */ });
   onSnapshot(doc(db, 'botSettings', 'global'), (snap) => patch((r) => { if (snap.exists()) r.botSettings.global = snap.data(); }));
   onSnapshot(doc(db, 'config', 'app'), (snap) => patch((r) => { if (snap.exists()) r.config = { ...r.config, ...snap.data() }; }));
@@ -327,31 +380,32 @@ function startRemoteSync() {
       for (const g of [...myGroupRequests, ...ownedGroupRequests]) byIdMap.set(g.id, g);
       r.groupRequests = [...byIdMap.values()];
     });
+    const mapGroupRequest = (d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) });
     onSnapshot(query(collection(db, 'groupRequests'), where('userId', '==', remoteUid)),
-      (snap) => { myGroupRequests = snap.docs.map((d) => ({ id: d.id, ...d.data() })); mergeGroupRequests(); },
+      (snap) => { myGroupRequests = snap.docs.map(mapGroupRequest); mergeGroupRequests(); },
       () => { /* listener rejected — leave the mirrored set untouched */ });
     onSnapshot(query(collection(db, 'groupRequests'), where('groupOwnerId', '==', remoteUid)),
-      (snap) => { ownedGroupRequests = snap.docs.map((d) => ({ id: d.id, ...d.data() })); mergeGroupRequests(); },
+      (snap) => { ownedGroupRequests = snap.docs.map(mapGroupRequest); mergeGroupRequests(); },
       () => { /* listener rejected — leave the mirrored set untouched */ });
     onSnapshot(query(collection(db, 'friendships'), where('from', '==', remoteUid)),
-      (snap) => { friendshipsFrom = snap.docs.map((d) => ({ id: d.id, ...d.data() })); mergeFriendships(); },
+      (snap) => { friendshipsFrom = snap.docs.map(mapFriendship); mergeFriendships(); },
       () => { /* listener rejected — leave the mirrored set untouched */ });
     onSnapshot(query(collection(db, 'friendships'), where('to', '==', remoteUid)),
-      (snap) => { friendshipsTo = snap.docs.map((d) => ({ id: d.id, ...d.data() })); mergeFriendships(); },
+      (snap) => { friendshipsTo = snap.docs.map(mapFriendship); mergeFriendships(); },
       () => { /* listener rejected — leave the mirrored set untouched */ });
     onSnapshot(query(collection(db, 'notifications'), where('userId', '==', remoteUid), orderBy('createdAt', 'desc'), limit(100)),
-      (snap) => patch((r) => { r.notifications = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
+      (snap) => patch((r) => { r.notifications = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
     onSnapshot(query(collection(db, 'conversations'), where('participants', 'array-contains', remoteUid)),
-      (snap) => patch((r) => { r.conversations = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
+      (snap) => patch((r) => { r.conversations = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
     onSnapshot(query(collection(db, 'messages'), where('participants', 'array-contains', remoteUid), orderBy('createdAt', 'asc'), limit(500)),
-      (snap) => patch((r) => { r.messages = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }),
+      (snap) => patch((r) => { r.messages = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }),
       () => { /* listener rejected — leave the mirrored set untouched */ });
     onSnapshot(query(collection(db, 'blocks'), where('by', '==', remoteUid)),
-      (snap) => patch((r) => { r.blocks = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
+      (snap) => patch((r) => { r.blocks = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
     onSnapshot(query(collection(db, 'groups'), where('members', 'array-contains', remoteUid), limit(200)),
-      (snap) => { memberGroups = snap.docs.map((d) => ({ id: d.id, ...d.data() })); mergeGroups(); });
+      (snap) => { memberGroups = snap.docs.map(mapGroup); mergeGroups(); });
     onSnapshot(query(collection(db, 'reports'), orderBy('createdAt', 'desc'), limit(100)),
-      (snap) => patch((r) => { r.reports = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }), () => { /* non-admins cannot read reports — ignore */ });
+      (snap) => patch((r) => { r.reports = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }), () => { /* non-admins cannot read reports — ignore */ });
   }
 }
 
@@ -429,8 +483,11 @@ export async function uploadImage(file, path) {
 }
 
 export function setOnline(userId, online) {
-  if (firebaseReady) { updateDoc(doc(db, 'users', userId), { online }).catch(() => {}); return; }
-  mutate((s) => { const u = s.users.find((x) => x.id === userId); if (u) u.online = online; });
+  // Every presence write also stamps lastSeen: the online rail treats a
+  // user as online only when the flag is set AND lastSeen is fresh
+  // (older docs without lastSeen fall back to the flag alone).
+  if (firebaseReady) { updateDoc(doc(db, 'users', userId), { online, lastSeen: Date.now() }).catch(() => {}); return; }
+  mutate((s) => { const u = s.users.find((x) => x.id === userId); if (u) { u.online = online; u.lastSeen = Date.now(); } });
 }
 
 export function updateSettings(userId, settingsPatch) {
@@ -1100,6 +1157,13 @@ export async function removeFriendship(friendshipId) {
   mutate((s) => { s.friendships = s.friendships.filter((x) => x.id !== friendshipId); });
 }
 
+// Cancel a pending OUTGOING friend request (Friends page "Requests sent"
+// and the profile "Request sent" button). The write is the same delete
+// as removeFriendship — kept as its own entry point for those call sites.
+export async function cancelFriendRequest(friendshipId) {
+  return removeFriendship(friendshipId);
+}
+
 export async function toggleFollow(targetId) {
   const user = me(); if (!user) throw new Error('Sign in first.');
   const following = (user.following || []).includes(targetId);
@@ -1295,7 +1359,7 @@ export async function saveBot(bot) {
     const i = s.bots.findIndex((x) => x.id === b.id);
     if (i >= 0) s.bots[i] = b; else s.bots.push(b);
     if (!s.users.some((u) => u.id === b.id)) {
-      s.users.push({ id: b.id, name: b.name, username: b.username, email: '', password: '', bio: b.bio, avatar: b.avatar, cover: '', work: '', education: '', currentCity: '', hometown: '', relationship: '', website: '', nickname: '', role: 'bot', isBot: true, botId: b.id, online: true, createdAt: Date.now(), followers: [], following: [], closeFriends: [], settings: {} });
+      s.users.push({ id: b.id, name: b.name, username: b.username, email: '', password: '', bio: b.bio, avatar: b.avatar, cover: '', work: '', education: '', currentCity: '', hometown: '', relationship: '', website: '', nickname: '', dob: '', gender: '', role: 'bot', isBot: true, botId: b.id, online: true, createdAt: Date.now(), followers: [], following: [], closeFriends: [], settings: {} });
     } else {
       const u = s.users.find((x) => x.id === b.id);
       Object.assign(u, { name: b.name, username: b.username, bio: b.bio, avatar: b.avatar });

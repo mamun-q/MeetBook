@@ -1,10 +1,11 @@
 // HTML generators for every route. Pure string builders: they read the shared
 // dataset (api.data()) and never touch the DOM directly — main.js renders
 // and binds events centrally.
-import { escapeHtml, timeAgo, canViewPost, canViewGroup, canViewGroupPost, isGroupMember, searchByName, truncate, paginate, groupStoriesByAuthor, canViewStory, storyBackgroundCss, STORY_BACKGROUNDS, memoriesFor, upcomingEvents, canViewEvent, averageRating, FEELINGS } from './utils.js';
+import { escapeHtml, timeAgo, canViewPost, canViewGroup, canViewGroupPost, isGroupMember, searchByName, truncate, paginate, groupStoriesByAuthor, canViewStory, storyBackgroundCss, STORY_BACKGROUNDS, memoriesFor, upcomingEvents, canViewEvent, averageRating, FEELINGS, plural, mutualFriendCount } from './utils.js';
 import { t } from './i18n.js';
 import { avatarHtml, userNameHtml, postCardHtml, emptyState } from './components.js';
 import { friendIdsOf, blockedIdsOf } from './store.js';
+import { firebaseReady } from './firebase.js';
 
 // Transient per-session UI state that views need but which is not app
 // data (main.js flips these; a re-render reads them).
@@ -39,35 +40,57 @@ export function blockedIdsOfData(d, uidValue) {
 }
 
 // ------------------------------------------------------------------ AUTH
+// Multicolour Google "G" (the official four-colour mark, inline SVG).
+const GOOGLE_G_SVG = '<svg class="google-g" width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.1H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3l5.7-5.7C34.5 6.1 29.3 4 24 4 13 4 4 13 4 24s9 20 20 20 20-9 20-20c0-1.3-.1-2.6-.4-3.9z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.9 1.2 8 3l5.7-5.7C34.5 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.1H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C36.9 39.2 44 34 44 24c0-1.3-.1-2.6-.4-3.9z"/></svg>';
+
+// Password field with a show/hide eye toggle (main.js wires data-act).
+function passwordFieldHtml({ name = 'password', labelKey = 'password', autocomplete = 'current-password', placeholder = '••••••••', required = true, minlength = '' }) {
+  return `<label>${t(labelKey)}<span class="pw-wrap"><input name="${name}" type="password" ${required ? 'required' : ''} ${minlength ? `minlength="${minlength}"` : ''} autocomplete="${autocomplete}" placeholder="${placeholder}" /><button type="button" class="pw-eye" data-act="toggle-pw" aria-label="${t('showPassword')}" title="${t('showPassword')}">👁️</button></span></label>`;
+}
+
 export function authView(mode = 'login') {
   return `
   <div class="auth-wrap">
     <div class="auth-hero">
       <div class="logo-big">MeetBook</div>
-      <p>Connect with friends, discover people, and meet friendly AI bots — clearly labelled, always.</p>
+      <p>${t('authTagline')}</p>
+      <ul class="auth-feats">
+        <li>📰 ${t('authFeat1')}</li>
+        <li>💬 ${t('authFeat2')}</li>
+        <li>🤖 ${t('authFeat3')}</li>
+      </ul>
     </div>
     <div class="card auth-card">
-      <div class="tabs">
-        <button class="tab ${mode === 'login' ? 'active' : ''}" data-nav="#/login">${t('login')}</button>
-        <button class="tab ${mode === 'register' ? 'active' : ''}" data-nav="#/register">${t('register')}</button>
-      </div>
       ${mode === 'login' ? `
       <form id="login-form" class="stack">
-        <label>Email<input name="email" type="email" required autocomplete="email" placeholder="you@example.com" /></label>
-        <label>Password<input name="password" type="password" required autocomplete="current-password" placeholder="••••••••" /></label>
+        <label>${t('email')}<input name="email" type="email" required autocomplete="email" placeholder="you@example.com" /></label>
+        ${passwordFieldHtml({})}
         <button class="btn btn-primary btn-block" type="submit">${t('login')}</button>
-        <button class="btn btn-google btn-block" type="button" data-act="google-login">Continue with Google</button>
-        <button class="link-btn center" type="button" data-act="forgot">Forgot password?</button>
-        <p class="muted small center">Demo accounts (offline mode): admin@meetbook.app / admin123 · ayesha@example.com / demo123</p>
+        <button class="btn btn-google btn-block" type="button" data-act="google-login">${GOOGLE_G_SVG} ${t('continueWithGoogle')}</button>
+        <button class="link-btn center" type="button" data-act="forgot">${t('forgotPassword')}</button>
+        ${firebaseReady ? '' : `<p class="muted small center">Demo accounts (offline mode): admin@meetbook.app / admin123 · ayesha@example.com / demo123</p>`}
+        <p class="muted small center">${t('newToMeetBook')} <a href="#/register">${t('register')}</a></p>
       </form>` : `
       <form id="register-form" class="stack">
-        <label>Full name<input name="name" required maxlength="60" placeholder="Your name" /></label>
-        <label>Username<input name="username" required maxlength="24" placeholder="your.name" /></label>
-        <label>Email<input name="email" type="email" required autocomplete="email" placeholder="you@example.com" /></label>
-        <label>Password<input name="password" type="password" required minlength="6" autocomplete="new-password" placeholder="At least 6 characters" /></label>
+        <label>${t('fullName')}<input name="name" required maxlength="60" placeholder="Your name" /></label>
+        <label>${t('username')}<input name="username" required maxlength="24" placeholder="your.name" /></label>
+        <label>${t('email')}<input name="email" type="email" required autocomplete="email" placeholder="you@example.com" /></label>
+        ${passwordFieldHtml({ autocomplete: 'new-password', placeholder: 'At least 6 characters', minlength: '6' })}
+        ${passwordFieldHtml({ name: 'confirmPassword', labelKey: 'confirmPassword', autocomplete: 'new-password', placeholder: 'At least 6 characters', minlength: '6' })}
+        <label>${t('dob')}<input name="dob" type="date" /></label>
+        <label>${t('gender')}
+          <select name="gender">
+            <option value="">—</option>
+            <option value="Female">${t('genderFemale')}</option>
+            <option value="Male">${t('genderMale')}</option>
+            <option value="Other">${t('genderOther')}</option>
+            <option value="Prefer not to say">${t('genderPreferNot')}</option>
+          </select>
+        </label>
         <button class="btn btn-primary btn-block" type="submit">${t('register')}</button>
-        <button class="btn btn-google btn-block" type="button" data-act="google-login">Continue with Google</button>
+        <button class="btn btn-google btn-block" type="button" data-act="google-login">${GOOGLE_G_SVG} ${t('continueWithGoogle')}</button>
         <p class="muted small center">By registering you agree to our <a href="#/terms">Terms</a> and <a href="#/privacy">Privacy Policy</a>.</p>
+        <p class="muted small center">${t('alreadyHaveAccount')} <a href="#/login">${t('login')}</a></p>
       </form>`}
     </div>
   </div>`;
@@ -96,8 +119,9 @@ export function feedView(d, meUser, page = 1) {
         <form id="composer-form" class="stack">
           <textarea name="text" rows="3" maxlength="2000" placeholder="${t('whatsOnYourMind')}"></textarea>
           <div id="composer-preview"></div>
+          <input type="file" name="image" accept="image/*" hidden />
           <div class="row gap wrap">
-            <label class="btn btn-ghost btn-sm">📷 Photo<input type="file" name="image" accept="image/*" hidden /></label>
+            <button type="button" class="btn btn-ghost btn-sm" data-act="pick-photo">📷 Photo</button>
             <label class="btn btn-ghost btn-sm">📊 ${t('addPoll')}<input type="checkbox" name="hasPoll" hidden /></label>
             <select name="visibility" class="select-sm" aria-label="Post privacy">
               <option value="public" ${defaultVis === 'public' ? 'selected' : ''}>🌍 Public</option>
@@ -109,7 +133,13 @@ export function feedView(d, meUser, page = 1) {
             <button class="btn btn-primary" type="submit">${t('post')}</button>
           </div>
           <div id="poll-fields" class="stack hidden">
-            ${[1, 2, 3, 4].map((i) => `<input name="pollOption" maxlength="60" placeholder="${t('pollOption')} ${i}${i > 2 ? ' (optional)' : ''}" autocomplete="off" />`).join('')}
+            <div id="poll-options-list" class="stack">
+              ${[1, 2].map((i) => `<div class="row gap-sm poll-opt-row"><input name="pollOption" maxlength="60" placeholder="${t('pollOption')} ${i}" autocomplete="off" /></div>`).join('')}
+            </div>
+            <div class="row gap wrap">
+              <button type="button" class="btn btn-ghost btn-sm" data-act="poll-add-option">＋ ${t('addOption')}</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-act="poll-remove">✕ ${t('removePoll')}</button>
+            </div>
           </div>
           <div class="row gap wrap">
             <label class="grow">📍 ${t('checkIn')}<input name="location" maxlength="120" placeholder="e.g. Lalbagh Fort, Dhaka" autocomplete="off" /></label>
@@ -243,9 +273,9 @@ export function rightRail(d, meUser) {
   return `<div class="card rail">
     ${pending.length ? `<h4>Friend requests</h4>${pending.map((f) => `<div class="row gap-sm rail-person">${avatarHtml(byId[f.from], 36)}<span class="grow">${escapeHtml(byId[f.from]?.name || '')}</span><button class="btn btn-primary btn-sm" data-act="accept-request" data-id="${f.id}">Accept</button><button class="btn btn-ghost btn-sm" data-act="reject-request" data-id="${f.id}">✕</button></div>`).join('')}` : ''}
     <h4>People you may know</h4>
-    ${suggestions.map((u) => `<div class="row gap-sm rail-person">${avatarHtml(u, 36)}<a class="grow" href="#/profile/${u.id}">${escapeHtml(u.name)}</a>${u.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : `<button class="btn btn-ghost btn-sm" data-act="send-request" data-id="${u.id}">${t('addFriend')}</button>`}</div>`).join('') || '<p class="muted small">No suggestions right now.</p>'}
+    ${suggestions.map((u) => { const mutual = mutualFriendCount(d.friendships, meUser.id, u.id); return `<div class="row gap-sm rail-person">${avatarHtml(u, 36)}<span class="grow"><a href="#/profile/${u.id}">${escapeHtml(u.name)}</a>${mutual > 0 ? `<br/><span class="muted small">${mutual} ${mutual === 1 ? t('mutualFriend') : t('mutualFriends')}</span>` : ''}</span>${u.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : `<button class="btn btn-ghost btn-sm" data-act="send-request" data-id="${u.id}">${t('addFriend')}</button>`}</div>`; }).join('') || '<p class="muted small">No suggestions right now.</p>'}
     <h4>Online</h4>
-    ${d.users.filter((u) => u.online && u.id !== meUser.id).slice(0, 6).map((u) => `<a class="row gap-sm rail-person" href="#/profile/${u.id}"><span class="online-dot"></span>${escapeHtml(u.name)}${u.isBot ? ` <span class="badge badge-bot">${t('aiBot')}</span>` : ''}</a>`).join('') || '<p class="muted small">Nobody online.</p>'}
+    ${d.users.filter((u) => u.id !== meUser.id && isFreshOnline(u)).slice(0, 6).map((u) => `<a class="row gap-sm rail-person" href="#/profile/${u.id}"><span class="online-dot"></span>${escapeHtml(u.name)}${u.isBot ? ` <span class="badge badge-bot">${t('aiBot')}</span>` : ''}</a>`).join('') || '<p class="muted small">Nobody online.</p>'}
     <p class="muted small">${friendIds.size} friends · MeetBook</p>
   </div>`;
 }
@@ -256,6 +286,17 @@ export function suggestionsFor(d, meUser) {
   for (const f of d.friendships) { if (f.from === meUser.id) related.add(f.to); if (f.to === meUser.id) related.add(f.from); }
   const blocked = blockedIdsOfData(d, meUser.id);
   return d.users.filter((u) => !related.has(u.id) && !blocked.has(u.id));
+}
+
+// "Online now" for the right rail: the online flag must be set AND the
+// lastSeen heartbeat fresh (within 10 minutes). Older user docs without
+// lastSeen fall back to the flag alone so nobody vanishes unfairly.
+const ONLINE_FRESH_MS = 10 * 60_000;
+export function isFreshOnline(u, now = Date.now()) {
+  if (!u?.online) return false;
+  const seen = Number(u.lastSeen) || 0;
+  if (!seen) return true;
+  return now - seen < ONLINE_FRESH_MS;
 }
 
 // ------------------------------------------------------------------ PROFILE
@@ -273,18 +314,21 @@ export function profileView(d, meUser, userId) {
   return `
   <div class="profile-wrap">
     <div class="card profile-head">
-      <div class="cover" style="${user.cover ? `background-image:url('${escapeHtml(user.cover)}')` : ''}"></div>
+      <div class="cover" style="${user.cover ? `background-image:url('${escapeHtml(user.cover)}')` : ''}">
+        ${isMe ? `<button class="btn btn-ghost btn-sm cover-edit-btn" data-act="edit-profile">📷 ${user.cover ? t('changeCoverPhoto') : t('addCoverPhoto')}</button>` : ''}
+      </div>
       <div class="profile-meta">
         ${avatarHtml(user, 110)}
         <div class="grow">
           <h2>${userNameHtml(user)}${user.nickname ? ` <span class="nickname">(${escapeHtml(user.nickname)})</span>` : ''}</h2>
           <p class="muted">@${escapeHtml(user.username)} · ${friendIds.size} friends · ${(user.followers || []).length} followers · <span class="${user.online ? 'online-text' : 'muted'}">${user.online ? '● ' + t('online') : t('offline')}</span></p>
           <p>${escapeHtml(user.bio || 'No bio yet.')}</p>
+          ${isMe && !user.avatar ? `<button class="link-btn small" data-act="edit-profile">📷 ${t('addProfilePhoto')}</button>` : ''}
         </div>
         <div class="row gap wrap">
-          ${isMe ? `<button class="btn btn-primary" data-act="edit-profile">✏️ ${t('edit')} profile</button>` : `
+          ${isMe ? `<button class="btn btn-primary" data-act="edit-profile">✏️ ${t('editProfile')}</button>` : `
             ${blocked ? `<button class="btn btn-ghost" data-act="block" data-id="${user.id}">Unblock</button>` : `
-              ${rel?.status === 'accepted' ? `<button class="btn btn-ghost" data-act="remove-friend" data-id="${rel.id}">✓ Friends</button>` : rel?.status === 'pending' && rel.from === meUser.id ? '<span class="badge">Request sent</span>' : rel?.status === 'pending' ? `<button class="btn btn-primary" data-act="accept-request" data-id="${rel.id}">Accept request</button>` : (!user.isBot ? `<button class="btn btn-primary" data-act="send-request" data-id="${user.id}">${t('addFriend')}</button>` : '')}
+              ${rel?.status === 'accepted' ? `<button class="btn btn-ghost" data-act="remove-friend" data-id="${rel.id}">✓ Friends</button>` : rel?.status === 'pending' && rel.from === meUser.id ? `<button class="btn btn-ghost" data-act="cancel-request" data-id="${rel.id}" title="${t('tapToCancel')}">✓ ${t('requestSent')}</button>` : rel?.status === 'pending' ? `<button class="btn btn-primary" data-act="accept-request" data-id="${rel.id}">Accept request</button>` : (!user.isBot ? `<button class="btn btn-primary" data-act="send-request" data-id="${user.id}">${t('addFriend')}</button>` : '')}
               <button class="btn ${following ? 'btn-ghost' : 'btn-primary'}" data-act="follow" data-id="${user.id}">${following ? t('following') : t('follow')}</button>
               <button class="btn btn-ghost" data-act="message-user" data-id="${user.id}">💬 Message</button>
               <button class="btn btn-ghost" data-act="block" data-id="${user.id}">Block</button>
@@ -295,11 +339,25 @@ export function profileView(d, meUser, userId) {
     </div>
     ${(() => {
       const intro = introCardHtml(user, isMe);
+      // Photos strip: this user's photo posts (already visibility-filtered
+      // into `posts` above), newest first, up to 9 thumbnails.
+      const photoPosts = posts.filter((p) => p.image).slice(0, 9);
+      const photosStrip = photoPosts.length ? `<div class="card strip-card">
+        <h3>${t('photos')}</h3>
+        <div class="photos-grid">${photoPosts.map((p) => `<img class="photos-thumb" src="${escapeHtml(p.image)}" alt="${escapeHtml(truncate(p.text || 'Photo', 60))}" loading="lazy" />`).join('')}</div>
+      </div>` : '';
+      // Friends strip: count + up to 9 friend avatars linking to profiles.
+      const friendUsers = [...friendIds].map((id) => ctx.usersById[id]).filter(Boolean).slice(0, 9);
+      const friendsStrip = friendUsers.length ? `<div class="card strip-card">
+        <h3>${t('friends')} (${friendIds.size})</h3>
+        <div class="friends-strip">${friendUsers.map((u) => `<a class="friend-tile" href="#/profile/${u.id}">${avatarHtml(u, 52)}<span>${escapeHtml(u.name.split(' ')[0])}</span></a>`).join('')}</div>
+      </div>` : '';
+      const sideBits = intro + photosStrip + friendsStrip;
       const postsHtml = `<div class="profile-posts">
       ${posts.map((p) => postCardHtml(p, ctx)).join('') || emptyState('📝', 'No visible posts yet.')}
     </div>`;
-      return intro
-        ? `<div class="profile-cols"><aside class="profile-side">${intro}</aside>${postsHtml}</div>`
+      return sideBits
+        ? `<div class="profile-cols"><aside class="profile-side">${sideBits}</aside>${postsHtml}</div>`
         : postsHtml;
     })()}
   </div>`;
@@ -315,6 +373,12 @@ export function introCardHtml(user, isMe = false) {
   if (user.currentCity) items.push(`<div class="intro-row"><span class="intro-icon">📍</span><span>${t('livesIn')} <b>${escapeHtml(user.currentCity)}</b></span></div>`);
   if (user.hometown) items.push(`<div class="intro-row"><span class="intro-icon">🏠</span><span>${t('fromPlace')} <b>${escapeHtml(user.hometown)}</b></span></div>`);
   if (user.relationship) items.push(`<div class="intro-row"><span class="intro-icon">❤️</span><span>${escapeHtml(user.relationship)}</span></div>`);
+  if (user.dob) {
+    const dobDate = new Date(`${user.dob}T00:00:00`);
+    const dobText = Number.isNaN(dobDate.getTime()) ? String(user.dob) : dobDate.toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' });
+    items.push(`<div class="intro-row"><span class="intro-icon">🎂</span><span>${t('birthday')}: <b>${escapeHtml(dobText)}</b></span></div>`);
+  }
+  if (user.gender) items.push(`<div class="intro-row"><span class="intro-icon">🧑</span><span>${t('gender')}: <b>${escapeHtml(user.gender)}</b></span></div>`);
   if (user.website) {
     const href = /^https?:\/\//i.test(user.website) ? user.website : `https://${user.website}`;
     items.push(`<div class="intro-row"><span class="intro-icon">🔗</span><a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(user.website)}</a></div>`);
@@ -333,15 +397,21 @@ export function friendsView(d, meUser) {
   const incoming = d.friendships.filter((f) => f.to === meUser.id && f.status === 'pending');
   const outgoing = d.friendships.filter((f) => f.from === meUser.id && f.status === 'pending');
   const suggestions = suggestionsFor(d, meUser);
-  const person = (u, actions) => `<div class="card person-card">${avatarHtml(u, 56)}<a href="#/profile/${u.id}"><b>${escapeHtml(u.name)}</b></a><span class="muted small">@${escapeHtml(u.username)}</span>${u.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''}<div class="row gap wrap center">${actions}</div></div>`;
+  const mutualLine = (u) => {
+    if (!u) return '';
+    const n = mutualFriendCount(d.friendships, meUser.id, u.id);
+    return n > 0 ? `<span class="muted small">${n} ${n === 1 ? t('mutualFriend') : t('mutualFriends')}</span>` : '';
+  };
+  const person = (u, actions, extra = '') => `<div class="card person-card">${avatarHtml(u, 56)}<a href="#/profile/${u.id}"><b>${escapeHtml(u.name)}</b></a><span class="muted small">@${escapeHtml(u.username)}</span>${extra}${u.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''}<div class="row gap wrap center">${actions}</div></div>`;
   return `<div class="page">
     <h2>👥 ${t('friends')}</h2>
-    ${incoming.length ? `<h3>Requests received</h3><div class="grid-people">${incoming.map((f) => person(byId[f.from], `<button class="btn btn-primary btn-sm" data-act="accept-request" data-id="${f.id}">Accept</button><button class="btn btn-ghost btn-sm" data-act="reject-request" data-id="${f.id}">Reject</button>`)).join('')}</div>` : ''}
-    ${outgoing.length ? `<h3>Requests sent</h3><div class="grid-people">${outgoing.map((f) => person(byId[f.to], `<button class="btn btn-ghost btn-sm" data-act="remove-friend" data-id="${f.id}">Cancel request</button>`)).join('')}</div>` : ''}
-    <h3>Your friends (${friendIds.size})</h3>
+    <h3>${t('requestsReceived')}</h3>
+    ${incoming.length ? `<div class="grid-people">${incoming.map((f) => person(byId[f.from], `<button class="btn btn-primary btn-sm" data-act="accept-request" data-id="${f.id}">Accept</button><button class="btn btn-ghost btn-sm" data-act="reject-request" data-id="${f.id}">Reject</button>`, mutualLine(byId[f.from]))).join('')}</div>` : `<p class="muted">${t('noRequestsReceived')}</p>`}
+    ${outgoing.length ? `<h3>${t('requestsSent')}</h3><div class="grid-people">${outgoing.map((f) => person(byId[f.to], `<button class="btn btn-ghost btn-sm" data-act="cancel-request" data-id="${f.id}">${t('cancelRequest')}</button>`)).join('')}</div>` : ''}
+    <h3>${t('yourFriends')} (${friendIds.size})</h3>
     <div class="grid-people">${[...friendIds].map((id) => { const rel = d.friendships.find((f) => f.status === 'accepted' && ((f.from === meUser.id && f.to === id) || (f.to === meUser.id && f.from === id))); const isClose = (meUser.closeFriends || []).includes(id); return person(byId[id], `<button class="btn ${isClose ? 'btn-primary' : 'btn-ghost'} btn-sm" data-act="toggle-close-friend" data-id="${id}" title="${t('closeFriends')}">${isClose ? '⭐' : '☆'} ${t('closeFriends')}</button><button class="btn btn-ghost btn-sm" data-act="message-user" data-id="${id}">Message</button><button class="btn btn-ghost btn-sm" data-act="remove-friend" data-id="${rel?.id}">Remove</button>`); }).join('') || '<p class="muted">No friends yet — send a request below.</p>'}</div>
-    <h3>Suggested for you</h3>
-    <div class="grid-people">${suggestions.map((u) => person(u, u.isBot ? `<button class="btn btn-ghost btn-sm" data-act="message-user" data-id="${u.id}">Chat with bot</button>` : `<button class="btn btn-primary btn-sm" data-act="send-request" data-id="${u.id}">${t('addFriend')}</button>`)).join('') || '<p class="muted">No suggestions.</p>'}</div>
+    <h3>${t('suggestedForYou')}</h3>
+    <div class="grid-people">${suggestions.map((u) => person(u, u.isBot ? `<button class="btn btn-ghost btn-sm" data-act="message-user" data-id="${u.id}">Chat with bot</button>` : `<button class="btn btn-primary btn-sm" data-act="send-request" data-id="${u.id}">${t('addFriend')}</button>`, mutualLine(u))).join('') || '<p class="muted">No suggestions.</p>'}</div>
   </div>`;
 }
 
@@ -358,7 +428,7 @@ export function groupsView(d, meUser, queryText = '') {
     return `<div class="card person-card">
     ${avatarHtml({ name: g.name, username: g.name, avatar: g.cover }, 56)}
     <a href="#/group/${g.id}"><b>${escapeHtml(g.name)}</b></a>
-    <span class="muted small">${g.privacy === 'private' ? '🔒 ' + t('privateLabel') : '🌍 ' + t('publicLabel')} · ${(g.members || []).length} ${t('members')}</span>
+    <span class="muted small">${g.privacy === 'private' ? '🔒 ' + t('privateLabel') : '🌍 ' + t('publicLabel')} · ${plural((g.members || []).length, t('member'), t('members'))}</span>
     <span class="muted small">${escapeHtml(truncate(g.description || '', 90))}</span>
     <div class="row gap wrap center">
       ${isGroupMember(g, meUser.id) ? `<span class="badge badge-ok">${t('joined')}</span>` : pendingReq ? `<span class="badge badge-warn">${t('requestPending')}</span>` : `<button class="btn btn-primary btn-sm" data-act="toggle-group-join" data-id="${g.id}">${g.privacy === 'private' ? t('requestToJoin') : t('joinGroup')}</button>`}
@@ -392,7 +462,7 @@ export function groupView(d, meUser, groupId) {
         ${avatarHtml({ name: group.name, username: group.name, avatar: '' }, 110)}
         <div class="grow">
           <h2>${escapeHtml(group.name)}</h2>
-          <p class="muted">🔒 ${t('privateLabel')} · ${(group.members || []).length} ${t('members')}</p>
+          <p class="muted">🔒 ${t('privateLabel')} · ${plural((group.members || []).length, t('member'), t('members'))}</p>
           <p>${escapeHtml(group.description || '')}</p>
         </div>
         <div class="row gap wrap">
@@ -422,8 +492,8 @@ export function groupView(d, meUser, groupId) {
         ${avatarHtml({ name: group.name, username: group.name, avatar: '' }, 110)}
         <div class="grow">
           <h2>${escapeHtml(group.name)}</h2>
-          <p class="muted">${group.privacy === 'private' ? '🔒 ' + t('privateLabel') : '🌍 ' + t('publicLabel')} · ${(group.members || []).length} ${t('members')} · created by ${escapeHtml(byId[group.createdBy]?.name || '')}</p>
-          <p class="muted small">🏘️ ${t('aboutThisGroup')}: ${group.privacy === 'private' ? '🔒 ' + t('privateLabel') : '🌍 ' + t('publicLabel')} · ${t('createdOn')} ${new Date(group.createdAt || Date.now()).toLocaleDateString()} · ${(group.members || []).length} ${t('members')}</p>
+          <p class="muted">${group.privacy === 'private' ? '🔒 ' + t('privateLabel') : '🌍 ' + t('publicLabel')} · ${plural((group.members || []).length, t('member'), t('members'))} · created by ${escapeHtml(byId[group.createdBy]?.name || '')}</p>
+          <p class="muted small">🏘️ ${t('aboutThisGroup')}: ${group.privacy === 'private' ? '🔒 ' + t('privateLabel') : '🌍 ' + t('publicLabel')} · ${t('createdOn')} ${new Date(group.createdAt || Date.now()).toLocaleDateString()} · ${plural((group.members || []).length, t('member'), t('members'))}</p>
           <p>${escapeHtml(group.description || '')}</p>
         </div>
         <div class="row gap wrap">
@@ -444,8 +514,9 @@ export function groupView(d, meUser, groupId) {
       <div class="row gap-sm">${avatarHtml(meUser, 40)}<span class="muted">${escapeHtml(meUser.name)}</span></div>
       <form id="group-composer-form" data-group="${group.id}" class="stack">
         <textarea name="text" rows="3" maxlength="2000" placeholder="${t('postToGroup')}"></textarea>
+        <input type="file" name="image" accept="image/*" hidden />
         <div class="row gap wrap">
-          <label class="btn btn-ghost btn-sm">📷 Photo<input type="file" name="image" accept="image/*" hidden /></label>
+          <button type="button" class="btn btn-ghost btn-sm" data-act="pick-photo">📷 Photo</button>
           <span class="spacer"></span>
           <button class="btn btn-primary" type="submit">${t('post')}</button>
         </div>
@@ -459,7 +530,7 @@ export function groupView(d, meUser, groupId) {
       ${(group.members || []).map((id) => {
         const u = byId[id];
         if (!u) return '';
-        return `<div class="row gap-sm">${avatarHtml(u, 36)}<a class="grow" href="#/profile/${u.id}">${escapeHtml(u.name)}</a>${id === group.createdBy ? '<span class="badge badge-admin">Admin</span>' : ''}${u.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''}${isCreator && id !== group.createdBy ? `<button class="btn btn-ghost btn-sm" data-act="remove-member" data-group="${group.id}" data-id="${id}">Remove</button>` : ''}</div>`;
+        return `<div class="row gap-sm">${avatarHtml(u, 36)}<a class="grow" href="#/profile/${u.id}">${escapeHtml(u.name)}</a>${id === group.createdBy ? ' <span class="badge badge-admin">Admin</span>' : ''}${u.isBot ? ` <span class="badge badge-bot">${t('aiBot')}</span>` : ''}${isCreator && id !== group.createdBy ? `<button class="btn btn-ghost btn-sm" data-act="remove-member" data-group="${group.id}" data-id="${id}">Remove</button>` : ''}</div>`;
       }).join('')}
     </div>
   </div>`;
@@ -490,7 +561,7 @@ export function pagesView(d, meUser, queryText = '') {
     ${avatarHtml({ name: p.name, username: p.name, avatar: p.avatar }, 56)}
     <a href="#/page/${p.id}"><b>${escapeHtml(p.name)}</b></a>
     <span class="badge">${escapeHtml(p.category || t('pageLabel'))}</span>
-    <span class="muted small">${(p.followers || []).length} ${t('followers')}</span>
+    <span class="muted small">${plural((p.followers || []).length, t('follower'), t('followers'))}</span>
     <span class="muted small">${escapeHtml(truncate(p.about || '', 90))}</span>
     <div class="row gap wrap center">
       ${p.ownerId === meUser.id ? `<span class="badge badge-ok">Your page</span>` : (p.followers || []).includes(meUser.id) ? `<button class="btn btn-ghost btn-sm" data-act="follow-page" data-id="${p.id}">${t('following')}</button>` : `<button class="btn btn-primary btn-sm" data-act="follow-page" data-id="${p.id}">${t('follow')}</button>`}
@@ -528,7 +599,7 @@ export function pageView(d, meUser, pageId) {
         ${avatarHtml({ name: page.name, username: page.name, avatar: page.avatar }, 110)}
         <div class="grow">
           <h2>${escapeHtml(page.name)} <span class="badge">${t('pageLabel')}</span></h2>
-          <p class="muted">${escapeHtml(page.category || '')} · ${(page.followers || []).length} ${t('followers')} · by ${escapeHtml(ctx.usersById[page.ownerId]?.name || '')}</p>
+          <p class="muted">${escapeHtml(page.category || '')} · ${plural((page.followers || []).length, t('follower'), t('followers'))} · by ${escapeHtml(ctx.usersById[page.ownerId]?.name || '')}</p>
           <p>${escapeHtml(page.about || '')}</p>
         </div>
         <div class="row gap wrap">
@@ -542,8 +613,9 @@ export function pageView(d, meUser, pageId) {
       <div class="row gap-sm">${avatarHtml({ name: page.name, username: page.name, avatar: page.avatar }, 40)}<span class="muted">${escapeHtml(page.name)}</span></div>
       <form id="page-composer-form" data-page="${page.id}" class="stack">
         <textarea name="text" rows="3" maxlength="2000" placeholder="${t('postAsPage')}"></textarea>
+        <input type="file" name="image" accept="image/*" hidden />
         <div class="row gap wrap">
-          <label class="btn btn-ghost btn-sm">📷 Photo<input type="file" name="image" accept="image/*" hidden /></label>
+          <button type="button" class="btn btn-ghost btn-sm" data-act="pick-photo">📷 Photo</button>
           <span class="spacer"></span>
           <button class="btn btn-primary" type="submit">${t('post')}</button>
         </div>
@@ -602,7 +674,7 @@ function eventCardHtml(d, meUser, e, ctx) {
       <div class="grow">
         <a href="#/event/${e.id}"><b>${escapeHtml(e.title)}</b></a>
         <div class="muted small">🕒 ${escapeHtml(when)}${e.location ? ` · 📍 ${escapeHtml(e.location)}` : ''}</div>
-        <div class="muted small">${e.visibility === 'friends' ? '👥 ' + t('friends') : '🌍 ' + t('publicLabel')} · ${(e.going || []).length} ${t('going')} · ${(e.interested || []).length} ${t('interested')} · by ${escapeHtml(byId[e.createdBy]?.name || '')}</div>
+        <div class="muted small">${e.visibility === 'friends' ? '👥 ' + t('friends') : '🌍 ' + t('publicLabel')} · ${plural((e.going || []).length, t('going'), t('going'))} · ${plural((e.interested || []).length, t('interested'), t('interested'))} · by ${escapeHtml(byId[e.createdBy]?.name || '')}</div>
       </div>
     </div>
     <div class="row gap wrap">
@@ -643,7 +715,8 @@ export function eventView(d, meUser, eventId) {
         <div class="grow">
           <h2>${escapeHtml(e.title)}</h2>
           <p class="muted">🕒 ${escapeHtml(when)}${e.location ? `<br/>📍 ${escapeHtml(e.location)}` : ''}</p>
-          <p class="muted small">${e.visibility === 'friends' ? '👥 ' + t('friends') : '🌍 ' + t('publicLabel')} · hosted by ${escapeHtml(byId[e.createdBy]?.name || '')}</p>
+          <p class="muted small">${e.visibility === 'friends' ? '👥 ' + t('friends') : '🌍 ' + t('publicLabel')}</p>
+          ${byId[e.createdBy] ? `<div class="row gap-sm host-row">${avatarHtml(byId[e.createdBy], 32)}<span>${t('hostedBy')} <a href="#/profile/${e.createdBy}"><b>${escapeHtml(byId[e.createdBy].name)}</b></a></span></div>` : ''}
         </div>
         <div class="row gap wrap">
           ${isCreator ? `<button class="btn btn-danger" data-act="delete-event" data-id="${e.id}">${t('delete')} event</button>` : ''}
@@ -724,23 +797,34 @@ export function messagesView(d, meUser, activeConvId = '') {
         ${active.msgs.map((m) => messageHtml(m, meUser, byId, active.isGroup)).join('') || '<p class="muted center">No messages yet. Say hello 👋</p>'}
       </div>
       <form id="message-form" data-conv="${active.conv.id}" class="message-form">
-        <label class="btn btn-ghost btn-sm">📷<input type="file" name="image" accept="image/*" hidden /></label>
+        <input type="file" name="image" accept="image/*" hidden />
+        <button type="button" class="btn btn-ghost btn-sm" data-act="pick-photo" title="Photo" aria-label="Photo">📷</button>
+        <button type="button" class="btn btn-ghost btn-sm" data-act="emoji-toggle" title="Emoji" aria-label="Emoji">😊</button>
         <input name="text" placeholder="Type a message…" autocomplete="off" maxlength="2000" />
         <button type="button" class="btn btn-ghost btn-sm" id="voice-btn" data-act="voice-toggle" title="${t('voiceMessage')}" aria-label="${t('voiceMessage')}">🎤</button>
         <button class="btn btn-primary" type="submit">${t('send')}</button>
       </form>
+      <div id="emoji-panel" class="emoji-panel hidden">
+        ${CHAT_EMOJIS.map((e) => `<button type="button" class="emoji-btn" data-emoji-insert="${e}" aria-label="Insert ${e}">${e}</button>`).join('')}
+      </div>
       <div id="voice-ui" class="voice-ui hidden">
         <span class="voice-dot"></span><span id="voice-time" class="mono">0:00</span><span class="grow small">${t('recording')}…</span>
         <button class="btn btn-ghost btn-sm" data-act="voice-cancel">✕ ${t('cancel')}</button>
         <button class="btn btn-primary btn-sm" data-act="voice-send">${t('send')}</button>
-      </div>` : `<div class="empty-state"><div class="empty-icon">💬</div><p class="muted">${t('noMessages')}</p></div>`}
+      </div>` : `<div class="empty-state"><div class="empty-icon">💬</div><p class="muted">${t('selectConversation')}</p></div>`}
     </div>
   </div>`;
 }
 
+// Emoji set for the Messenger picker (~24 common ones).
+const CHAT_EMOJIS = ['😀', '😂', '🤣', '😍', '🥰', '😊', '😎', '🤔', '😴', '😢', '😮', '😅', '😭', '👍', '👏', '🙏', '❤️', '🔥', '🎉', '✨', '🌙', '☕', '🍰', '📷'];
+
 function messageHtml(m, meUser, byId, isGroup = false) {
   const mine = m.senderId === meUser.id;
-  const status = mine ? (m.status === 'read' || (m.readBy || []).length > 1 ? '✓✓ read' : m.status === 'delivered' ? '✓✓' : '✓ sent') : '';
+  // Own-message status as words (Facebook-style): "Seen" once any other
+  // participant has it in readBy / the status flipped to read, else "Sent".
+  const seen = m.status === 'read' || (m.readBy || []).length > 1;
+  const status = mine ? (seen ? `✓✓ ${t('seen')}` : `✓ ${t('sent')}`) : '';
   return `<div class="msg-row ${mine ? 'mine' : ''}">
     ${mine ? '' : avatarHtml(byId[m.senderId], 28)}
     <div class="msg-bubble ${mine ? 'mine' : ''}">
@@ -761,7 +845,7 @@ export function groupChatFormHtml(d, meUser) {
   <form id="group-chat-form" class="stack">
     <label>${t('groupChat')}<input name="title" maxlength="60" placeholder="e.g. Weekend Plans" /></label>
     <div class="stack group-pick-list">
-      ${friends.map((u) => `<label class="row gap-sm"><input type="checkbox" name="member" value="${u.id}" /> ${avatarHtml(u, 30)}<span>${escapeHtml(u.name)}</span></label>`).join('') || '<p class="muted small">Add some friends first — group chats are picked from your accepted friends.</p>'}
+      ${friends.length ? friends.map((u) => `<label class="row gap-sm"><input type="checkbox" name="member" value="${u.id}" /> ${avatarHtml(u, 30)}<span>${escapeHtml(u.name)}</span></label>`).join('') : `<p class="muted small">${t('noFriendsForGroupChat')}</p><div><a class="btn btn-primary btn-sm" href="#/friends" data-close>🔍 ${t('findFriends')}</a></div>`}
     </div>
     <div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">${t('newGroupChat')}</button></div>
   </form>`;
@@ -796,7 +880,18 @@ export function searchView(d, meUser, queryText) {
       <button class="btn btn-primary" type="submit">Search</button>
     </form>
     <h3>People</h3>
-    <div class="grid-people">${users.map((u) => `<div class="card person-card">${avatarHtml(u, 56)}<a href="#/profile/${u.id}"><b>${escapeHtml(u.name)}</b></a><span class="muted small">@${escapeHtml(u.username)}</span>${u.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''}</div>`).join('') || '<p class="muted">No people matched.</p>'}</div>
+    <div class="grid-people">${users.map((u) => {
+      const rel = d.friendships.find((f) => (f.from === meUser.id && f.to === u.id) || (f.from === u.id && f.to === meUser.id));
+      const mutual = mutualFriendCount(d.friendships, meUser.id, u.id);
+      let action = '';
+      if (u.id === meUser.id) action = '';
+      else if (u.isBot) action = `<button class="btn btn-ghost btn-sm" data-act="message-user" data-id="${u.id}">Chat with bot</button>`;
+      else if (rel?.status === 'accepted') action = `<span class="badge badge-ok">✓ ${t('friendsLabel')}</span>`;
+      else if (rel?.status === 'pending' && rel.from === meUser.id) action = `<button class="btn btn-ghost btn-sm" data-act="cancel-request" data-id="${rel.id}" title="${t('tapToCancel')}">✓ ${t('requestSent')}</button>`;
+      else if (rel?.status === 'pending') action = `<button class="btn btn-primary btn-sm" data-act="accept-request" data-id="${rel.id}">Accept request</button>`;
+      else action = `<button class="btn btn-primary btn-sm" data-act="send-request" data-id="${u.id}">${t('addFriend')}</button>`;
+      return `<div class="card person-card">${avatarHtml(u, 56)}<a href="#/profile/${u.id}"><b>${escapeHtml(u.name)}</b></a><span class="muted small">@${escapeHtml(u.username)}</span>${mutual > 0 ? `<span class="muted small">${mutual} ${mutual === 1 ? t('mutualFriend') : t('mutualFriends')}</span>` : ''}${u.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''}${action ? `<div class="row gap wrap center">${action}</div>` : ''}</div>`;
+    }).join('') || '<p class="muted">No people matched.</p>'}</div>
     <h3>Posts</h3>
     ${posts.map((p) => postCardHtml(p, ctx)).join('') || '<p class="muted">No posts matched.</p>'}
     <p class="muted small">Searched as ${escapeHtml(byId[meUser.id]?.name || '')} — private content you cannot access is never shown.</p>
@@ -816,43 +911,46 @@ export function savedView(d, meUser) {
 export function settingsView(d, meUser, prefs) {
   const np = meUser.settings?.notifPrefs || {};
   const defaultPrivacy = meUser.settings?.defaultPostPrivacy || 'public';
-  const types = ['friend_request', 'like', 'comment', 'reply', 'message', 'mention', 'follow'];
+  const prefLabels = {
+    friend_request: t('prefFriendRequest'), like: t('prefLike'), comment: t('prefComment'),
+    reply: t('prefReply'), message: t('prefMessage'), mention: t('prefMention'), follow: t('prefFollow')
+  };
+  const types = Object.keys(prefLabels);
   return `<div class="page narrow">
     <h2>⚙️ ${t('settings')}</h2>
     <div class="card stack">
-      <h3>Account</h3>
+      <h3>${t('settingsAccount')}</h3>
       <p><b>${escapeHtml(meUser.name)}</b> · @${escapeHtml(meUser.username)}<br/><span class="muted">${escapeHtml(meUser.email || '')}</span></p>
       <div class="row gap wrap">
-        <button class="btn btn-ghost" data-act="edit-profile">✏️ ${t('edit')} profile</button>
-        <button class="btn btn-ghost" data-act="change-password">Change password / reset</button>
+        <button class="btn btn-ghost" data-act="edit-profile">✏️ ${t('editProfile')}</button>
+        <button class="btn btn-ghost" data-act="change-password">✉️ ${t('sendResetEmail')}</button>
         <button class="btn btn-ghost settings-logout" data-act="logout">🚪 ${t('logout')}</button>
-        <button class="btn btn-danger" data-act="delete-account">${t('delete')} account</button>
+        <button class="btn btn-danger" data-act="delete-account">${t('deleteAccount')}</button>
       </div>
     </div>
     <div class="card stack">
-      <h3>Appearance & language</h3>
+      <h3>${t('settingsAppearance')}</h3>
       <div class="row gap wrap">
         <button class="btn btn-ghost" data-act="toggle-theme">${prefs.theme === 'dark' ? '☀️ ' + t('lightMode') : '🌙 ' + t('darkMode')}</button>
-        <label>Language
+        <label>${t('languageLabel')}
           <select id="locale-select" class="select-sm">
             <option value="en" ${prefs.locale === 'en' ? 'selected' : ''}>English</option>
             <option value="bn" ${prefs.locale === 'bn' ? 'selected' : ''}>বাংলা</option>
           </select>
         </label>
       </div>
-      <p class="muted small">The app is language-ready: all core strings live in locale dictionaries (English + বাংলা included).</p>
     </div>
     <div class="card stack">
-      <h3>Notification preferences</h3>
+      <h3>${t('settingsNotifications')}</h3>
       <form id="notif-prefs-form" class="stack">
-        ${types.map((type) => `<label class="row gap-sm"><input type="checkbox" name="${type}" ${np[type] === false ? '' : 'checked'} /> <span class="grow">${type.replaceAll('_', ' ')}</span></label>`).join('')}
-        <label class="row gap-sm"><input type="checkbox" name="browserNotifications" ${meUser.settings?.browserNotifications ? 'checked' : ''} /> <span class="grow">🔔 ${t('browserNotifications')}</span></label>
-        <p class="muted small">Browser notifications pop up while MeetBook is open in this browser, when a new notification arrives.</p>
-        <button class="btn btn-primary btn-sm" type="submit">Save preferences</button>
+        ${types.map((type) => `<label class="notif-pref-row"><span class="grow">${prefLabels[type]}</span><input type="checkbox" name="${type}" ${np[type] === false ? '' : 'checked'} /></label>`).join('')}
+        <label class="notif-pref-row"><span class="grow">🔔 ${t('browserNotifications')}</span><input type="checkbox" name="browserNotifications" ${meUser.settings?.browserNotifications ? 'checked' : ''} /></label>
+        <p class="muted small">${t('browserNotificationsHelp')}</p>
+        <div><button class="btn btn-primary btn-sm" type="submit">${t('savePreferences')}</button></div>
       </form>
     </div>
     <div class="card stack">
-      <h3>Privacy</h3>
+      <h3>${t('settingsPrivacy')}</h3>
       <form id="privacy-prefs-form" class="stack">
         <label>${t('defaultPostPrivacy')}
           <select name="defaultPostPrivacy">
@@ -862,10 +960,10 @@ export function settingsView(d, meUser, prefs) {
             <option value="only-me" ${defaultPrivacy === 'only-me' ? 'selected' : ''}>🔒 Only me</option>
           </select>
         </label>
-        <div><button class="btn btn-primary btn-sm" type="submit">Save privacy</button></div>
+        <div><button class="btn btn-primary btn-sm" type="submit">${t('savePrivacy')}</button></div>
       </form>
-      <p class="muted">Blocked people cannot see your posts or message you. Manage blocks from any profile page.</p>
-      ${(d.blocks || []).filter((b) => b.by === meUser.id).map((b) => `<div class="row gap-sm">${avatarHtml(usersById(d)[b.target], 32)}<span class="grow">${escapeHtml(usersById(d)[b.target]?.name || '')}</span><button class="btn btn-ghost btn-sm" data-act="block" data-id="${b.target}">Unblock</button></div>`).join('') || '<p class="muted small">You have not blocked anyone.</p>'}
+      <p class="muted">${t('blockedHelp')}</p>
+      ${(d.blocks || []).filter((b) => b.by === meUser.id).map((b) => `<div class="row gap-sm">${avatarHtml(usersById(d)[b.target], 32)}<span class="grow">${escapeHtml(usersById(d)[b.target]?.name || '')}</span><button class="btn btn-ghost btn-sm" data-act="block" data-id="${b.target}">${t('unblock')}</button></div>`).join('') || `<p class="muted small">${t('noBlocked')}</p>`}
       <div class="row gap wrap">
         <a class="btn btn-ghost btn-sm" href="#/privacy">Privacy Policy</a>
         <a class="btn btn-ghost btn-sm" href="#/terms">Terms of Service</a>
@@ -1000,22 +1098,26 @@ const STATIC = {
     ['Is my data private?', 'Private conversations are only visible to their participants, enforced by security rules in live mode. See the Privacy Policy for details.']
   ]},
   guidelines: { title: '📜 Community Guidelines', body: [
-    ['Be kind', 'Treat people — and bots — with respect. No harassment, hate speech or bullying.'],
-    ['No spam or deception', 'Do not impersonate others, spread scams, or post misleading content. AI bots are always labelled as bots.'],
-    ['Respect privacy', 'Do not share other people\'s private information. Report content that does.'],
-    ['Keep it safe', 'No illegal content, no graphic violence, no sexual content involving minors — ever. Violations are removed and accounts may be suspended.']
+    ['Be kind', 'Treat people — and bots — with respect. Disagreement is fine; harassment, hate speech, threats, bullying and targeted abuse are not. If someone is bothering you, block them and report the content — admins review reports.'],
+    ['Post responsibly', 'Do not post illegal content, graphic violence, or other people\'s private information such as addresses, phone numbers or passwords. Never post sexual content involving minors — zero tolerance: such accounts are removed immediately.'],
+    ['No spam or deception', 'Do not impersonate another person, brand or the MeetBook team, spread scams or fake giveaways, or post repetitive promotional content. AI bots are always labelled as bots and never pretend to be human.'],
+    ['Groups and pages', 'Group admins and page owners moderate their own spaces. Private groups carry an expectation of privacy — do not redistribute private group content outside the group without consent.'],
+    ['Enforcement', 'Content that breaks these guidelines may be hidden or removed, and repeat or serious violations can lead to account suspension. If you think a decision was wrong, contact us through the Help page.']
   ]},
   terms: { title: '📄 Terms of Service', body: [
-    ['The service', 'MeetBook is a social networking platform provided as-is. You are responsible for your account and content.'],
-    ['Your content', 'You keep ownership of what you post and grant MeetBook a licence to display it to the audiences you choose with your privacy settings.'],
-    ['AI bots', 'Some accounts are AI bots, clearly labelled. Bot content is generated automatically and may occasionally be inaccurate.'],
-    ['Termination', 'Accounts that violate the Community Guidelines may be suspended or removed. You may delete your account at any time from Settings.']
+    ['The service', 'MeetBook is a social networking platform for connecting with people you know: sharing posts and photos, joining groups and pages, following events and chatting. By creating an account or using the service, you agree to these terms. The service is provided "as is" without warranties, and features may change, be added or be removed over time.'],
+    ['Your account', 'You are responsible for the activity on your account and for keeping your password secret. Register with accurate information, use one account per person, and let us know if you believe your account has been compromised. You must be old enough to use online social services in your country.'],
+    ['Your content', 'You keep ownership of the posts, photos and messages you create. By posting, you grant MeetBook a licence to store and display your content to the audiences you choose with your privacy settings. You can delete your content at any time; copies may remain in backups for a short period.'],
+    ['Acceptable use', 'Do not post illegal content, harass or impersonate others, share someone else\'s private information, post spam or scams, or attempt to break the security of the service. Content or accounts that break these rules may be removed, and accounts may be suspended.'],
+    ['AI bots', 'Some accounts are AI bots, clearly labelled at all times. Bot content is generated automatically, may occasionally be inaccurate, and bots never pretend to be human. Administrators can disable bots at any time.'],
+    ['Termination', 'Accounts that violate the Community Guidelines may be suspended or removed. You may delete your account at any time from Settings. These terms may be updated — continued use after a change means you accept the updated terms. Questions: see the Help page.']
   ]},
   privacy: { title: '🔒 Privacy Policy', body: [
-    ['What we store', 'Account details (name, username, email), profile information, posts, comments, messages, friendships and notifications needed to run the platform.'],
-    ['Who can see it', 'Content follows the privacy setting you choose. Private messages are restricted to conversation participants by security rules.'],
-    ['AI bots', 'Bots keep their own conversation memories to stay in character. Bot memories are visible to administrators in the Bot Admin Panel.'],
-    ['Your controls', 'Edit or delete your posts and profile at any time, block users, tune notification preferences, or delete your account from Settings.'],
+    ['What we store', 'Account details (name, username, email), profile information (bio, photos, and date of birth and gender if you choose to add them), posts, comments, messages, friendships, group and page memberships, and notifications needed to run the platform.'],
+    ['How it is used', 'Your information is used to operate MeetBook: showing your profile and posts to the audience you picked, delivering messages and notifications, suggesting people you may know, and keeping accounts safe. We do not sell your personal information and we do not show third-party advertising.'],
+    ['Who can see it', 'Content follows the privacy setting you choose (public, friends, close friends or only you). Private groups are visible only to their members. Private messages are restricted to conversation participants by security rules. Your online status is shown to other signed-in users while you use the app.'],
+    ['AI bots', 'Bot accounts are operated by the service and always labelled. Bots keep their own conversation memories to stay in character; bot memories are visible to administrators in the Bot Admin Panel. Do not share sensitive personal information with a bot.'],
+    ['Your controls', 'Edit or delete your posts and profile at any time, block users, tune notification preferences, or delete your account from Settings. Deleting your account removes your profile and content from the service, subject to short backup retention.'],
     ['Demo mode', 'When the app runs in demo mode (no Firebase config), all data stays in your own browser\'s local storage and never leaves your device.']
   ]}
 };
@@ -1030,7 +1132,7 @@ export function staticView(kind) {
 const RELATIONSHIP_OPTIONS = ['', 'Single', 'In a relationship', 'Engaged', 'Married', "It's complicated"];
 
 export function editProfileHtml(user) {
-  return `<h3>✏️ ${t('edit')} profile</h3>
+  return `<h3>✏️ ${t('editProfile')}</h3>
   <form id="edit-profile-form" class="stack">
     <label>Name<input name="name" required maxlength="60" value="${escapeHtml(user.name)}" /></label>
     <label>Username<input name="username" required maxlength="24" value="${escapeHtml(user.username)}" /></label>
@@ -1043,6 +1145,16 @@ export function editProfileHtml(user) {
     <label>${t('relationship')}
       <select name="relationship">
         ${RELATIONSHIP_OPTIONS.map((opt) => `<option value="${escapeHtml(opt)}" ${String(user.relationship || '') === opt ? 'selected' : ''}>${opt === '' ? '—' : escapeHtml(opt)}</option>`).join('')}
+      </select>
+    </label>
+    <label>${t('dob')}<input name="dob" type="date" value="${escapeHtml(user.dob || '')}" /></label>
+    <label>${t('gender')}
+      <select name="gender">
+        <option value="" ${!user.gender ? 'selected' : ''}>—</option>
+        <option value="Female" ${user.gender === 'Female' ? 'selected' : ''}>${t('genderFemale')}</option>
+        <option value="Male" ${user.gender === 'Male' ? 'selected' : ''}>${t('genderMale')}</option>
+        <option value="Other" ${user.gender === 'Other' ? 'selected' : ''}>${t('genderOther')}</option>
+        <option value="Prefer not to say" ${user.gender === 'Prefer not to say' ? 'selected' : ''}>${t('genderPreferNot')}</option>
       </select>
     </label>
     <label>${t('website')}<input name="website" type="text" maxlength="200" placeholder="https://example.com" value="${escapeHtml(user.website || '')}" /></label>

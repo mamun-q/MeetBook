@@ -48,9 +48,13 @@ export function avatarHtml(user, size = 40) {
 
 export function userNameHtml(user) {
   if (!user) return '<span class="muted">Unknown user</span>';
-  const botBadge = user.isBot ? `<span class="badge badge-bot" title="This is an AI bot account">${t('aiBot')}</span>` : '';
-  const adminBadge = user.role === 'admin' ? '<span class="badge badge-admin">Admin</span>' : '';
-  return `<span class="user-name">${escapeHtml(user.name)} ${botBadge}${adminBadge}</span>`;
+  // Badges are joined with explicit spaces — concatenated badge spans
+  // with nothing between them render (and extract) as one run-on word.
+  const badges = [
+    user.isBot ? `<span class="badge badge-bot" title="This is an AI bot account">${t('aiBot')}</span>` : '',
+    user.role === 'admin' ? '<span class="badge badge-admin">Admin</span>' : ''
+  ].filter(Boolean).join(' ');
+  return `<span class="user-name">${escapeHtml(user.name)}${badges ? ` ${badges}` : ''}</span>`;
 }
 
 export function postCardHtml(post, ctx) {
@@ -69,7 +73,19 @@ export function postCardHtml(post, ctx) {
   const myReaction = post.reactions?.[me?.id] || '';
   const reactionCounts = {};
   for (const e of Object.values(post.reactions || {})) reactionCounts[e] = (reactionCounts[e] || 0) + 1;
-  const reactionLine = Object.entries(reactionCounts).map(([e, n]) => `${e} ${n}`).join(' · ');
+  // Facebook-style stats: ONE total (likes + emoji reactions) next to the
+  // top reaction emojis — never a misleading "0 likes" beside reactions
+  // that exist. The whole stats row hides when there is nothing to show.
+  const totalReactions = (post.likes?.length || 0) + Object.keys(post.reactions || {}).length;
+  const topEmojis = Object.entries(reactionCounts).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([e]) => e).join('');
+  const commentTotal = (post.comments || []).reduce((n, c) => n + 1 + (c.replies || []).length, 0);
+  const statsHtml = (totalReactions > 0 || commentTotal > 0 || (post.shares || 0) > 0) ? `
+    <div class="post-stats muted small">
+      ${totalReactions > 0 ? `<span class="stats-reactions">${topEmojis || '❤️'} ${totalReactions}</span>` : '<span></span>'}
+      <span class="spacer"></span>
+      ${commentTotal > 0 ? `<span>${commentTotal} ${commentTotal === 1 ? 'comment' : 'comments'}</span>` : ''}
+      ${(post.shares || 0) > 0 ? `<span>${post.shares} ${post.shares === 1 ? 'share' : 'shares'}</span>` : ''}
+    </div>` : '';
   const comments = (post.comments || []).map((c) => commentHtml(c, post, ctx)).join('');
   const sharedNote = post.sharedFrom ? `<div class="shared-note">🔁 Shared from ${escapeHtml(usersById[post.sharedFrom]?.name || 'a post')}</div>` : '';
   const groupNote = group && ctx.showGroupContext !== false ? `<div class="shared-note">🏘️ Posted in <a href="#/group/${group.id}">${escapeHtml(group.name)}</a></div>` : '';
@@ -110,12 +126,7 @@ export function postCardHtml(post, ctx) {
     <p class="post-text">${linkify(post.text)}</p>
     ${post.image ? `<img class="post-image" src="${escapeHtml(post.image)}" alt="Post photo" loading="lazy" />` : ''}
     ${post.poll ? pollBlockHtml(post, me) : ''}
-    <div class="post-stats muted small">
-      <span>${post.likes?.length || 0} likes</span>
-      ${reactionLine ? `<span>${escapeHtml(reactionLine)}</span>` : ''}
-      <span>${(post.comments || []).length} comments</span>
-      <span>${post.shares || 0} shares</span>
-    </div>
+    ${statsHtml}
     <div class="post-actions">
       <button class="action-btn ${liked ? 'active' : ''}" data-act="like">${liked ? '❤️' : '🤍'} ${t('like')}</button>
       <button class="action-btn" data-act="focus-comment">💬 ${t('comment')}</button>

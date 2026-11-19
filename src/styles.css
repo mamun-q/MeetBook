@@ -17,6 +17,9 @@ img { max-width: 100%; }
 h2, h3, h4 { margin: .4em 0; }
 button, input, select, textarea { font: inherit; color: inherit; }
 input, select, textarea { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: .55rem .7rem; width: 100%; }
+/* Checkboxes/radios must never take the full-width text-input sizing —
+   width:100% on them is what staggered the settings preference rows. */
+input[type="checkbox"], input[type="radio"] { width: auto; accent-color: var(--brand); }
 textarea { resize: vertical; }
 label { display: block; font-size: .9rem; font-weight: 600; }
 label input, label select, label textarea { margin-top: .3rem; font-weight: 400; }
@@ -50,7 +53,7 @@ label input, label select, label textarea { margin-top: .3rem; font-weight: 400;
 .hidden { display: none !important; }
 .online-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); display: inline-block; }
 .online-text { color: var(--accent); font-weight: 600; }
-.badge { display: inline-block; font-size: .68rem; font-weight: 700; border-radius: 999px; padding: 2px 8px; background: var(--surface-2); color: var(--muted); vertical-align: middle; }
+.badge { display: inline-block; font-size: .68rem; font-weight: 700; border-radius: 999px; padding: 2px 8px; background: var(--surface-2); color: var(--muted); vertical-align: middle; margin-left: .35em; }
 .badge-bot { background: #e7f3ff; color: var(--brand-dark); }
 html[data-theme="dark"] .badge-bot { background: #263951; color: #7ab3ff; }
 .badge-admin { background: #fde8e8; color: var(--danger); }
@@ -123,8 +126,11 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 .story-viewer { position: fixed; inset: 0; z-index: 150; background: #000; color: #fff; display: flex; flex-direction: column; }
 .story-top { padding: calc(10px + env(safe-area-inset-top)) 12px 8px; display: flex; flex-direction: column; gap: 10px; background: linear-gradient(rgba(0,0,0,.45), transparent); z-index: 3; }
 .story-segments { display: flex; gap: 4px; }
-.story-seg { flex: 1; height: 3px; border-radius: 2px; background: rgba(255,255,255,.35); }
-.story-seg.done { background: #fff; }
+.story-seg { flex: 1; height: 3px; border-radius: 2px; background: rgba(255,255,255,.35); overflow: hidden; }
+.story-seg-fill { display: block; height: 100%; width: 0; background: #fff; border-radius: 2px; }
+.story-seg.done .story-seg-fill { width: 100%; }
+.story-seg.active .story-seg-fill { animation: story-seg-fill 5s linear forwards; }
+@keyframes story-seg-fill { from { width: 0; } to { width: 100%; } }
 .story-author { display: flex; align-items: center; gap: 10px; }
 .story-time { opacity: .75; font-size: .85rem; font-weight: 400; }
 .story-icon-btn { background: rgba(255,255,255,.14); border: none; color: #fff; cursor: pointer; font-size: 1rem; width: 38px; height: 38px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; }
@@ -177,7 +183,11 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 
 /* profile */
 .profile-head { padding: 0; overflow: hidden; }
-.cover { height: 210px; background: linear-gradient(120deg, var(--brand), var(--accent)); background-size: cover; background-position: center; }
+.cover { height: 210px; background: linear-gradient(120deg, var(--brand), var(--accent)); background-size: cover; background-position: center; position: relative; }
+/* Subtle dark gradient along the bottom of the cover so the profile
+   name overlapping it stays readable on bright photos. */
+.cover::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 45%; background: linear-gradient(transparent, rgba(0,0,0,.38)); pointer-events: none; }
+.cover-edit-btn { position: absolute; right: 12px; bottom: 12px; z-index: 2; }
 .profile-meta { display: flex; gap: 16px; align-items: flex-end; padding: 0 18px 18px; margin-top: -42px; flex-wrap: wrap; }
 .profile-meta .avatar, .profile-meta .avatar-fallback { border: 4px solid var(--surface); width: 110px; height: 110px; font-size: 2rem; }
 .nickname { font-weight: 400; color: var(--muted); font-size: 1.15rem; }
@@ -346,3 +356,63 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
   .profile-cols { grid-template-columns: minmax(0, 1fr); }
   .story-stage-text p { font-size: 1.3rem; }
 }
+
+/* ------------------------------------------------ UX audit fix pack */
+/* Topbar nav: text labels appear only on wide screens. */
+.topnav-link { display: inline-flex; align-items: center; gap: 5px; }
+.nav-label { display: none; font-size: .74rem; font-weight: 600; }
+@media (min-width: 1021px) { .nav-label { display: inline; } }
+
+/* Account dropdown on the topbar avatar. */
+.avatar-wrap { position: relative; }
+.avatar-btn { background: none; border: none; padding: 0; cursor: pointer; display: inline-flex; border-radius: 50%; }
+.avatar-menu { top: 46px; min-width: 230px; }
+.menu a { display: block; padding: 8px 10px; border-radius: 6px; color: var(--text); }
+.menu a:hover { background: var(--surface-2); text-decoration: none; }
+.menu-user { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+
+/* Auth page: feature bullets, Google mark, password eye toggle. */
+.auth-feats { list-style: none; padding: 0; margin: 18px 0 0; display: flex; flex-direction: column; gap: 10px; font-size: 1rem; }
+.google-g { flex: none; }
+.pw-wrap { position: relative; display: block; margin-top: .3rem; }
+.pw-wrap input { margin-top: 0; padding-right: 2.6rem; }
+.pw-eye { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; font-size: 1rem; padding: 6px; border-radius: 6px; line-height: 1; }
+
+/* Settings: one clean row per notification preference, label left,
+   checkbox right. */
+.notif-pref-row { display: flex; align-items: center; gap: 10px; padding: 8px 2px; border-bottom: 1px solid var(--border); cursor: pointer; font-weight: 400; }
+.notif-pref-row:last-of-type { border-bottom: none; }
+.notif-pref-row input[type="checkbox"] { width: 18px; height: 18px; flex: none; }
+
+/* Reaction stats + desktop hover-reveal reaction bar. */
+.stats-reactions { font-weight: 600; color: var(--text); }
+@media (min-width: 721px) {
+  .post-actions .reaction-bar { opacity: 0; visibility: hidden; transition: opacity .15s ease; }
+  .post-actions:hover .reaction-bar, .post-actions:focus-within .reaction-bar { opacity: 1; visibility: visible; }
+}
+
+/* Composer photo preview with a remove (×) button. */
+.composer-preview-wrap { position: relative; }
+.preview-remove { position: absolute; top: 8px; right: 8px; width: 30px; height: 30px; border-radius: 50%; border: none; background: rgba(0,0,0,.62); color: #fff; cursor: pointer; font-size: .9rem; display: inline-flex; align-items: center; justify-content: center; }
+.preview-remove:hover { background: rgba(0,0,0,.82); }
+
+/* Messenger emoji picker. */
+.emoji-panel { display: flex; flex-wrap: wrap; gap: 2px; padding: 8px; border-top: 1px solid var(--border); background: var(--surface); }
+.emoji-btn { background: none; border: none; cursor: pointer; font-size: 1.3rem; padding: 5px; border-radius: 8px; line-height: 1; }
+.emoji-btn:hover { background: var(--surface-2); }
+
+/* Story reply box (non-authors). */
+.story-reply { display: flex; gap: 8px; align-items: center; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); background: rgba(0,0,0,.55); z-index: 3; }
+.story-reply input { flex: 1; border-radius: 999px; background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.35); color: #fff; width: auto; }
+.story-reply input::placeholder { color: rgba(255,255,255,.65); }
+
+/* Profile Photos / Friends strips. */
+.strip-card { margin-bottom: 14px; }
+.photos-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+.photos-thumb { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 6px; display: block; }
+.friends-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.friend-tile { display: flex; flex-direction: column; align-items: center; gap: 4px; font-size: .78rem; color: var(--text); text-align: center; }
+.friend-tile:hover { text-decoration: none; opacity: .85; }
+
+/* Event host row. */
+.host-row { align-items: center; margin-top: 6px; }
