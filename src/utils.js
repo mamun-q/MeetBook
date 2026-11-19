@@ -952,6 +952,20 @@ export function typingUserIds(conv, viewerId, now = Date.now()) {
     && typeof map[id] === 'number' && map[id] > 0 && now - map[id] < TYPING_FRESH_MS);
 }
 
+// True when a focus shift stays inside ONE form: the element losing
+// focus and the element gaining it are owned by the same form (both
+// form ids known and equal). The message composer's blur handler uses
+// this to tell "pressed one of the composer's own controls" (above
+// all the Send button — focus moves input -> button before the click
+// can submit) apart from "genuinely left the composer". Clearing the
+// typing entry in the first case is destructive: setTyping notifies
+// the render listeners synchronously, and the resulting re-render
+// rebuilds the thread mid-press, destroying the form and the button
+// before they can submit.
+export function focusMovesWithinForm(currentFormId, nextFormId) {
+  return Boolean(currentFormId) && currentFormId === nextFormId;
+}
+
 // The fixed reaction set offered on messages (Facebook-style six).
 export const MESSAGE_REACTIONS = ['❤️', '😂', '😮', '😢', '😡', '👍'];
 

@@ -4,7 +4,7 @@ import * as api from './api.js';
 import { firebaseReady, firebaseConfig } from './firebase.js';
 import { subscribe as storeSubscribe, mutate as demoMutate } from './store.js';
 import { setLocale, t } from './i18n.js';
-import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError, messageSnippet } from './utils.js';
+import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError, messageSnippet, focusMovesWithinForm } from './utils.js';
 import { toast, clearToasts, openModal, closeModal, confirmModal, adminActionModal, avatarHtml } from './components.js';
 import * as V from './views.js';
 
@@ -1417,7 +1417,19 @@ document.addEventListener('input', (e) => {
   if (e.target.value) noteTyping(convId); else stopTyping();
 });
 document.addEventListener('focusout', (e) => {
-  if (e.target.matches?.('#message-form input[name="text"]')) stopTyping();
+  if (!e.target.matches?.('#message-form input[name="text"]')) return;
+  // Pressing one of the composer's own controls — above all the Send
+  // button — moves focus WITHIN the form (input -> button) before the
+  // click can submit it. Clearing typing on that blur is destructive:
+  // setTyping notifies the render listeners synchronously, softRender's
+  // focus guard no longer applies (focus just left the input), and the
+  // re-render rebuilds the thread mid-press — destroying the form and
+  // the button, so no submit ever fires (Enter, which never blurs,
+  // kept working). The user is still composing here: the send path
+  // clears the typing entry after a successful send, and the idle
+  // timer clears it otherwise.
+  if (focusMovesWithinForm(e.target.form?.id, e.relatedTarget?.form?.id)) return;
+  stopTyping();
 });
 
 // Client error collector (Pack C): keep the last 10 uncaught errors
