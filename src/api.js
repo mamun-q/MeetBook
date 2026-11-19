@@ -7,7 +7,7 @@ import {
   getState, mutate, findUser, userByUsername, friendIdsOf, blockedIdsOf, notify, resetDemo
 } from './store.js';
 import { firebaseReady, auth, db, storage, googleProvider } from './firebase.js';
-import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage } from './utils.js';
+import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, postAudience } from './utils.js';
 import { generateTemplatePost, generateTemplateComment, decideBotAction, memoryFromConversation, normaliseBot } from './botLogic.js';
 
 // --- Firebase imports are dynamic-free static imports of the SDK ---------
@@ -183,6 +183,25 @@ export function onAuthReady(cb) {
 
 // -------------------------------------------------------------------------
 // FIREBASE SYNC (mirrors Firestore into the shared dataset shape)
+//
+// PROVABLE-QUERY DESIGN: Firestore rejects a list query unless the
+// security rules are provable from the query's own constraints ("rules
+// are not filters") — a listener whose read rule depends on per-document
+// data the query doesn't constrain (or on get()/exists() joins) is denied
+// silently. Every listener below is therefore shaped so one rule branch
+// is guaranteed by its where() clauses, and audiences are DENORMALIZED
+// onto documents at write time to make that possible:
+//  - posts: three listeners merged by id — my own posts (authorId == me),
+//    public posts (visibility == 'public'), and posts whose denormalized
+//    `audienceIds` contain me (friends posts + private-group posts).
+//  - friendships: two listeners merged by id (from == me, to == me).
+//  - messages: participants array-contains me (participants are copied
+//    onto each message at send time).
+//  - groups: two listeners merged by id (public + members contains me).
+// Collections with signedIn-only read rules (users, pages, bots) can use
+// plain listeners. Admin-only collections (reports, botActivities,
+// botLogs) get silent error callbacks so non-admin sessions don't raise
+// unhandled permission errors.
 // -------------------------------------------------------------------------
 let syncStarted = false;
 function startRemoteSync() {
@@ -191,7 +210,19 @@ function startRemoteSync() {
   remote = blankRemote();
   const patch = (fn) => { fn(remote); document.dispatchEvent(new CustomEvent('meetbook:data')); };
   onSnapshot(query(collection(db, 'users'), limit(300)), (snap) => patch((r) => { r.users = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
-  onSnapshot(query(collection(db, 'posts'), orderBy('createdAt', 'desc'), limit(100)), (snap) => patch((r) => { r.posts = snap.docs.map((d) => ({ id: d.id, comments: [], likes: [], reactions: {}, savedBy: [], groupId: '', pageId: '', ...d.data() })); }));
+  // Posts: three provable listeners merged by id (see header note).
+  const mapPost = (d) => ({ id: d.id, comments: [], likes: [], reactions: {}, savedBy: [], groupId: '', pageId: '', audienceIds: [], ...d.data() });
+  let ownPosts = [];
+  let publicPosts = [];
+  let audiencePosts = [];
+  const mergePosts = () => patch((r) => {
+    const byIdMap = new Map();
+    for (const p of [...publicPosts, ...audiencePosts, ...ownPosts]) byIdMap.set(p.id, p);
+    r.posts = [...byIdMap.values()];
+  });
+  onSnapshot(query(collection(db, 'posts'), where('visibility', '==', 'public'), orderBy('createdAt', 'desc'), limit(100)),
+    (snap) => { publicPosts = snap.docs.map(mapPost); mergePosts(); },
+    () => { /* listener rejected — leave the mirrored set untouched */ });
   onSnapshot(query(collection(db, 'pages'), limit(200)), (snap) => patch((r) => { r.pages = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
   // Groups use two provably-readable queries merged by id (public groups +
   // groups I belong to): a single unfiltered listener would be rejected by
@@ -204,19 +235,43 @@ function startRemoteSync() {
     r.groups = [...byIdMap.values()];
   });
   onSnapshot(query(collection(db, 'groups'), where('privacy', '==', 'public'), limit(200)), (snap) => { publicGroups = snap.docs.map((d) => ({ id: d.id, ...d.data() })); mergeGroups(); });
-  onSnapshot(query(collection(db, 'friendships'), limit(500)), (snap) => patch((r) => { r.friendships = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
+  // Friendships: two provable listeners merged by id (from == me, to == me).
+  let friendshipsFrom = [];
+  let friendshipsTo = [];
+  const mergeFriendships = () => patch((r) => {
+    const byIdMap = new Map();
+    for (const f of [...friendshipsFrom, ...friendshipsTo]) byIdMap.set(f.id, f);
+    r.friendships = [...byIdMap.values()];
+  });
   onSnapshot(query(collection(db, 'bots'), limit(100)), (snap) => patch((r) => { r.bots = snap.docs.map((d) => normaliseBot({ id: d.id, ...d.data() })); }));
-  onSnapshot(query(collection(db, 'botActivities'), orderBy('createdAt', 'desc'), limit(100)), (snap) => patch((r) => { r.botActivities = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
-  onSnapshot(query(collection(db, 'botLogs'), orderBy('createdAt', 'desc'), limit(100)), (snap) => patch((r) => { r.botLogs = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
+  onSnapshot(query(collection(db, 'botActivities'), orderBy('createdAt', 'desc'), limit(100)),
+    (snap) => patch((r) => { r.botActivities = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }),
+    () => { /* non-admins cannot read bot activities — ignore */ });
+  onSnapshot(query(collection(db, 'botLogs'), orderBy('createdAt', 'desc'), limit(100)),
+    (snap) => patch((r) => { r.botLogs = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }),
+    () => { /* non-admins cannot read bot logs — ignore */ });
   onSnapshot(doc(db, 'botSettings', 'global'), (snap) => patch((r) => { if (snap.exists()) r.botSettings.global = snap.data(); }));
   onSnapshot(doc(db, 'config', 'app'), (snap) => patch((r) => { if (snap.exists()) r.config = { ...r.config, ...snap.data() }; }));
   if (remoteUid) {
+    onSnapshot(query(collection(db, 'posts'), where('authorId', '==', remoteUid)),
+      (snap) => { ownPosts = snap.docs.map(mapPost); mergePosts(); },
+      () => { /* listener rejected — leave the mirrored set untouched */ });
+    onSnapshot(query(collection(db, 'posts'), where('audienceIds', 'array-contains', remoteUid)),
+      (snap) => { audiencePosts = snap.docs.map(mapPost); mergePosts(); },
+      () => { /* listener rejected — leave the mirrored set untouched */ });
+    onSnapshot(query(collection(db, 'friendships'), where('from', '==', remoteUid)),
+      (snap) => { friendshipsFrom = snap.docs.map((d) => ({ id: d.id, ...d.data() })); mergeFriendships(); },
+      () => { /* listener rejected — leave the mirrored set untouched */ });
+    onSnapshot(query(collection(db, 'friendships'), where('to', '==', remoteUid)),
+      (snap) => { friendshipsTo = snap.docs.map((d) => ({ id: d.id, ...d.data() })); mergeFriendships(); },
+      () => { /* listener rejected — leave the mirrored set untouched */ });
     onSnapshot(query(collection(db, 'notifications'), where('userId', '==', remoteUid), orderBy('createdAt', 'desc'), limit(100)),
       (snap) => patch((r) => { r.notifications = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
     onSnapshot(query(collection(db, 'conversations'), where('participants', 'array-contains', remoteUid)),
       (snap) => patch((r) => { r.conversations = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
-    onSnapshot(query(collection(db, 'messages'), orderBy('createdAt', 'asc'), limit(500)),
-      (snap) => patch((r) => { r.messages = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
+    onSnapshot(query(collection(db, 'messages'), where('participants', 'array-contains', remoteUid), orderBy('createdAt', 'asc'), limit(500)),
+      (snap) => patch((r) => { r.messages = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }),
+      () => { /* listener rejected — leave the mirrored set untouched */ });
     onSnapshot(query(collection(db, 'blocks'), where('by', '==', remoteUid)),
       (snap) => patch((r) => { r.blocks = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
     onSnapshot(query(collection(db, 'groups'), where('members', 'array-contains', remoteUid), limit(200)),
@@ -315,6 +370,19 @@ export function updateSettings(userId, settingsPatch) {
 // -------------------------------------------------------------------------
 const postLimiter = { map: new Map() };
 
+// Accepted-friend ids for a user, computed from the mirrored dataset so
+// it works identically in live and demo mode (store.friendIdsOf only sees
+// the demo store).
+function friendIdsFromData(userId) {
+  const ids = new Set();
+  for (const f of data().friendships || []) {
+    if (f.status !== 'accepted') continue;
+    if (f.from === userId) ids.add(f.to);
+    if (f.to === userId) ids.add(f.from);
+  }
+  return [...ids];
+}
+
 export async function createPost({ text, image, visibility, groupId = '', pageId = '', pageName = '', pageAvatar = '' }) {
   const author = me();
   if (!author) throw new Error('Sign in to post.');
@@ -323,9 +391,16 @@ export async function createPost({ text, image, visibility, groupId = '', pageId
   // "as" a page — authorId stays the page owner's uid (so Firestore rules
   // can verify authorship) and pageName/pageAvatar snapshot the page's
   // identity at post time for rendering.
+  // The audience is denormalized onto the post (see postAudience): the
+  // stored visibility/audienceIds pair is what the Firestore read rule and
+  // the live listeners key off, since rules cannot join to friendships or
+  // groups during a feed query.
+  const group = groupId ? (data().groups || []).find((g) => g.id === groupId) || null : null;
+  const audience = postAudience({ visibility: visibility || 'public', group, authorFriendIds: friendIdsFromData(author.id) });
   const post = {
     authorId: author.id, text: String(text || '').trim(), image: image || '',
-    visibility: visibility || 'public', createdAt: Date.now(), editedAt: 0,
+    visibility: audience.visibility, audienceIds: audience.audienceIds,
+    createdAt: Date.now(), editedAt: 0,
     likes: [], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [],
     groupId: groupId || '', pageId: pageId || '', pageName: pageName || '', pageAvatar: pageAvatar || ''
   };
@@ -424,7 +499,7 @@ export async function sharePost(postId) {
   const original = data().posts.find((p) => p.id === postId);
   if (!original) throw new Error('Post not found.');
   const shared = {
-    authorId: user.id, text: original.text, image: original.image, visibility: 'public',
+    authorId: user.id, text: original.text, image: original.image, visibility: 'public', audienceIds: [],
     createdAt: Date.now(), editedAt: 0, likes: [], reactions: {}, comments: [], shares: 0,
     sharedFrom: original.authorId, savedBy: [], groupId: '', pageId: '', pageName: '', pageAvatar: ''
   };
@@ -754,11 +829,14 @@ export async function openConversation(otherId) {
 
 export async function sendMessage(conversationId, { text, image }) {
   const user = me(); if (!user) throw new Error('Sign in first.');
-  const msg = { conversationId, senderId: user.id, text: String(text || '').trim(), image: image || '', createdAt: Date.now(), status: 'sent', readBy: [user.id] };
+  const conv = data().conversations.find((c) => c.id === conversationId);
+  // Participants are DENORMALIZED onto the message: the messages read
+  // rule and the live listener filter on this array, because a get() join
+  // to the conversation document is not provable for list queries.
+  const msg = { conversationId, participants: conv ? [...conv.participants] : [], senderId: user.id, text: String(text || '').trim(), image: image || '', createdAt: Date.now(), status: 'sent', readBy: [user.id] };
   if (!msg.text && !msg.image) throw new Error('Message cannot be empty.');
   if (firebaseReady) {
     const ref = await addDoc(collection(db, 'messages'), msg);
-    const conv = data().conversations.find((c) => c.id === conversationId);
     const other = conv?.participants.find((p) => p !== user.id);
     if (other) await addDoc(collection(db, 'notifications'), { userId: other, type: 'message', actorId: user.id, text: `${user.name} sent you a message.`, postId: '', conversationId, read: false, createdAt: Date.now() });
     return { id: ref.id, ...msg };
@@ -921,7 +999,7 @@ export function runDemoBotCycle() {
       if (decision.action === 'none') { results.push({ bot: bot.name, action: 'none', reason: decision.reason }); continue; }
       if (decision.action === 'post') {
         const text = generateTemplatePost(bot);
-        st.posts.unshift({ id: genId('p'), authorId: bot.id, text: `AI Bot post · ${text}`, image: '', visibility: 'public', createdAt: Date.now(), editedAt: 0, likes: [], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [] });
+        st.posts.unshift({ id: genId('p'), authorId: bot.id, text: `AI Bot post · ${text}`, image: '', visibility: 'public', audienceIds: [], createdAt: Date.now(), editedAt: 0, likes: [], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [], groupId: '', pageId: '', pageName: '', pageAvatar: '' });
         counters.postsToday += 1;
         st.botActivities.unshift({ id: genId('act'), botId: bot.id, action: 'post', detail: text.slice(0, 90), createdAt: Date.now(), status: 'ok' });
       } else if (decision.action === 'comment') {

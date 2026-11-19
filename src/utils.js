@@ -65,7 +65,34 @@ export function avatarColor(seed) {
 }
 
 // --- Post privacy -------------------------------------------------------
-// visibility: 'public' | 'friends' | 'only-me'
+// The audience of a post is DENORMALIZED onto the document at creation
+// time as `audienceIds`, because Firestore list queries are only allowed
+// when the security rules are provable from the query constraints — the
+// rules cannot join to friendships/groups while evaluating a feed query.
+// postAudience computes the stored { visibility, audienceIds } pair:
+//  - normal public / only-me posts: audienceIds = [] (visibility decides)
+//  - normal friends posts: audienceIds = author's current friend ids
+//  - group posts: the GROUP's privacy governs — public group -> stored
+//    visibility 'public', audienceIds []; private group -> stored
+//    visibility 'private', audienceIds = the group's current members
+//  - page posts arrive here as plain public posts (no group) -> [].
+export function postAudience({ visibility = 'public', group = null, authorFriendIds = [] } = {}) {
+  if (group) {
+    if (group.privacy === 'private') {
+      return { visibility: 'private', audienceIds: [...new Set((group.members || []).filter(Boolean))] };
+    }
+    return { visibility: 'public', audienceIds: [] };
+  }
+  const vis = visibility || 'public';
+  if (vis === 'friends') {
+    return { visibility: 'friends', audienceIds: [...new Set((authorFriendIds || []).filter(Boolean))] };
+  }
+  return { visibility: vis, audienceIds: [] };
+}
+
+// visibility: 'public' | 'friends' | 'only-me' (group posts store the
+// group's effective visibility; private-group posts store 'private' and
+// are gated by canViewGroupPost, not this helper)
 // ctx: { viewerId, authorId, friendIds:Set|Array, blockedIds:Set|Array }
 export function canViewPost(post, ctx) {
   if (!post || !ctx) return false;
@@ -76,6 +103,10 @@ export function canViewPost(post, ctx) {
   if (vis === 'public') return true;
   if (vis === 'only-me') return false;
   if (vis === 'friends') {
+    // Denormalized audience first (what live mode actually delivers);
+    // fall back to the live friendship check so demo behaviour and
+    // pre-audienceIds posts behave exactly as before.
+    if (Array.isArray(post.audienceIds) && post.audienceIds.includes(ctx.viewerId)) return true;
     const friends = ctx.friendIds instanceof Set ? ctx.friendIds : new Set(ctx.friendIds || []);
     return friends.has(post.authorId);
   }
@@ -201,7 +232,10 @@ export function canViewGroupPost(post, group, viewerId, blockedIds) {
   if (post.authorId === viewerId) return true;
   if (!group) return false;
   if (group.privacy !== 'private') return true;
-  return isGroupMember(group, viewerId);
+  // Private group: current members, plus anyone in the post's
+  // denormalized audience (members at creation time — this is also the
+  // only path by which live mode delivers these posts at all).
+  return isGroupMember(group, viewerId) || (post.audienceIds || []).includes(viewerId);
 }
 
 // Case-insensitive name search used by the Groups/Pages discover pages.

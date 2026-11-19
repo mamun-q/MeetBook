@@ -73,7 +73,7 @@ export function postCardHtml(post, ctx) {
   const comments = (post.comments || []).map((c) => commentHtml(c, post, ctx)).join('');
   const sharedNote = post.sharedFrom ? `<div class="shared-note">🔁 Shared from ${escapeHtml(usersById[post.sharedFrom]?.name || 'a post')}</div>` : '';
   const groupNote = group && ctx.showGroupContext !== false ? `<div class="shared-note">🏘️ Posted in <a href="#/group/${group.id}">${escapeHtml(group.name)}</a></div>` : '';
-  const visIcon = post.visibility === 'friends' ? '👥' : post.visibility === 'only-me' ? '🔒' : '🌍';
+  const visIcon = post.visibility === 'friends' ? '👥' : (post.visibility === 'only-me' || post.visibility === 'private') ? '🔒' : '🌍';
   const authorBlock = page
     ? `<a href="#/page/${page.id}" class="row gap-sm">${avatarHtml({ name: page.name, username: page.name, avatar: page.avatar }, 44)}<span>
         <span class="user-name">${escapeHtml(page.name)} <span class="badge">${t('pageLabel')}</span></span><br/>
