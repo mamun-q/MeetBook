@@ -56,6 +56,8 @@ function headerHtml(d, user) {
     <nav class="topnav">
       <a href="#/" title="${t('home')}">🏠</a>
       <a href="#/friends" title="${t('friends')}">👥</a>
+      <a href="#/groups" title="${t('groups')}">🏘️</a>
+      <a href="#/pages" title="${t('pages')}">📄</a>
       <a href="#/messages" title="${t('messages')}">💬${um ? `<span class="nav-badge">${um}</span>` : ''}</a>
       <a href="#/notifications" title="${t('notifications')}">🔔${un ? `<span class="nav-badge">${un}</span>` : ''}</a>
       ${user.role === 'admin' ? '<a href="#/admin" title="Admin">🛡️</a><a href="#/bots" title="AI Bots">🤖</a>' : ''}
@@ -88,6 +90,10 @@ export function render() {
   switch (route) {
     case '': body = V.feedView(d, user, feedPage); break;
     case 'friends': body = V.friendsView(d, user); break;
+    case 'groups': body = V.groupsView(d, user, query.get('q') || ''); break;
+    case 'group': body = V.groupView(d, user, seg[1] || ''); break;
+    case 'pages': body = V.pagesView(d, user, query.get('q') || ''); break;
+    case 'page': body = V.pageView(d, user, seg[1] || ''); break;
     case 'messages': body = V.messagesView(d, user, seg[1] || ''); setTimeout(scrollThread, 30); break;
     case 'notifications': body = V.notificationsView(d, user); break;
     case 'profile': body = V.profileView(d, user, seg[1] || user.id); break;
@@ -229,6 +235,15 @@ document.addEventListener('click', async (e) => {
     case 'reject-request': await handle(api.respondFriendRequest(actEl.dataset.id, false), 'Request removed.'); break;
     case 'remove-friend': if (await confirmModal('Remove connection?', 'This friendship/request will be removed.')) await handle(api.removeFriendship(actEl.dataset.id), 'Removed.'); break;
     case 'follow': await handle(api.toggleFollow(actEl.dataset.id)); break;
+    case 'create-group': { const modal = openModal(V.groupFormHtml(null)); modal.querySelector('[data-close]').onclick = closeModal; break; }
+    case 'edit-group': { const g = (d.groups || []).find((x) => x.id === actEl.dataset.id); const modal = openModal(V.groupFormHtml(g)); modal.querySelector('[data-close]').onclick = closeModal; break; }
+    case 'delete-group': if (await confirmModal('Delete group?', 'The group and all of its posts will be removed. This cannot be undone.')) { await handle(api.deleteGroup(actEl.dataset.id), 'Group deleted.'); location.hash = '#/groups'; } break;
+    case 'toggle-group-join': await handle(api.toggleGroupMembership(actEl.dataset.id)); break;
+    case 'remove-member': if (await confirmModal('Remove this member?', 'They will lose access to this group and its posts.')) await handle(api.removeGroupMember(actEl.dataset.group, actEl.dataset.id), 'Member removed.'); break;
+    case 'create-page': { const modal = openModal(V.pageFormHtml(null)); modal.querySelector('[data-close]').onclick = closeModal; break; }
+    case 'edit-page': { const p = (d.pages || []).find((x) => x.id === actEl.dataset.id); const modal = openModal(V.pageFormHtml(p)); modal.querySelector('[data-close]').onclick = closeModal; break; }
+    case 'delete-page': if (await confirmModal('Delete page?', 'The page and all of its posts will be removed. This cannot be undone.')) { await handle(api.deletePage(actEl.dataset.id), 'Page deleted.'); location.hash = '#/pages'; } break;
+    case 'follow-page': await handle(api.toggleFollowPage(actEl.dataset.id)); break;
     case 'block': {
       const target = d.users.find((u) => u.id === actEl.dataset.id);
       const willBlock = !(d.blocks || []).some((b) => b.by === user.id && b.target === target?.id);
@@ -301,6 +316,56 @@ document.addEventListener('submit', async (e) => {
     const image = file ? await api.uploadImage(file, `posts/${user.id}/${Date.now()}_${file.name}`).catch((err) => { toast(err.message, 'error'); return ''; }) : '';
     const r = await handle(api.createPost({ text: String(fd.get('text') || ''), image, visibility: String(fd.get('visibility') || 'public') }), 'Post published.');
     if (r) { feedPage = 1; render(); }
+    return;
+  }
+  if (form.id === 'groups-search-form') {
+    location.hash = `#/groups?q=${encodeURIComponent(String(fd.get('q') || '').trim())}`;
+    return;
+  }
+  if (form.id === 'pages-search-form') {
+    location.hash = `#/pages?q=${encodeURIComponent(String(fd.get('q') || '').trim())}`;
+    return;
+  }
+  if (form.id === 'group-composer-form') {
+    const file = fileFrom(form, 'image');
+    const image = file ? await api.uploadImage(file, `posts/${user.id}/${Date.now()}_${file.name}`).catch((err) => { toast(err.message, 'error'); return ''; }) : '';
+    await handle(api.createPost({ text: String(fd.get('text') || ''), image, visibility: 'public', groupId: form.dataset.group }), 'Posted to the group.');
+    return;
+  }
+  if (form.id === 'page-composer-form') {
+    const file = fileFrom(form, 'image');
+    const image = file ? await api.uploadImage(file, `posts/${user.id}/${Date.now()}_${file.name}`).catch((err) => { toast(err.message, 'error'); return ''; }) : '';
+    await handle(api.createPagePost(form.dataset.page, { text: String(fd.get('text') || ''), image }), 'Posted as page.');
+    return;
+  }
+  if (form.id === 'group-form') {
+    const existing = (api.data().groups || []).find((g) => g.id === form.dataset.id);
+    const fields = { name: String(fd.get('name')), description: String(fd.get('description') || ''), privacy: String(fd.get('privacy') || 'public') };
+    const coverFile = fileFrom(form, 'cover');
+    if (coverFile) fields.cover = await api.uploadImage(coverFile, `groups/${existing?.id || 'new'}/cover`).catch((err) => { toast(err.message, 'error'); return existing?.cover || ''; });
+    if (existing) {
+      const r = await handle(api.updateGroup(existing.id, fields), 'Group updated.');
+      if (r) closeModal();
+    } else {
+      const r = await handle(api.createGroup({ ...fields, cover: fields.cover || '' }), 'Group created.');
+      if (r) { closeModal(); location.hash = `#/group/${r.id}`; }
+    }
+    return;
+  }
+  if (form.id === 'page-form') {
+    const existing = (api.data().pages || []).find((p) => p.id === form.dataset.id);
+    const fields = { name: String(fd.get('name')), category: String(fd.get('category') || ''), about: String(fd.get('about') || '') };
+    const avatarFile = fileFrom(form, 'avatar');
+    const coverFile = fileFrom(form, 'cover');
+    if (avatarFile) fields.avatar = await api.uploadImage(avatarFile, `pages/${existing?.id || 'new'}/avatar`).catch((err) => { toast(err.message, 'error'); return existing?.avatar || ''; });
+    if (coverFile) fields.cover = await api.uploadImage(coverFile, `pages/${existing?.id || 'new'}/cover`).catch((err) => { toast(err.message, 'error'); return existing?.cover || ''; });
+    if (existing) {
+      const r = await handle(api.updatePage(existing.id, fields), 'Page updated.');
+      if (r) closeModal();
+    } else {
+      const r = await handle(api.createPage({ ...fields, avatar: fields.avatar || '', cover: fields.cover || '' }), 'Page created.');
+      if (r) { closeModal(); location.hash = `#/page/${r.id}`; }
+    }
     return;
   }
   if (form.dataset.commentForm) {

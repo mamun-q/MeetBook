@@ -7,7 +7,7 @@ import {
   getState, mutate, findUser, userByUsername, friendIdsOf, blockedIdsOf, notify, resetDemo
 } from './store.js';
 import { firebaseReady, auth, db, storage, googleProvider } from './firebase.js';
-import { uid as genId, validateUsername, extractMentions } from './utils.js';
+import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage } from './utils.js';
 import { generateTemplatePost, generateTemplateComment, decideBotAction, memoryFromConversation, normaliseBot } from './botLogic.js';
 
 // --- Firebase imports are dynamic-free static imports of the SDK ---------
@@ -52,7 +52,7 @@ export function isAdmin(user = me()) {
 
 function blankRemote() {
   return {
-    users: [], sessionUid: '', posts: [], friendships: [], blocks: [],
+    users: [], sessionUid: '', posts: [], groups: [], pages: [], friendships: [], blocks: [],
     conversations: [], messages: [], notifications: [], reports: [],
     bots: [], botBrains: {}, botMemories: {}, botActivities: [], botLogs: [],
     botSettings: { global: { enabled: true }, counters: {} },
@@ -191,7 +191,19 @@ function startRemoteSync() {
   remote = blankRemote();
   const patch = (fn) => { fn(remote); document.dispatchEvent(new CustomEvent('meetbook:data')); };
   onSnapshot(query(collection(db, 'users'), limit(300)), (snap) => patch((r) => { r.users = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
-  onSnapshot(query(collection(db, 'posts'), orderBy('createdAt', 'desc'), limit(100)), (snap) => patch((r) => { r.posts = snap.docs.map((d) => ({ id: d.id, comments: [], likes: [], reactions: {}, savedBy: [], ...d.data() })); }));
+  onSnapshot(query(collection(db, 'posts'), orderBy('createdAt', 'desc'), limit(100)), (snap) => patch((r) => { r.posts = snap.docs.map((d) => ({ id: d.id, comments: [], likes: [], reactions: {}, savedBy: [], groupId: '', pageId: '', ...d.data() })); }));
+  onSnapshot(query(collection(db, 'pages'), limit(200)), (snap) => patch((r) => { r.pages = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
+  // Groups use two provably-readable queries merged by id (public groups +
+  // groups I belong to): a single unfiltered listener would be rejected by
+  // the rules because private groups I cannot see exist in the collection.
+  let publicGroups = [];
+  let memberGroups = [];
+  const mergeGroups = () => patch((r) => {
+    const byIdMap = new Map();
+    for (const g of [...publicGroups, ...memberGroups]) byIdMap.set(g.id, g);
+    r.groups = [...byIdMap.values()];
+  });
+  onSnapshot(query(collection(db, 'groups'), where('privacy', '==', 'public'), limit(200)), (snap) => { publicGroups = snap.docs.map((d) => ({ id: d.id, ...d.data() })); mergeGroups(); });
   onSnapshot(query(collection(db, 'friendships'), limit(500)), (snap) => patch((r) => { r.friendships = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
   onSnapshot(query(collection(db, 'bots'), limit(100)), (snap) => patch((r) => { r.bots = snap.docs.map((d) => normaliseBot({ id: d.id, ...d.data() })); }));
   onSnapshot(query(collection(db, 'botActivities'), orderBy('createdAt', 'desc'), limit(100)), (snap) => patch((r) => { r.botActivities = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
@@ -207,6 +219,8 @@ function startRemoteSync() {
       (snap) => patch((r) => { r.messages = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
     onSnapshot(query(collection(db, 'blocks'), where('by', '==', remoteUid)),
       (snap) => patch((r) => { r.blocks = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
+    onSnapshot(query(collection(db, 'groups'), where('members', 'array-contains', remoteUid), limit(200)),
+      (snap) => { memberGroups = snap.docs.map((d) => ({ id: d.id, ...d.data() })); mergeGroups(); });
     onSnapshot(query(collection(db, 'reports'), orderBy('createdAt', 'desc'), limit(100)),
       (snap) => patch((r) => { r.reports = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }), () => { /* non-admins cannot read reports — ignore */ });
   }
@@ -301,13 +315,19 @@ export function updateSettings(userId, settingsPatch) {
 // -------------------------------------------------------------------------
 const postLimiter = { map: new Map() };
 
-export async function createPost({ text, image, visibility }) {
+export async function createPost({ text, image, visibility, groupId = '', pageId = '', pageName = '', pageAvatar = '' }) {
   const author = me();
   if (!author) throw new Error('Sign in to post.');
+  // groupId: the post belongs to a group feed (visibility is then governed
+  // by the group's privacy, not this field). pageId: the post is authored
+  // "as" a page — authorId stays the page owner's uid (so Firestore rules
+  // can verify authorship) and pageName/pageAvatar snapshot the page's
+  // identity at post time for rendering.
   const post = {
     authorId: author.id, text: String(text || '').trim(), image: image || '',
     visibility: visibility || 'public', createdAt: Date.now(), editedAt: 0,
-    likes: [], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: []
+    likes: [], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [],
+    groupId: groupId || '', pageId: pageId || '', pageName: pageName || '', pageAvatar: pageAvatar || ''
   };
   if (!post.text && !post.image) throw new Error('Write something or add a photo first.');
   if (firebaseReady) {
@@ -406,7 +426,7 @@ export async function sharePost(postId) {
   const shared = {
     authorId: user.id, text: original.text, image: original.image, visibility: 'public',
     createdAt: Date.now(), editedAt: 0, likes: [], reactions: {}, comments: [], shares: 0,
-    sharedFrom: original.authorId, savedBy: []
+    sharedFrom: original.authorId, savedBy: [], groupId: '', pageId: '', pageName: '', pageAvatar: ''
   };
   if (firebaseReady) {
     await addDoc(collection(db, 'posts'), shared);
@@ -476,6 +496,160 @@ export async function reportContent(targetType, targetId, reason) {
   const report = { reporterId: user.id, targetType, targetId, reason: String(reason || 'Inappropriate content'), status: 'open', createdAt: Date.now() };
   if (firebaseReady) { await addDoc(collection(db, 'reports'), report); return; }
   mutate((s) => { s.reports.unshift({ id: genId('rep'), ...report }); });
+}
+
+// -------------------------------------------------------------------------
+// GROUPS
+// -------------------------------------------------------------------------
+export async function createGroup({ name, description, privacy, cover }) {
+  const user = me(); if (!user) throw new Error('Sign in to create a group.');
+  const group = normaliseGroup({ name, description, privacy, cover }, user.id);
+  if (!group.name) throw new Error('Give your group a name.');
+  if (firebaseReady) {
+    const ref = await addDoc(collection(db, 'groups'), group);
+    return { id: ref.id, ...group };
+  }
+  const full = { id: genId('g'), ...group };
+  mutate((s) => { (s.groups = s.groups || []).unshift(full); });
+  return full;
+}
+
+export async function updateGroup(groupId, patch) {
+  if (firebaseReady) { await updateDoc(doc(db, 'groups', groupId), patch); return { id: groupId, ...patch }; }
+  let updated = null;
+  mutate((s) => {
+    const g = (s.groups || []).find((x) => x.id === groupId);
+    if (g) { Object.assign(g, patch); updated = g; }
+  });
+  return updated;
+}
+
+export async function deleteGroup(groupId) {
+  if (firebaseReady) {
+    // Remove the group's posts first so no orphaned group posts remain.
+    const snap = await getDocs(query(collection(db, 'posts'), where('groupId', '==', groupId)));
+    for (const d of snap.docs) await deleteDoc(doc(db, 'posts', d.id));
+    await deleteDoc(doc(db, 'groups', groupId));
+    return true;
+  }
+  mutate((s) => {
+    s.groups = (s.groups || []).filter((g) => g.id !== groupId);
+    s.posts = s.posts.filter((p) => p.groupId !== groupId);
+  });
+  return true;
+}
+
+export async function toggleGroupMembership(groupId) {
+  const user = me(); if (!user) throw new Error('Sign in to join groups.');
+  const group = (data().groups || []).find((g) => g.id === groupId);
+  if (!group) throw new Error('Group not found.');
+  const isMember = (group.members || []).includes(user.id);
+  if (group.createdBy === user.id) {
+    if (!isMember) return true; // the creator always counts as a member
+    throw new Error('Group creators cannot leave their own group — delete the group instead.');
+  }
+  if (firebaseReady) {
+    await updateDoc(doc(db, 'groups', groupId), { members: isMember ? arrayRemove(user.id) : arrayUnion(user.id) });
+    if (!isMember) await addDoc(collection(db, 'notifications'), { userId: group.createdBy, type: 'group_join', actorId: user.id, text: `${user.name} joined your group "${group.name}".`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
+    return !isMember;
+  }
+  let joined = false;
+  mutate((s) => {
+    const g = (s.groups || []).find((x) => x.id === groupId);
+    if (!g) return;
+    g.members = g.members || [];
+    const i = g.members.indexOf(user.id);
+    if (i >= 0) g.members.splice(i, 1);
+    else { g.members.push(user.id); joined = true; notify(group.createdBy, 'group_join', user.id, `${user.name} joined your group "${group.name}".`); }
+  });
+  return joined;
+}
+
+export async function removeGroupMember(groupId, memberId) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const group = (data().groups || []).find((g) => g.id === groupId);
+  if (!group) throw new Error('Group not found.');
+  if (group.createdBy !== user.id) throw new Error('Only the group creator can remove members.');
+  if (memberId === group.createdBy) throw new Error('The group creator cannot be removed.');
+  if (firebaseReady) { await updateDoc(doc(db, 'groups', groupId), { members: arrayRemove(memberId) }); return true; }
+  mutate((s) => {
+    const g = (s.groups || []).find((x) => x.id === groupId);
+    if (g) g.members = (g.members || []).filter((m) => m !== memberId);
+  });
+  return true;
+}
+
+// -------------------------------------------------------------------------
+// PAGES
+// -------------------------------------------------------------------------
+export async function createPage({ name, category, about, avatar, cover }) {
+  const user = me(); if (!user) throw new Error('Sign in to create a page.');
+  const page = normalisePage({ name, category, about, avatar, cover }, user.id);
+  if (!page.name) throw new Error('Give your page a name.');
+  if (firebaseReady) {
+    const ref = await addDoc(collection(db, 'pages'), page);
+    return { id: ref.id, ...page };
+  }
+  const full = { id: genId('pg'), ...page };
+  mutate((s) => { (s.pages = s.pages || []).unshift(full); });
+  return full;
+}
+
+export async function updatePage(pageId, patch) {
+  if (firebaseReady) { await updateDoc(doc(db, 'pages', pageId), patch); return { id: pageId, ...patch }; }
+  let updated = null;
+  mutate((s) => {
+    const p = (s.pages || []).find((x) => x.id === pageId);
+    if (p) { Object.assign(p, patch); updated = p; }
+  });
+  return updated;
+}
+
+export async function deletePage(pageId) {
+  if (firebaseReady) {
+    const snap = await getDocs(query(collection(db, 'posts'), where('pageId', '==', pageId)));
+    for (const d of snap.docs) await deleteDoc(doc(db, 'posts', d.id));
+    await deleteDoc(doc(db, 'pages', pageId));
+    return true;
+  }
+  mutate((s) => {
+    s.pages = (s.pages || []).filter((p) => p.id !== pageId);
+    s.posts = s.posts.filter((p) => p.pageId !== pageId);
+  });
+  return true;
+}
+
+export async function toggleFollowPage(pageId) {
+  const user = me(); if (!user) throw new Error('Sign in to follow pages.');
+  const page = (data().pages || []).find((p) => p.id === pageId);
+  if (!page) throw new Error('Page not found.');
+  if (page.ownerId === user.id) return true; // owners always count as following
+  const following = (page.followers || []).includes(user.id);
+  if (firebaseReady) {
+    await updateDoc(doc(db, 'pages', pageId), { followers: following ? arrayRemove(user.id) : arrayUnion(user.id) });
+    if (!following) await addDoc(collection(db, 'notifications'), { userId: page.ownerId, type: 'page_follow', actorId: user.id, text: `${user.name} started following your page "${page.name}".`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
+    return !following;
+  }
+  let nowFollowing = false;
+  mutate((s) => {
+    const p = (s.pages || []).find((x) => x.id === pageId);
+    if (!p) return;
+    p.followers = p.followers || [];
+    const i = p.followers.indexOf(user.id);
+    if (i >= 0) p.followers.splice(i, 1);
+    else { p.followers.push(user.id); nowFollowing = true; notify(page.ownerId, 'page_follow', user.id, `${user.name} started following your page "${page.name}".`); }
+  });
+  return nowFollowing;
+}
+
+// Post "as" a page: only the page owner may do this (also enforced by the
+// posts create rule, since authorId must be the signed-in user).
+export async function createPagePost(pageId, { text, image }) {
+  const user = me(); if (!user) throw new Error('Sign in to post.');
+  const page = (data().pages || []).find((p) => p.id === pageId);
+  if (!page) throw new Error('Page not found.');
+  if (page.ownerId !== user.id) throw new Error('Only the page owner can post as this page.');
+  return createPost({ text, image, visibility: 'public', pageId: page.id, pageName: page.name, pageAvatar: page.avatar || '' });
 }
 
 // -------------------------------------------------------------------------

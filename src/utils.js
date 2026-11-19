@@ -144,3 +144,71 @@ export function truncate(text, max = 140) {
 export function uid(prefix = 'id') {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
 }
+
+// --- Groups & Pages -------------------------------------------------------
+// Group shape: { name, description, privacy: 'public'|'private', cover,
+//   createdBy, members: [uid], createdAt } — membership lives on the group
+//   document itself; the creator is always a member and acts as group admin.
+// Page shape: { name, category, about, avatar, cover, ownerId,
+//   followers: [uid], createdAt }.
+export function normaliseGroup(input = {}, creatorId = '', now = Date.now()) {
+  const members = [...new Set([creatorId, ...(Array.isArray(input.members) ? input.members : [])].filter(Boolean))];
+  return {
+    name: String(input.name || '').trim().slice(0, 80),
+    description: String(input.description || '').trim().slice(0, 500),
+    privacy: input.privacy === 'private' ? 'private' : 'public',
+    cover: String(input.cover || ''),
+    createdBy: creatorId || String(input.createdBy || ''),
+    members,
+    createdAt: Number(input.createdAt) || now
+  };
+}
+
+export function normalisePage(input = {}, ownerId = '', now = Date.now()) {
+  return {
+    name: String(input.name || '').trim().slice(0, 80),
+    category: String(input.category || '').trim().slice(0, 60) || 'Community',
+    about: String(input.about || '').trim().slice(0, 500),
+    avatar: String(input.avatar || ''),
+    cover: String(input.cover || ''),
+    ownerId: ownerId || String(input.ownerId || ''),
+    followers: [...new Set((Array.isArray(input.followers) ? input.followers : []).filter(Boolean))],
+    createdAt: Number(input.createdAt) || now
+  };
+}
+
+export function isGroupMember(group, uidValue) {
+  if (!group || !uidValue) return false;
+  return group.createdBy === uidValue || (group.members || []).includes(uidValue);
+}
+
+// Discoverability: public groups are visible to everyone signed in; private
+// groups only to their members/creator.
+export function canViewGroup(group, viewerId) {
+  if (!group || !viewerId) return false;
+  if (group.privacy !== 'private') return true;
+  return isGroupMember(group, viewerId);
+}
+
+// Group posts ignore the post-level visibility field — the GROUP's privacy
+// governs. Public group -> any signed-in viewer; private group -> members
+// (and the creator) only. The author always sees their own post, and posts
+// by blocked authors stay hidden, mirroring canViewPost.
+export function canViewGroupPost(post, group, viewerId, blockedIds) {
+  if (!post || !viewerId) return false;
+  const blocked = blockedIds instanceof Set ? blockedIds : new Set(blockedIds || []);
+  if (blocked.has(post.authorId)) return false;
+  if (post.authorId === viewerId) return true;
+  if (!group) return false;
+  if (group.privacy !== 'private') return true;
+  return isGroupMember(group, viewerId);
+}
+
+// Case-insensitive name search used by the Groups/Pages discover pages.
+// An empty query returns a copy of the full list.
+export function searchByName(items, queryText) {
+  const q = String(queryText || '').trim().toLowerCase();
+  const list = [...(items || [])];
+  if (!q) return list;
+  return list.filter((x) => String(x?.name || '').toLowerCase().includes(q));
+}

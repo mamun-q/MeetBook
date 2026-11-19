@@ -57,6 +57,22 @@ open **AI Bots**, and press *Run one demo cycle* to watch bots act.
   realtime updates in live mode.
 - **Friends** — requests (send/accept/reject), remove friend, follow/unfollow,
   suggestions, block/unblock, user search.
+- **Groups** — create public/private groups with a cover photo, description
+  and member list. Membership lives on the group document (`members` array +
+  `createdBy`); the creator is group admin (edit info, remove members,
+  delete the group — its posts go with it). Group posts carry `groupId` and
+  appear **only in the group feed**: public-group posts are readable by any
+  signed-in user, private-group posts only by members, enforced both in the
+  UI helpers (`canViewGroupPost`) and in `firestore.rules`. A discover page
+  (`#/groups`) lists all public groups plus your own, with name search.
+- **Pages** — create pages with a name, category (free text with
+  suggestions), about text, avatar and cover. Anyone can follow/unfollow a
+  page (`followers` array on the page document); the owner can edit or
+  delete it and **post as the page** — posts carry `pageId` plus a
+  `pageName`/`pageAvatar` snapshot (`authorId` stays the owner's uid) and
+  render with the page's identity. Page posts are ordinary public posts, so
+  they appear on the page profile (`#/page/…`) and in the home feed. A
+  discover page (`#/pages`) lists pages with name search.
 - **Messaging** — 1-to-1 conversations, text + image messages, sent /
   delivered / read status, conversation history, realtime.
 - **Notifications** — friend requests, likes, comments, replies, messages,
@@ -176,10 +192,13 @@ tests/                   Vitest unit tests for the pure logic
 
 ### Data model (Firestore)
 
-`users`, `posts` (comments/reactions embedded), `friendships`
-(deterministic ids `{from}_{to}` so rules can verify friendships),
-`blocks` (`{by}_{target}`), `conversations`, `messages`, `notifications`,
-`reports`, `config/app`, plus the bot collections listed above.
+`users`, `posts` (comments/reactions embedded; optional `groupId` for group
+posts, `pageId` + name/avatar snapshot for page posts), `groups`
+(membership on the document), `pages` (followers on the document),
+`friendships` (deterministic ids `{from}_{to}` so rules can verify
+friendships), `blocks` (`{by}_{target}`), `conversations`, `messages`,
+`notifications`, `reports`, `config/app`, plus the bot collections listed
+above.
 
 ## Security notes
 

@@ -56,6 +56,14 @@ export function userNameHtml(user) {
 export function postCardHtml(post, ctx) {
   const { usersById, me, friendIds } = ctx;
   const author = usersById[post.authorId];
+  // Page posts render AS the page (authorId is the owner's uid; the page's
+  // identity comes from ctx.pagesById, falling back to the name/avatar
+  // snapshot stored on the post). Group posts get a context note linking
+  // back to their group (suppressed inside the group feed itself).
+  const page = post.pageId
+    ? ((ctx.pagesById || {})[post.pageId] || { id: post.pageId, name: post.pageName || 'Page', avatar: post.pageAvatar || '', category: '' })
+    : null;
+  const group = post.groupId ? (ctx.groupsById || {})[post.groupId] : null;
   const liked = post.likes?.includes(me?.id);
   const saved = post.savedBy?.includes(me?.id);
   const myReaction = post.reactions?.[me?.id] || '';
@@ -64,15 +72,23 @@ export function postCardHtml(post, ctx) {
   const reactionLine = Object.entries(reactionCounts).map(([e, n]) => `${e} ${n}`).join(' · ');
   const comments = (post.comments || []).map((c) => commentHtml(c, post, ctx)).join('');
   const sharedNote = post.sharedFrom ? `<div class="shared-note">🔁 Shared from ${escapeHtml(usersById[post.sharedFrom]?.name || 'a post')}</div>` : '';
+  const groupNote = group && ctx.showGroupContext !== false ? `<div class="shared-note">🏘️ Posted in <a href="#/group/${group.id}">${escapeHtml(group.name)}</a></div>` : '';
   const visIcon = post.visibility === 'friends' ? '👥' : post.visibility === 'only-me' ? '🔒' : '🌍';
+  const authorBlock = page
+    ? `<a href="#/page/${page.id}" class="row gap-sm">${avatarHtml({ name: page.name, username: page.name, avatar: page.avatar }, 44)}<span>
+        <span class="user-name">${escapeHtml(page.name)} <span class="badge">${t('pageLabel')}</span></span><br/>
+        <span class="muted small">${escapeHtml(page.category || t('pageLabel'))} · ${timeAgo(post.createdAt)} · ${visIcon}${post.editedAt ? ' · edited' : ''}</span>
+      </span></a>`
+    : `<a href="#/profile/${post.authorId}" class="row gap-sm">${avatarHtml(author, 44)}<span>
+        ${userNameHtml(author)}<br/>
+        <span class="muted small">@${escapeHtml(author?.username || '')} · ${timeAgo(post.createdAt)} · ${visIcon}${post.editedAt ? ' · edited' : ''}</span>
+      </span></a>`;
   return `
   <article class="card post-card" data-post="${post.id}">
     ${sharedNote}
+    ${groupNote}
     <header class="post-head">
-      <a href="#/profile/${post.authorId}" class="row gap-sm">${avatarHtml(author, 44)}<span>
-        ${userNameHtml(author)}<br/>
-        <span class="muted small">@${escapeHtml(author?.username || '')} · ${timeAgo(post.createdAt)} · ${visIcon}${post.editedAt ? ' · edited' : ''}</span>
-      </span></a>
+      ${authorBlock}
       <div class="post-menu-wrap">
         <button class="icon-btn" data-menu="${post.id}" aria-label="Post options">•••</button>
         <div class="menu hidden" id="menu-${post.id}">

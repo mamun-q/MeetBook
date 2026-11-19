@@ -1,7 +1,7 @@
 // HTML generators for every route. Pure string builders: they read the shared
 // dataset (api.data()) and never touch the DOM directly — main.js renders
 // and binds events centrally.
-import { escapeHtml, timeAgo, canViewPost, paginate } from './utils.js';
+import { escapeHtml, timeAgo, canViewPost, canViewGroup, canViewGroupPost, isGroupMember, searchByName, truncate, paginate } from './utils.js';
 import { t } from './i18n.js';
 import { avatarHtml, userNameHtml, postCardHtml, emptyState } from './components.js';
 import { friendIdsOf, blockedIdsOf } from './store.js';
@@ -13,7 +13,11 @@ export function usersById(d) {
 export function viewCtx(d, meUser) {
   const byId = usersById(d);
   const friendIds = meUser ? friendIdsOfData(d, meUser.id) : new Set();
-  return { usersById: byId, me: meUser, friendIds };
+  return {
+    usersById: byId, me: meUser, friendIds,
+    pagesById: Object.fromEntries((d.pages || []).map((p) => [p.id, p])),
+    groupsById: Object.fromEntries((d.groups || []).map((g) => [g.id, g]))
+  };
 }
 
 export function friendIdsOfData(d, uidValue) {
@@ -69,8 +73,11 @@ export function authView(mode = 'login') {
 export function feedView(d, meUser, page = 1) {
   const ctx = viewCtx(d, meUser);
   const blocked = blockedIdsOfData(d, meUser.id);
+  // Group posts live ONLY in their group feeds (their visibility is governed
+  // by group privacy, not the post-level field), so the home feed excludes
+  // them. Page posts are ordinary public posts and flow in naturally.
   const visible = d.posts
-    .filter((p) => canViewPost(p, { viewerId: meUser.id, authorId: p.authorId, friendIds: ctx.friendIds, blockedIds: blocked }))
+    .filter((p) => !p.groupId && canViewPost(p, { viewerId: meUser.id, authorId: p.authorId, friendIds: ctx.friendIds, blockedIds: blocked }))
     .sort((a, b) => b.createdAt - a.createdAt);
   const pg = paginate(visible, page, 10);
   const stories = d.users.filter((u) => u.id !== meUser.id && !blocked.has(u.id)).slice(0, 8);
@@ -112,6 +119,8 @@ export function leftRail(d, meUser) {
     <a class="rail-item" href="#/profile/${meUser.id}">${avatarHtml(meUser, 36)}<span>${escapeHtml(meUser.name)}</span></a>
     <a class="rail-item" href="#/">📰 Feed</a>
     <a class="rail-item" href="#/friends">👥 ${t('friends')}</a>
+    <a class="rail-item" href="#/groups">🏘️ ${t('groups')}</a>
+    <a class="rail-item" href="#/pages">📄 ${t('pages')}</a>
     <a class="rail-item" href="#/messages">💬 ${t('messages')}</a>
     <a class="rail-item" href="#/saved">🔖 ${t('saved')} posts</a>
     <a class="rail-item" href="#/notifications">🔔 ${t('notifications')}</a>
@@ -155,7 +164,7 @@ export function profileView(d, meUser, userId) {
   const rel = d.friendships.find((f) => (f.from === meUser.id && f.to === user.id) || (f.from === user.id && f.to === meUser.id));
   const following = (meUser.following || []).includes(user.id);
   const blocked = blockedIdsOfData(d, meUser.id).has(user.id);
-  const posts = d.posts.filter((p) => p.authorId === user.id && canViewPost(p, { viewerId: meUser.id, authorId: p.authorId, friendIds: myFriends, blockedIds: blockedIdsOfData(d, meUser.id) })).sort((a, b) => b.createdAt - a.createdAt);
+  const posts = d.posts.filter((p) => p.authorId === user.id && !p.groupId && canViewPost(p, { viewerId: meUser.id, authorId: p.authorId, friendIds: myFriends, blockedIds: blockedIdsOfData(d, meUser.id) })).sort((a, b) => b.createdAt - a.createdAt);
   return `
   <div class="profile-wrap">
     <div class="card profile-head">
@@ -202,6 +211,190 @@ export function friendsView(d, meUser) {
     <h3>Suggested for you</h3>
     <div class="grid-people">${suggestions.map((u) => person(u, u.isBot ? `<button class="btn btn-ghost btn-sm" data-act="message-user" data-id="${u.id}">Chat with bot</button>` : `<button class="btn btn-primary btn-sm" data-act="send-request" data-id="${u.id}">${t('addFriend')}</button>`)).join('') || '<p class="muted">No suggestions.</p>'}</div>
   </div>`;
+}
+
+// ------------------------------------------------------------------ GROUPS
+export function groupsView(d, meUser, queryText = '') {
+  const visible = (d.groups || []).filter((g) => canViewGroup(g, meUser.id));
+  const mine = searchByName(visible.filter((g) => isGroupMember(g, meUser.id)), queryText);
+  const discover = searchByName(visible.filter((g) => !isGroupMember(g, meUser.id)), queryText);
+  const card = (g) => `<div class="card person-card">
+    ${avatarHtml({ name: g.name, username: g.name, avatar: g.cover }, 56)}
+    <a href="#/group/${g.id}"><b>${escapeHtml(g.name)}</b></a>
+    <span class="muted small">${g.privacy === 'private' ? '🔒 ' + t('privateLabel') : '🌍 ' + t('publicLabel')} · ${(g.members || []).length} ${t('members')}</span>
+    <span class="muted small">${escapeHtml(truncate(g.description || '', 90))}</span>
+    <div class="row gap wrap center">
+      ${isGroupMember(g, meUser.id) ? `<span class="badge badge-ok">${t('joined')}</span>` : `<button class="btn btn-primary btn-sm" data-act="toggle-group-join" data-id="${g.id}">${t('joinGroup')}</button>`}
+      <a class="btn btn-ghost btn-sm" href="#/group/${g.id}">View</a>
+    </div>
+  </div>`;
+  return `<div class="page">
+    <div class="row"><h2 class="grow">🏘️ ${t('groups')}</h2><button class="btn btn-primary" data-act="create-group">+ ${t('createGroup')}</button></div>
+    <form id="groups-search-form" class="row gap">
+      <input name="q" class="grow" placeholder="${t('searchGroups')}" value="${escapeHtml(queryText || '')}" autocomplete="off" />
+      <button class="btn btn-ghost" type="submit">Search</button>
+    </form>
+    <h3>${t('yourGroups')} (${mine.length})</h3>
+    <div class="grid-people">${mine.map(card).join('') || `<p class="muted">${t('noGroups')}</p>`}</div>
+    <h3>${t('discoverGroups')}</h3>
+    <div class="grid-people">${discover.map(card).join('') || `<p class="muted">${t('noGroups')}</p>`}</div>
+  </div>`;
+}
+
+export function groupView(d, meUser, groupId) {
+  const group = (d.groups || []).find((g) => g.id === groupId);
+  if (!group || !canViewGroup(group, meUser.id)) return emptyState('🏘️', 'This group could not be found.');
+  const ctx = viewCtx(d, meUser);
+  ctx.showGroupContext = false; // already inside the group — no context note
+  const byId = ctx.usersById;
+  const member = isGroupMember(group, meUser.id);
+  const isCreator = group.createdBy === meUser.id;
+  const blocked = blockedIdsOfData(d, meUser.id);
+  const posts = d.posts
+    .filter((p) => p.groupId === group.id && canViewGroupPost(p, group, meUser.id, blocked))
+    .sort((a, b) => b.createdAt - a.createdAt);
+  return `<div class="profile-wrap">
+    <div class="card profile-head">
+      <div class="cover" style="${group.cover ? `background-image:url('${escapeHtml(group.cover)}')` : ''}"></div>
+      <div class="profile-meta">
+        ${avatarHtml({ name: group.name, username: group.name, avatar: '' }, 110)}
+        <div class="grow">
+          <h2>${escapeHtml(group.name)}</h2>
+          <p class="muted">${group.privacy === 'private' ? '🔒 ' + t('privateLabel') : '🌍 ' + t('publicLabel')} · ${(group.members || []).length} ${t('members')} · created by ${escapeHtml(byId[group.createdBy]?.name || '')}</p>
+          <p>${escapeHtml(group.description || '')}</p>
+        </div>
+        <div class="row gap wrap">
+          ${isCreator ? `<button class="btn btn-primary" data-act="edit-group" data-id="${group.id}">✏️ ${t('edit')}</button><button class="btn btn-danger" data-act="delete-group" data-id="${group.id}">${t('delete')} group</button>`
+            : member ? `<button class="btn btn-ghost" data-act="toggle-group-join" data-id="${group.id}">${t('leaveGroup')}</button>`
+            : `<button class="btn btn-primary" data-act="toggle-group-join" data-id="${group.id}">${t('joinGroup')}</button>`}
+        </div>
+      </div>
+    </div>
+    ${member ? `
+    <div class="card composer">
+      <div class="row gap-sm">${avatarHtml(meUser, 40)}<span class="muted">${escapeHtml(meUser.name)}</span></div>
+      <form id="group-composer-form" data-group="${group.id}" class="stack">
+        <textarea name="text" rows="3" maxlength="2000" placeholder="${t('postToGroup')}"></textarea>
+        <div class="row gap wrap">
+          <label class="btn btn-ghost btn-sm">📷 Photo<input type="file" name="image" accept="image/*" hidden /></label>
+          <span class="spacer"></span>
+          <button class="btn btn-primary" type="submit">${t('post')}</button>
+        </div>
+      </form>
+    </div>` : `<div class="card"><p class="muted">${t('joinToPost')}</p></div>`}
+    <div class="profile-posts">
+      ${posts.map((p) => postCardHtml(p, ctx)).join('') || emptyState('📝', t('noPosts'))}
+    </div>
+    <div class="card stack">
+      <h3>${t('members')} (${(group.members || []).length})</h3>
+      ${(group.members || []).map((id) => {
+        const u = byId[id];
+        if (!u) return '';
+        return `<div class="row gap-sm">${avatarHtml(u, 36)}<a class="grow" href="#/profile/${u.id}">${escapeHtml(u.name)}</a>${id === group.createdBy ? '<span class="badge badge-admin">Admin</span>' : ''}${u.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''}${isCreator && id !== group.createdBy ? `<button class="btn btn-ghost btn-sm" data-act="remove-member" data-group="${group.id}" data-id="${id}">Remove</button>` : ''}</div>`;
+      }).join('')}
+    </div>
+  </div>`;
+}
+
+export function groupFormHtml(group = null) {
+  return `<h3>${group ? `${t('edit')} group` : t('createGroup')}</h3>
+  <form id="group-form" data-id="${group?.id || ''}" class="stack">
+    <label>${t('groupName')}<input name="name" required maxlength="80" value="${escapeHtml(group?.name || '')}" /></label>
+    <label>${t('description')}<textarea name="description" rows="3" maxlength="500">${escapeHtml(group?.description || '')}</textarea></label>
+    <label>${t('privacyLabel')}
+      <select name="privacy">
+        <option value="public" ${group?.privacy !== 'private' ? 'selected' : ''}>🌍 ${t('publicLabel')}</option>
+        <option value="private" ${group?.privacy === 'private' ? 'selected' : ''}>🔒 ${t('privateLabel')}</option>
+      </select>
+    </label>
+    <label>Cover photo<input type="file" name="cover" accept="image/*" /></label>
+    <div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">${group ? 'Save group' : t('createGroup')}</button></div>
+  </form>`;
+}
+
+// ------------------------------------------------------------------ PAGES
+export function pagesView(d, meUser, queryText = '') {
+  const all = d.pages || [];
+  const mine = searchByName(all.filter((p) => p.ownerId === meUser.id || (p.followers || []).includes(meUser.id)), queryText);
+  const discover = searchByName(all.filter((p) => p.ownerId !== meUser.id && !(p.followers || []).includes(meUser.id)), queryText);
+  const card = (p) => `<div class="card person-card">
+    ${avatarHtml({ name: p.name, username: p.name, avatar: p.avatar }, 56)}
+    <a href="#/page/${p.id}"><b>${escapeHtml(p.name)}</b></a>
+    <span class="badge">${escapeHtml(p.category || t('pageLabel'))}</span>
+    <span class="muted small">${(p.followers || []).length} ${t('followers')}</span>
+    <span class="muted small">${escapeHtml(truncate(p.about || '', 90))}</span>
+    <div class="row gap wrap center">
+      ${p.ownerId === meUser.id ? `<span class="badge badge-ok">Your page</span>` : (p.followers || []).includes(meUser.id) ? `<button class="btn btn-ghost btn-sm" data-act="follow-page" data-id="${p.id}">${t('following')}</button>` : `<button class="btn btn-primary btn-sm" data-act="follow-page" data-id="${p.id}">${t('follow')}</button>`}
+      <a class="btn btn-ghost btn-sm" href="#/page/${p.id}">View</a>
+    </div>
+  </div>`;
+  return `<div class="page">
+    <div class="row"><h2 class="grow">📄 ${t('pages')}</h2><button class="btn btn-primary" data-act="create-page">+ ${t('createPage')}</button></div>
+    <form id="pages-search-form" class="row gap">
+      <input name="q" class="grow" placeholder="${t('searchPages')}" value="${escapeHtml(queryText || '')}" autocomplete="off" />
+      <button class="btn btn-ghost" type="submit">Search</button>
+    </form>
+    <h3>${t('yourPages')} (${mine.length})</h3>
+    <div class="grid-people">${mine.map(card).join('') || `<p class="muted">${t('noPages')}</p>`}</div>
+    <h3>${t('discoverPages')}</h3>
+    <div class="grid-people">${discover.map(card).join('') || `<p class="muted">${t('noPages')}</p>`}</div>
+  </div>`;
+}
+
+export function pageView(d, meUser, pageId) {
+  const page = (d.pages || []).find((p) => p.id === pageId);
+  if (!page) return emptyState('📄', 'This page could not be found.');
+  const ctx = viewCtx(d, meUser);
+  const isOwner = page.ownerId === meUser.id;
+  const following = (page.followers || []).includes(meUser.id);
+  const posts = d.posts.filter((p) => p.pageId === page.id).sort((a, b) => b.createdAt - a.createdAt);
+  return `<div class="profile-wrap">
+    <div class="card profile-head">
+      <div class="cover" style="${page.cover ? `background-image:url('${escapeHtml(page.cover)}')` : ''}"></div>
+      <div class="profile-meta">
+        ${avatarHtml({ name: page.name, username: page.name, avatar: page.avatar }, 110)}
+        <div class="grow">
+          <h2>${escapeHtml(page.name)} <span class="badge">${t('pageLabel')}</span></h2>
+          <p class="muted">${escapeHtml(page.category || '')} · ${(page.followers || []).length} ${t('followers')} · by ${escapeHtml(ctx.usersById[page.ownerId]?.name || '')}</p>
+          <p>${escapeHtml(page.about || '')}</p>
+        </div>
+        <div class="row gap wrap">
+          ${isOwner ? `<button class="btn btn-primary" data-act="edit-page" data-id="${page.id}">✏️ ${t('edit')}</button><button class="btn btn-danger" data-act="delete-page" data-id="${page.id}">${t('delete')} page</button>`
+            : `<button class="btn ${following ? 'btn-ghost' : 'btn-primary'}" data-act="follow-page" data-id="${page.id}">${following ? t('following') : t('follow')}</button>`}
+        </div>
+      </div>
+    </div>
+    ${isOwner ? `
+    <div class="card composer">
+      <div class="row gap-sm">${avatarHtml({ name: page.name, username: page.name, avatar: page.avatar }, 40)}<span class="muted">${escapeHtml(page.name)}</span></div>
+      <form id="page-composer-form" data-page="${page.id}" class="stack">
+        <textarea name="text" rows="3" maxlength="2000" placeholder="${t('postAsPage')}"></textarea>
+        <div class="row gap wrap">
+          <label class="btn btn-ghost btn-sm">📷 Photo<input type="file" name="image" accept="image/*" hidden /></label>
+          <span class="spacer"></span>
+          <button class="btn btn-primary" type="submit">${t('post')}</button>
+        </div>
+      </form>
+    </div>` : ''}
+    <div class="profile-posts">
+      ${posts.map((p) => postCardHtml(p, ctx)).join('') || emptyState('📝', t('noPosts'))}
+    </div>
+  </div>`;
+}
+
+const PAGE_CATEGORIES = ['Community', 'Business', 'Food & Drink', 'Technology', 'Entertainment', 'Education', 'Health', 'Arts', 'Sports', 'Other'];
+
+export function pageFormHtml(page = null) {
+  return `<h3>${page ? `${t('edit')} page` : t('createPage')}</h3>
+  <form id="page-form" data-id="${page?.id || ''}" class="stack">
+    <label>Page name<input name="name" required maxlength="80" value="${escapeHtml(page?.name || '')}" /></label>
+    <label>${t('category')}<input name="category" list="page-categories" maxlength="60" value="${escapeHtml(page?.category || '')}" placeholder="Community" /></label>
+    <datalist id="page-categories">${PAGE_CATEGORIES.map((c) => `<option value="${c}"></option>`).join('')}</datalist>
+    <label>${t('about')}<textarea name="about" rows="3" maxlength="500">${escapeHtml(page?.about || '')}</textarea></label>
+    <label>Profile picture<input type="file" name="avatar" accept="image/*" /></label>
+    <label>Cover photo<input type="file" name="cover" accept="image/*" /></label>
+    <div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">${page ? 'Save page' : t('createPage')}</button></div>
+  </form>`;
 }
 
 // ------------------------------------------------------------------ MESSAGES
@@ -259,7 +452,7 @@ function messageHtml(m, meUser, byId) {
 export function notificationsView(d, meUser) {
   const byId = usersById(d);
   const mine = d.notifications.filter((n) => n.userId === meUser.id).sort((a, b) => b.createdAt - a.createdAt);
-  const icons = { friend_request: '👥', friend_accept: '✅', like: '❤️', comment: '💬', reply: '↩️', message: '✉️', mention: '@', share: '🔁', follow: '➕' };
+  const icons = { friend_request: '👥', friend_accept: '✅', like: '❤️', comment: '💬', reply: '↩️', message: '✉️', mention: '@', share: '🔁', follow: '➕', group_join: '🏘️', page_follow: '📄' };
   return `<div class="page narrow">
     <div class="row"><h2 class="grow">🔔 ${t('notifications')}</h2><button class="btn btn-ghost btn-sm" data-act="notif-read-all">Mark all read</button></div>
     ${mine.map((n) => `<button class="card notif ${n.read ? '' : 'unread'}" data-act="notif-open" data-id="${n.id}" data-post="${n.postId || ''}" data-conv="${n.conversationId || ''}">
@@ -275,7 +468,7 @@ export function searchView(d, meUser, queryText) {
   const blocked = blockedIdsOfData(d, meUser.id);
   const users = q ? d.users.filter((u) => !blocked.has(u.id) && (u.name.toLowerCase().includes(q) || u.username.toLowerCase().includes(q))) : [];
   const friendIds = friendIdsOfData(d, meUser.id);
-  const posts = q ? d.posts.filter((p) => p.text.toLowerCase().includes(q) && canViewPost(p, { viewerId: meUser.id, friendIds, blockedIds: blocked })).sort((a, b) => b.createdAt - a.createdAt) : [];
+  const posts = q ? d.posts.filter((p) => !p.groupId && p.text.toLowerCase().includes(q) && canViewPost(p, { viewerId: meUser.id, friendIds, blockedIds: blocked })).sort((a, b) => b.createdAt - a.createdAt) : [];
   const ctx = viewCtx(d, meUser);
   return `<div class="page">
     <h2>🔎 Search ${q ? `for “${escapeHtml(queryText)}”` : ''}</h2>
@@ -290,7 +483,9 @@ export function searchView(d, meUser, queryText) {
 // ------------------------------------------------------------------ SAVED
 export function savedView(d, meUser) {
   const ctx = viewCtx(d, meUser);
-  const posts = d.posts.filter((p) => (p.savedBy || []).includes(meUser.id)).sort((a, b) => b.createdAt - a.createdAt);
+  const blocked = blockedIdsOfData(d, meUser.id);
+  const posts = d.posts.filter((p) => (p.savedBy || []).includes(meUser.id)
+    && (!p.groupId || canViewGroupPost(p, ctx.groupsById[p.groupId], meUser.id, blocked))).sort((a, b) => b.createdAt - a.createdAt);
   return `<div class="page narrow"><h2>🔖 ${t('saved')} posts</h2>${posts.map((p) => postCardHtml(p, ctx)).join('') || emptyState('🔖', 'Posts you save will appear here.')}</div>`;
 }
 

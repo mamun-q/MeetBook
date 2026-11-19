@@ -72,30 +72,104 @@ service cloud.firestore {
 
     // ------------------------------------------------------------ posts
     match /posts/{postId} {
+      function groupData() {
+        return get(/databases/$(database)/documents/groups/$(resource.data.groupId)).data;
+      }
+      // Group posts ignore the post-level visibility field: the GROUP's
+      // privacy governs. Public group -> any signed-in reader; private
+      // group -> group members only (the creator is always a member).
+      function groupPostVisible() {
+        return resource.data.get('groupId', '') != ''
+          && exists(/databases/$(database)/documents/groups/$(resource.data.groupId))
+          && (groupData().get('privacy', 'public') == 'public'
+              || request.auth.uid in groupData().get('members', []));
+      }
       function visibleToReader() {
-        return resource.data.get('visibility', 'public') == 'public'
-          || resource.data.authorId == request.auth.uid
+        return resource.data.authorId == request.auth.uid
           || isAdmin()
-          || (resource.data.get('visibility', 'public') == 'friends'
+          || groupPostVisible()
+          || (resource.data.get('groupId', '') == ''
+              && resource.data.get('visibility', 'public') == 'public')
+          || (resource.data.get('groupId', '') == ''
+              && resource.data.get('visibility', 'public') == 'friends'
               && exists(/databases/$(database)/documents/friendships/$(resource.data.authorId + '_' + request.auth.uid)))
-          || (resource.data.get('visibility', 'public') == 'friends'
+          || (resource.data.get('groupId', '') == ''
+              && resource.data.get('visibility', 'public') == 'friends'
               && exists(/databases/$(database)/documents/friendships/$(request.auth.uid + '_' + resource.data.authorId)));
       }
       allow read: if signedIn() && visibleToReader() && !isBlockedBy(resource.data.authorId);
+      // Page posts (pageId set) follow the normal path: authorId is the
+      // page owner's uid, so authorship checks work unchanged. Group posts
+      // additionally require group membership at creation time.
       allow create: if signedIn()
         && request.resource.data.authorId == request.auth.uid
-        && request.resource.data.get('likes', []).size() == 0;
+        && request.resource.data.get('likes', []).size() == 0
+        && (request.resource.data.get('groupId', '') == ''
+            || (exists(/databases/$(database)/documents/groups/$(request.resource.data.groupId))
+                && request.auth.uid in get(/databases/$(database)/documents/groups/$(request.resource.data.groupId)).data.get('members', [])));
       // Author edits content; any signed-in reader may update engagement
-      // arrays (likes/reactions/savedBy/shares/comments) but NOT authorship
-      // or the post body — enforced by field checks below.
+      // arrays (likes/reactions/savedBy/shares/comments) but NOT authorship,
+      // the post body, or its group/page assignment — enforced below.
       allow update: if isAdmin()
         || (signedIn() && resource.data.authorId == request.auth.uid)
         || (signedIn()
             && request.resource.data.authorId == resource.data.authorId
             && request.resource.data.text == resource.data.text
             && request.resource.data.image == resource.data.image
-            && request.resource.data.visibility == resource.data.visibility);
+            && request.resource.data.visibility == resource.data.visibility
+            && request.resource.data.get('groupId', '') == resource.data.get('groupId', '')
+            && request.resource.data.get('pageId', '') == resource.data.get('pageId', ''));
       allow delete: if signedIn() && (resource.data.authorId == request.auth.uid || isAdmin());
+    }
+
+    // ------------------------------------------------------------ groups
+    // Membership lives on the group document (members array, creator in
+    // createdBy). Public groups are readable by any signed-in user;
+    // private groups only by members, the creator and admins. The creator
+    // manages the group (edit info, remove members, delete); a non-creator
+    // may only add/remove THEMSELVES through a members-only update.
+    match /groups/{groupId} {
+      allow read: if signedIn()
+        && (resource.data.get('privacy', 'public') == 'public'
+            || request.auth.uid in resource.data.get('members', [])
+            || resource.data.createdBy == request.auth.uid
+            || isAdmin());
+      allow create: if signedIn()
+        && request.resource.data.createdBy == request.auth.uid
+        && request.auth.uid in request.resource.data.get('members', []);
+      allow update: if isAdmin()
+        || (signedIn() && resource.data.createdBy == request.auth.uid)
+        || (signedIn()
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members'])
+            && request.resource.data.createdBy == resource.data.createdBy
+            && ((request.auth.uid in request.resource.data.get('members', [])
+                 && !(request.auth.uid in resource.data.get('members', []))
+                 && request.resource.data.get('members', []).size() == resource.data.get('members', []).size() + 1)
+                || (!(request.auth.uid in request.resource.data.get('members', []))
+                 && request.auth.uid in resource.data.get('members', [])
+                 && request.resource.data.get('members', []).size() == resource.data.get('members', []).size() - 1)));
+      allow delete: if signedIn() && (resource.data.createdBy == request.auth.uid || isAdmin());
+    }
+
+    // ------------------------------------------------------------- pages
+    // Pages are public: any signed-in user can read and follow one. Only
+    // the owner edits page info or deletes the page; a non-owner may only
+    // add/remove THEMSELVES through a followers-only update.
+    match /pages/{pageId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.ownerId == request.auth.uid;
+      allow update: if isAdmin()
+        || (signedIn() && resource.data.ownerId == request.auth.uid)
+        || (signedIn()
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['followers'])
+            && request.resource.data.ownerId == resource.data.ownerId
+            && ((request.auth.uid in request.resource.data.get('followers', [])
+                 && !(request.auth.uid in resource.data.get('followers', []))
+                 && request.resource.data.get('followers', []).size() == resource.data.get('followers', []).size() + 1)
+                || (!(request.auth.uid in request.resource.data.get('followers', []))
+                 && request.auth.uid in resource.data.get('followers', [])
+                 && request.resource.data.get('followers', []).size() == resource.data.get('followers', []).size() - 1)));
+      allow delete: if signedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
     }
 
     // ---------------------------------------------------- conversations

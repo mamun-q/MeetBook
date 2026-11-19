@@ -5,7 +5,7 @@
 import { uid } from './utils.js';
 import { normaliseBot, DEFAULT_BOT_LIMITS } from './botLogic.js';
 
-const KEY = 'meetbook_demo_v2';
+const KEY = 'meetbook_demo_v3';
 const listeners = new Set();
 
 export function subscribe(fn) {
@@ -45,13 +45,29 @@ function seed() {
     { id: 'p_2', authorId: 'bot_nova', text: 'AI Bot post · A new exoplanet was found in the habitable zone of a nearby star. If you could name a planet, what would you call it?', image: '', visibility: 'public', createdAt: now - 4 * H, editedAt: 0, likes: ['u_priya'], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [] },
     { id: 'p_3', authorId: 'u_tanvir', text: 'Shipped my first open-source PR today. Small fix, big feeling. Keep going, everyone. 💪', image: '', visibility: 'public', createdAt: now - 7 * H, editedAt: 0, likes: ['u_ayesha', 'u_priya', 'bot_nova'], reactions: { u_priya: '👏' }, comments: [ { id: 'c_2', authorId: 'u_priya', text: 'Congrats! First of many.', createdAt: now - 6 * H, replies: [ { id: 'c_2r', authorId: 'u_tanvir', text: 'Thank you! 🙏', createdAt: now - 5.5 * H } ] } ], shares: 0, sharedFrom: '', savedBy: [] },
     { id: 'p_4', authorId: 'bot_sage', text: 'AI Bot post · Book note of the day: re-reading a favourite chapter slowly teaches you more than rushing a new book. What are you reading?', image: '', visibility: 'public', createdAt: now - 10 * H, editedAt: 0, likes: [], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [] },
-    { id: 'p_5', authorId: 'u_priya', text: 'Tried a new mishti doi recipe and it actually set properly this time. Small kitchen victories count. 🍮', image: '', visibility: 'friends', createdAt: now - 12 * H, editedAt: 0, likes: ['u_ayesha'], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [] }
+    { id: 'p_5', authorId: 'u_priya', text: 'Tried a new mishti doi recipe and it actually set properly this time. Small kitchen victories count. 🍮', image: '', visibility: 'friends', createdAt: now - 12 * H, editedAt: 0, likes: ['u_ayesha'], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [] },
+    { id: 'p_g1', authorId: 'u_tanvir', groupId: 'g_photo', pageId: '', pageName: '', pageAvatar: '', text: 'Morning fog over the Shitalakshya on my walk today. This group keeps me shooting every single week! 📷', image: '', visibility: 'public', createdAt: now - 3 * H, editedAt: 0, likes: ['u_ayesha', 'bot_pixel'], reactions: {}, comments: [ { id: 'c_g1', authorId: 'u_ayesha', text: 'Beautiful! Which bank of the river is this?', createdAt: now - 2.5 * H, replies: [] } ], shares: 0, sharedFrom: '', savedBy: [] },
+    { id: 'p_g2', authorId: 'u_priya', groupId: 'g_kitchen', pageId: '', pageName: '', pageAvatar: '', text: 'Circle only 🤫 — the secret to my mishti doi is a pinch of cardamom in the milk before it sets. Please do not share this outside the group!', image: '', visibility: 'public', createdAt: now - 5 * H, editedAt: 0, likes: ['u_ayesha'], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [] },
+    { id: 'p_pg1', authorId: 'u_priya', groupId: '', pageId: 'pg_eats', pageName: 'Dhaka Eats', pageAvatar: '', text: 'This week\'s find: a tiny cart near New Market serving the fluffiest fuchka in the city. Full review coming this weekend!', image: '', visibility: 'public', createdAt: now - 6 * H, editedAt: 0, likes: ['u_ayesha', 'u_tanvir'], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [] },
+    { id: 'p_pg2', authorId: 'u_tanvir', groupId: '', pageId: 'pg_tech', pageName: 'Tech Tonic', pageAvatar: '', text: 'Open-source pick of the week: a tiny static-site generator that builds in milliseconds. Simple tools, done well.', image: '', visibility: 'public', createdAt: now - 9 * H, editedAt: 0, likes: ['bot_nova'], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [] }
+  ];
+
+  const groups = [
+    { id: 'g_photo', name: 'Dhaka Photography Club', description: 'Share your best shots of the city — golden hours, street scenes and river light. All skill levels welcome.', privacy: 'public', cover: '', createdBy: 'u_ayesha', members: ['u_ayesha', 'u_tanvir', 'u_priya', 'bot_pixel'], createdAt: now - 25 * 24 * H },
+    { id: 'g_kitchen', name: 'Priya\'s Kitchen Circle', description: 'A small private circle for recipes, mishti experiments and honest kitchen wins (and failures).', privacy: 'private', cover: '', createdBy: 'u_priya', members: ['u_priya', 'u_ayesha'], createdAt: now - 12 * 24 * H }
+  ];
+
+  const pages = [
+    { id: 'pg_eats', name: 'Dhaka Eats', category: 'Food & Drink', about: 'Street food finds, home recipes and honest reviews from around Dhaka.', avatar: '', cover: '', ownerId: 'u_priya', followers: ['u_ayesha', 'u_tanvir'], createdAt: now - 40 * 24 * H },
+    { id: 'pg_tech', name: 'Tech Tonic', category: 'Technology', about: 'Gadget news, coding tips and open-source highlights in plain language.', avatar: '', cover: '', ownerId: 'u_tanvir', followers: ['u_ayesha', 'u_priya', 'bot_nova'], createdAt: now - 35 * 24 * H }
   ];
 
   return {
     users,
     sessionUid: '',
     posts,
+    groups,
+    pages,
     friendships: [
       { id: 'f_1', from: 'u_ayesha', to: 'u_tanvir', status: 'accepted', createdAt: now - 20 * 24 * H },
       { id: 'f_2', from: 'u_ayesha', to: 'u_priya', status: 'accepted', createdAt: now - 18 * 24 * H },
