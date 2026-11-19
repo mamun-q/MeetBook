@@ -68,14 +68,24 @@ export async function register({ name, username, email, password }) {
   const v = validateUsername(username);
   if (!v.ok) throw new Error(v.error);
   if (firebaseReady) {
-    const taken = await getDocs(query(collection(db, 'users'), where('username', '==', v.value)));
-    if (!taken.empty) throw new Error('That username is already taken.');
+    // Create the Auth account FIRST: Firestore rules only allow signed-in
+    // reads, so the username-uniqueness query must run after sign-up (an
+    // unauthenticated query fails with "Missing or insufficient
+    // permissions"). If anything after account creation fails, delete the
+    // just-created Auth user so the email is not stranded.
     const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
     const profile = {
       name: name.trim(), username: v.value, email: email.trim(), bio: '', avatar: '', cover: '',
       role: 'user', isBot: false, online: true, createdAt: Date.now(), followers: [], following: [], settings: {}
     };
-    await setDoc(doc(db, 'users', cred.user.uid), profile);
+    try {
+      const taken = await getDocs(query(collection(db, 'users'), where('username', '==', v.value)));
+      if (!taken.empty) throw new Error('That username is already taken.');
+      await setDoc(doc(db, 'users', cred.user.uid), profile);
+    } catch (err) {
+      try { await deleteUser(cred.user); } catch { /* rollback is best-effort */ }
+      throw err;
+    }
     return { id: cred.user.uid, ...profile };
   }
   let created = null;
