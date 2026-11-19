@@ -1,0 +1,788 @@
+// Unified data/API layer. Two backends behind one interface:
+//  - Firebase mode (env config present): Firebase Auth + Firestore + Storage.
+//  - Demo mode (no config): the local seeded store in store.js.
+// Views always read from data() and write through these functions, so the UI
+// code is identical in both modes.
+import {
+  getState, mutate, findUser, userByUsername, friendIdsOf, blockedIdsOf, notify, resetDemo
+} from './store.js';
+import { firebaseReady, auth, db, storage, googleProvider } from './firebase.js';
+import { uid as genId, validateUsername, extractMentions } from './utils.js';
+import { generateTemplatePost, generateTemplateComment, decideBotAction, memoryFromConversation, normaliseBot } from './botLogic.js';
+
+// --- Firebase imports are dynamic-free static imports of the SDK ---------
+import {
+  createUserWithEmailAndPassword, signInWithEmailAndPassword, signInWithPopup,
+  sendPasswordResetEmail, signOut, deleteUser, onAuthStateChanged
+} from 'firebase/auth';
+import {
+  collection, doc, setDoc, getDoc, getDocs, addDoc, updateDoc, deleteDoc,
+  query, where, orderBy, limit, onSnapshot, serverTimestamp, arrayUnion, arrayRemove
+} from 'firebase/firestore';
+import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage';
+
+// -------------------------------------------------------------------------
+let remote = null; // Firestore-mirrored dataset (same shape as demo state)
+let remoteUid = '';
+let emptyRemoteCache = null;
+
+export function data() {
+  if (firebaseReady) {
+    // Live mode must never fall through to demo data.
+    if (remote) return remote;
+    if (!emptyRemoteCache) emptyRemoteCache = blankRemote();
+    return emptyRemoteCache;
+  }
+  return getState();
+}
+
+export function currentUid() {
+  if (firebaseReady) return remoteUid;
+  return getState().sessionUid;
+}
+
+export function me() {
+  const id = currentUid();
+  return id ? (data().users.find((u) => u.id === id) || null) : null;
+}
+
+export function isAdmin(user = me()) {
+  return Boolean(user && user.role === 'admin');
+}
+
+function blankRemote() {
+  return {
+    users: [], sessionUid: '', posts: [], friendships: [], blocks: [],
+    conversations: [], messages: [], notifications: [], reports: [],
+    bots: [], botBrains: {}, botMemories: {}, botActivities: [], botLogs: [],
+    botSettings: { global: { enabled: true }, counters: {} },
+    config: { maintenanceMode: false },
+    aiUsage: { callsToday: 0, tokensToday: 0, updatedAt: 0 }
+  };
+}
+
+// -------------------------------------------------------------------------
+// AUTH
+// -------------------------------------------------------------------------
+export async function register({ name, username, email, password }) {
+  const v = validateUsername(username);
+  if (!v.ok) throw new Error(v.error);
+  if (firebaseReady) {
+    const taken = await getDocs(query(collection(db, 'users'), where('username', '==', v.value)));
+    if (!taken.empty) throw new Error('That username is already taken.');
+    const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
+    const profile = {
+      name: name.trim(), username: v.value, email: email.trim(), bio: '', avatar: '', cover: '',
+      role: 'user', isBot: false, online: true, createdAt: Date.now(), followers: [], following: [], settings: {}
+    };
+    await setDoc(doc(db, 'users', cred.user.uid), profile);
+    return { id: cred.user.uid, ...profile };
+  }
+  let created = null;
+  mutate((s) => {
+    if (s.users.some((u) => u.username === v.value)) throw new Error('That username is already taken.');
+    if (s.users.some((u) => u.email === email.trim().toLowerCase())) throw new Error('An account with that email already exists.');
+    created = {
+      id: genId('u'), name: name.trim(), username: v.value, email: email.trim().toLowerCase(), password,
+      bio: '', avatar: '', cover: '', role: 'user', isBot: false, online: true,
+      createdAt: Date.now(), followers: [], following: [], settings: {}
+    };
+    s.users.push(created);
+    s.sessionUid = created.id;
+  });
+  return created;
+}
+
+export async function login(email, password) {
+  if (firebaseReady) {
+    const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
+    remoteUid = cred.user.uid;
+    return cred.user;
+  }
+  let user = null;
+  mutate((s) => {
+    user = s.users.find((u) => u.email === email.trim().toLowerCase() && u.password === password && !u.isBot);
+    if (!user) throw new Error('Invalid email or password. Demo accounts: admin@meetbook.app / admin123, ayesha@example.com / demo123');
+    user.online = true;
+    s.sessionUid = user.id;
+  });
+  return user;
+}
+
+export async function loginWithGoogle() {
+  if (!firebaseReady) throw new Error('Google sign-in needs Firebase configuration. In demo mode, register or use a demo account.');
+  const cred = await signInWithPopup(auth, googleProvider);
+  remoteUid = cred.user.uid;
+  const ref = doc(db, 'users', cred.user.uid);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) {
+    const base = (cred.user.email || 'user').split('@')[0].replace(/[^a-z0-9_.]/gi, '').toLowerCase() || 'user';
+    await setDoc(ref, {
+      name: cred.user.displayName || 'MeetBook User', username: base.slice(0, 24), email: cred.user.email || '',
+      bio: '', avatar: cred.user.photoURL || '', cover: '', role: 'user', isBot: false, online: true,
+      createdAt: Date.now(), followers: [], following: [], settings: {}
+    });
+  }
+  return cred.user;
+}
+
+export async function resetPassword(email) {
+  if (firebaseReady) { await sendPasswordResetEmail(auth, email.trim()); return; }
+  const exists = getState().users.some((u) => u.email === email.trim().toLowerCase());
+  if (!exists) throw new Error('No demo account uses that email.');
+  // Demo mode cannot send real email; we surface a clear, honest message.
+  throw new Error('Demo mode: password reset email cannot be sent. In demo mode sign in with the demo password, or wire Firebase config to enable real reset emails.');
+}
+
+export async function logout() {
+  if (firebaseReady) { await signOut(auth); remoteUid = ''; return; }
+  mutate((s) => {
+    const u = s.users.find((x) => x.id === s.sessionUid);
+    if (u) u.online = false;
+    s.sessionUid = '';
+  });
+}
+
+export async function deleteAccount() {
+  const user = me();
+  if (!user) throw new Error('Not signed in.');
+  if (firebaseReady) {
+    await deleteDoc(doc(db, 'users', user.id));
+    await deleteUser(auth.currentUser);
+    remoteUid = '';
+    return;
+  }
+  mutate((s) => {
+    s.users = s.users.filter((u) => u.id !== user.id);
+    s.posts = s.posts.filter((p) => p.authorId !== user.id);
+    s.sessionUid = '';
+  });
+}
+
+export function onAuthReady(cb) {
+  if (firebaseReady) {
+    return onAuthStateChanged(auth, async (user) => {
+      remoteUid = user ? user.uid : '';
+      if (user) startRemoteSync();
+      cb(user ? { id: user.uid } : null);
+    });
+  }
+  cb(me());
+  return () => {};
+}
+
+// -------------------------------------------------------------------------
+// FIREBASE SYNC (mirrors Firestore into the shared dataset shape)
+// -------------------------------------------------------------------------
+let syncStarted = false;
+function startRemoteSync() {
+  if (syncStarted || !firebaseReady) return;
+  syncStarted = true;
+  remote = blankRemote();
+  const patch = (fn) => { fn(remote); document.dispatchEvent(new CustomEvent('meetbook:data')); };
+  onSnapshot(query(collection(db, 'users'), limit(300)), (snap) => patch((r) => { r.users = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
+  onSnapshot(query(collection(db, 'posts'), orderBy('createdAt', 'desc'), limit(100)), (snap) => patch((r) => { r.posts = snap.docs.map((d) => ({ id: d.id, comments: [], likes: [], reactions: {}, savedBy: [], ...d.data() })); }));
+  onSnapshot(query(collection(db, 'friendships'), limit(500)), (snap) => patch((r) => { r.friendships = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
+  onSnapshot(query(collection(db, 'bots'), limit(100)), (snap) => patch((r) => { r.bots = snap.docs.map((d) => normaliseBot({ id: d.id, ...d.data() })); }));
+  onSnapshot(query(collection(db, 'botActivities'), orderBy('createdAt', 'desc'), limit(100)), (snap) => patch((r) => { r.botActivities = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
+  onSnapshot(query(collection(db, 'botLogs'), orderBy('createdAt', 'desc'), limit(100)), (snap) => patch((r) => { r.botLogs = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
+  onSnapshot(doc(db, 'botSettings', 'global'), (snap) => patch((r) => { if (snap.exists()) r.botSettings.global = snap.data(); }));
+  onSnapshot(doc(db, 'config', 'app'), (snap) => patch((r) => { if (snap.exists()) r.config = { ...r.config, ...snap.data() }; }));
+  if (remoteUid) {
+    onSnapshot(query(collection(db, 'notifications'), where('userId', '==', remoteUid), orderBy('createdAt', 'desc'), limit(100)),
+      (snap) => patch((r) => { r.notifications = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
+    onSnapshot(query(collection(db, 'conversations'), where('participants', 'array-contains', remoteUid)),
+      (snap) => patch((r) => { r.conversations = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
+    onSnapshot(query(collection(db, 'messages'), orderBy('createdAt', 'asc'), limit(500)),
+      (snap) => patch((r) => { r.messages = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
+    onSnapshot(query(collection(db, 'blocks'), where('by', '==', remoteUid)),
+      (snap) => patch((r) => { r.blocks = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
+    onSnapshot(query(collection(db, 'reports'), orderBy('createdAt', 'desc'), limit(100)),
+      (snap) => patch((r) => { r.reports = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }), () => { /* non-admins cannot read reports — ignore */ });
+  }
+}
+
+// -------------------------------------------------------------------------
+// PROFILES
+// -------------------------------------------------------------------------
+export async function updateProfile(userId, patch) {
+  if (patch.username) {
+    const v = validateUsername(patch.username);
+    if (!v.ok) throw new Error(v.error);
+    patch.username = v.value;
+    const clash = data().users.some((u) => u.username === v.value && u.id !== userId);
+    if (clash) throw new Error('That username is already taken.');
+  }
+  if (firebaseReady) { await updateDoc(doc(db, 'users', userId), patch); return; }
+  mutate((s) => {
+    const u = s.users.find((x) => x.id === userId);
+    if (u) Object.assign(u, patch);
+  });
+}
+
+// Compress an image file to a JPEG data URL of at most ~maxBytes by drawing
+// it to a canvas and stepping down dimensions/quality. Browser-only helper.
+export async function compressImageToDataUrl(file, maxBytes = 200 * 1024, maxDim = 1280) {
+  const bitmap = await createImageBitmap(file).catch(() => null);
+  if (!bitmap) {
+    // Last-resort fallback if the browser cannot decode the image.
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+  let scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+  let quality = 0.82;
+  let out = '';
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const w = Math.max(1, Math.round(bitmap.width * scale));
+    const h = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, w, h);
+    out = canvas.toDataURL('image/jpeg', quality);
+    // data URL length * 0.75 ≈ decoded byte size; compare against budget.
+    if (out.length * 0.75 <= maxBytes) break;
+    if (quality > 0.45) quality -= 0.12; else scale *= 0.75;
+  }
+  if (typeof bitmap.close === 'function') bitmap.close();
+  return out;
+}
+
+export async function uploadImage(file, path) {
+  if (!file) return '';
+  if (!String(file.type || '').startsWith('image/')) throw new Error('Please choose an image file.');
+  // 1) Try Firebase Storage first (works once the project is on Blaze).
+  if (firebaseReady && storage) {
+    try {
+      const r = storageRef(storage, path);
+      await uploadBytes(r, file, { contentType: file.type });
+      return await getDownloadURL(r);
+    } catch (err) {
+      // STORAGE FALLBACK: Firebase Storage is not enabled on this project yet
+      // (it requires the Blaze plan; the project is on Spark). Degrade
+      // gracefully instead of breaking posting/profile flows: store a
+      // compressed image (canvas-resized, max ~200KB) as a data URL directly
+      // in the Firestore document. Once Storage is enabled, new uploads use
+      // Storage automatically and old data-URL images keep rendering.
+      console.warn('Firebase Storage unavailable, using compressed data-URL fallback:', err?.code || err);
+    }
+  }
+  // 2) Demo mode / Storage unavailable: compressed data URL stored locally
+  //    (demo store) or in the Firestore document (live mode).
+  return compressImageToDataUrl(file);
+}
+
+export function setOnline(userId, online) {
+  if (firebaseReady) { updateDoc(doc(db, 'users', userId), { online }).catch(() => {}); return; }
+  mutate((s) => { const u = s.users.find((x) => x.id === userId); if (u) u.online = online; });
+}
+
+export function updateSettings(userId, settingsPatch) {
+  const user = data().users.find((u) => u.id === userId);
+  const merged = { ...(user?.settings || {}), ...settingsPatch };
+  return updateProfile(userId, { settings: merged });
+}
+
+// -------------------------------------------------------------------------
+// POSTS
+// -------------------------------------------------------------------------
+const postLimiter = { map: new Map() };
+
+export async function createPost({ text, image, visibility }) {
+  const author = me();
+  if (!author) throw new Error('Sign in to post.');
+  const post = {
+    authorId: author.id, text: String(text || '').trim(), image: image || '',
+    visibility: visibility || 'public', createdAt: Date.now(), editedAt: 0,
+    likes: [], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: []
+  };
+  if (!post.text && !post.image) throw new Error('Write something or add a photo first.');
+  if (firebaseReady) {
+    const ref = await addDoc(collection(db, 'posts'), { ...post, createdAt: serverTimestamp() });
+    fanOutMentions(post.text, author, ref.id);
+    return { id: ref.id, ...post };
+  }
+  const full = { id: genId('p'), ...post };
+  mutate((s) => { s.posts.unshift(full); notifyMentions(s, full, author); });
+  return full;
+}
+
+function notifyMentions(s, post, author) {
+  for (const uname of extractMentions(post.text)) {
+    const target = s.users.find((u) => u.username === uname);
+    if (target) {
+      s.notifications.unshift({ id: genId('n'), userId: target.id, type: 'mention', actorId: author.id, text: `${author.name} mentioned you in a post.`, postId: post.id, conversationId: '', read: false, createdAt: Date.now() });
+    }
+  }
+}
+
+async function fanOutMentions(text, author, postId) {
+  for (const uname of extractMentions(text)) {
+    const snap = await getDocs(query(collection(db, 'users'), where('username', '==', uname)));
+    for (const d of snap.docs) {
+      await addDoc(collection(db, 'notifications'), { userId: d.id, type: 'mention', actorId: author.id, text: `${author.name} mentioned you in a post.`, postId, conversationId: '', read: false, createdAt: Date.now() });
+    }
+  }
+}
+
+export async function editPost(postId, text) {
+  if (firebaseReady) { await updateDoc(doc(db, 'posts', postId), { text, editedAt: Date.now() }); return; }
+  mutate((s) => { const p = s.posts.find((x) => x.id === postId); if (p) { p.text = text; p.editedAt = Date.now(); } });
+}
+
+export async function deletePost(postId) {
+  if (firebaseReady) { await deleteDoc(doc(db, 'posts', postId)); return; }
+  mutate((s) => { s.posts = s.posts.filter((p) => p.id !== postId); });
+}
+
+export async function toggleLike(postId) {
+  const user = me(); if (!user) throw new Error('Sign in to like posts.');
+  if (firebaseReady) {
+    const post = data().posts.find((p) => p.id === postId);
+    const has = post?.likes?.includes(user.id);
+    await updateDoc(doc(db, 'posts', postId), { likes: has ? arrayRemove(user.id) : arrayUnion(user.id) });
+    if (!has && post) await addDoc(collection(db, 'notifications'), { userId: post.authorId, type: 'like', actorId: user.id, text: `${user.name} liked your post.`, postId, conversationId: '', read: false, createdAt: Date.now() });
+    return;
+  }
+  mutate((s) => {
+    const p = s.posts.find((x) => x.id === postId);
+    if (!p) return;
+    const i = p.likes.indexOf(user.id);
+    if (i >= 0) p.likes.splice(i, 1); else { p.likes.push(user.id); notify(p.authorId, 'like', user.id, `${user.name} liked your post.`, { postId }); }
+  });
+}
+
+export async function toggleReaction(postId, emoji) {
+  const user = me(); if (!user) throw new Error('Sign in to react.');
+  if (firebaseReady) {
+    const post = data().posts.find((p) => p.id === postId);
+    const reactions = { ...(post?.reactions || {}) };
+    if (reactions[user.id] === emoji) delete reactions[user.id]; else reactions[user.id] = emoji;
+    await updateDoc(doc(db, 'posts', postId), { reactions });
+    return;
+  }
+  mutate((s) => {
+    const p = s.posts.find((x) => x.id === postId);
+    if (!p) return;
+    p.reactions = p.reactions || {};
+    if (p.reactions[user.id] === emoji) delete p.reactions[user.id]; else p.reactions[user.id] = emoji;
+  });
+}
+
+export async function toggleSave(postId) {
+  const user = me(); if (!user) throw new Error('Sign in to save posts.');
+  if (firebaseReady) {
+    const post = data().posts.find((p) => p.id === postId);
+    const has = post?.savedBy?.includes(user.id);
+    await updateDoc(doc(db, 'posts', postId), { savedBy: has ? arrayRemove(user.id) : arrayUnion(user.id) });
+    return;
+  }
+  mutate((s) => {
+    const p = s.posts.find((x) => x.id === postId);
+    if (!p) return;
+    p.savedBy = p.savedBy || [];
+    const i = p.savedBy.indexOf(user.id);
+    if (i >= 0) p.savedBy.splice(i, 1); else p.savedBy.push(user.id);
+  });
+}
+
+export async function sharePost(postId) {
+  const user = me(); if (!user) throw new Error('Sign in to share posts.');
+  const original = data().posts.find((p) => p.id === postId);
+  if (!original) throw new Error('Post not found.');
+  const shared = {
+    authorId: user.id, text: original.text, image: original.image, visibility: 'public',
+    createdAt: Date.now(), editedAt: 0, likes: [], reactions: {}, comments: [], shares: 0,
+    sharedFrom: original.authorId, savedBy: []
+  };
+  if (firebaseReady) {
+    await addDoc(collection(db, 'posts'), shared);
+    await updateDoc(doc(db, 'posts', postId), { shares: (original.shares || 0) + 1 });
+    return;
+  }
+  mutate((s) => {
+    const p = s.posts.find((x) => x.id === postId);
+    if (p) p.shares = (p.shares || 0) + 1;
+    s.posts.unshift({ id: genId('p'), ...shared });
+    notify(original.authorId, 'share', user.id, `${user.name} shared your post.`, { postId });
+  });
+}
+
+export async function addComment(postId, text, parentCommentId = '') {
+  const user = me(); if (!user) throw new Error('Sign in to comment.');
+  const comment = { id: genId('c'), authorId: user.id, text: String(text).trim(), createdAt: Date.now(), replies: [] };
+  if (!comment.text) throw new Error('Comment cannot be empty.');
+  if (firebaseReady) {
+    const post = data().posts.find((p) => p.id === postId);
+    const comments = [...(post?.comments || [])];
+    if (parentCommentId) {
+      const parent = comments.find((c) => c.id === parentCommentId);
+      if (parent) parent.replies = [...(parent.replies || []), comment];
+    } else comments.push(comment);
+    await updateDoc(doc(db, 'posts', postId), { comments });
+    if (post) await addDoc(collection(db, 'notifications'), { userId: post.authorId, type: parentCommentId ? 'reply' : 'comment', actorId: user.id, text: `${user.name} ${parentCommentId ? 'replied to a comment' : 'commented on your post.'}`, postId, conversationId: '', read: false, createdAt: Date.now() });
+    return comment;
+  }
+  mutate((s) => {
+    const p = s.posts.find((x) => x.id === postId);
+    if (!p) return;
+    if (parentCommentId) {
+      const parent = p.comments.find((c) => c.id === parentCommentId);
+      if (parent) {
+        parent.replies = parent.replies || [];
+        parent.replies.push(comment);
+        notify(parent.authorId, 'reply', user.id, `${user.name} replied to your comment.`, { postId });
+      }
+    } else {
+      p.comments.push(comment);
+      notify(p.authorId, 'comment', user.id, `${user.name} commented on your post.`, { postId });
+    }
+    notifyMentions(s, { text: comment.text, id: postId }, user);
+  });
+  return comment;
+}
+
+export async function deleteComment(postId, commentId) {
+  if (firebaseReady) {
+    const post = data().posts.find((p) => p.id === postId);
+    const comments = (post?.comments || []).filter((c) => c.id !== commentId)
+      .map((c) => ({ ...c, replies: (c.replies || []).filter((r) => r.id !== commentId) }));
+    await updateDoc(doc(db, 'posts', postId), { comments });
+    return;
+  }
+  mutate((s) => {
+    const p = s.posts.find((x) => x.id === postId);
+    if (!p) return;
+    p.comments = p.comments.filter((c) => c.id !== commentId);
+    for (const c of p.comments) c.replies = (c.replies || []).filter((r) => r.id !== commentId);
+  });
+}
+
+export async function reportContent(targetType, targetId, reason) {
+  const user = me(); if (!user) throw new Error('Sign in to report content.');
+  const report = { reporterId: user.id, targetType, targetId, reason: String(reason || 'Inappropriate content'), status: 'open', createdAt: Date.now() };
+  if (firebaseReady) { await addDoc(collection(db, 'reports'), report); return; }
+  mutate((s) => { s.reports.unshift({ id: genId('rep'), ...report }); });
+}
+
+// -------------------------------------------------------------------------
+// FRIENDS / FOLLOWS / BLOCKS
+// -------------------------------------------------------------------------
+export function relationship(viewerId, otherId) {
+  const d = data();
+  const f = d.friendships.find((x) => (x.from === viewerId && x.to === otherId) || (x.from === otherId && x.to === viewerId));
+  return f || null;
+}
+
+export async function sendFriendRequest(toId) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  if (firebaseReady) {
+    // Deterministic doc id ({from}_{to}) so firestore.rules can verify a
+    // friendship with a single exists() check for friends-only posts.
+    await setDoc(doc(db, 'friendships', `${user.id}_${toId}`), { from: user.id, to: toId, status: 'pending', createdAt: Date.now() });
+    await addDoc(collection(db, 'notifications'), { userId: toId, type: 'friend_request', actorId: user.id, text: `${user.name} sent you a friend request.`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
+    return;
+  }
+  mutate((s) => {
+    if (s.friendships.some((f) => (f.from === user.id && f.to === toId) || (f.from === toId && f.to === user.id))) return;
+    s.friendships.push({ id: genId('f'), from: user.id, to: toId, status: 'pending', createdAt: Date.now() });
+    notify(toId, 'friend_request', user.id, `${user.name} sent you a friend request.`);
+  });
+}
+
+export async function respondFriendRequest(friendshipId, accept) {
+  if (firebaseReady) {
+    if (accept) await updateDoc(doc(db, 'friendships', friendshipId), { status: 'accepted' });
+    else await deleteDoc(doc(db, 'friendships', friendshipId));
+    return;
+  }
+  mutate((s) => {
+    const f = s.friendships.find((x) => x.id === friendshipId);
+    if (!f) return;
+    if (accept) { f.status = 'accepted'; notify(f.from, 'friend_accept', me()?.id, `${me()?.name} accepted your friend request.`); }
+    else s.friendships = s.friendships.filter((x) => x.id !== friendshipId);
+  });
+}
+
+export async function removeFriendship(friendshipId) {
+  if (firebaseReady) { await deleteDoc(doc(db, 'friendships', friendshipId)); return; }
+  mutate((s) => { s.friendships = s.friendships.filter((x) => x.id !== friendshipId); });
+}
+
+export async function toggleFollow(targetId) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const following = (user.following || []).includes(targetId);
+  if (firebaseReady) {
+    await updateDoc(doc(db, 'users', user.id), { following: following ? arrayRemove(targetId) : arrayUnion(targetId) });
+    await updateDoc(doc(db, 'users', targetId), { followers: following ? arrayRemove(user.id) : arrayUnion(user.id) });
+    return !following;
+  }
+  mutate((s) => {
+    const u = s.users.find((x) => x.id === user.id);
+    const t = s.users.find((x) => x.id === targetId);
+    if (!u || !t) return;
+    u.following = u.following || []; t.followers = t.followers || [];
+    const i = u.following.indexOf(targetId);
+    if (i >= 0) { u.following.splice(i, 1); t.followers = t.followers.filter((x) => x !== user.id); }
+    else { u.following.push(targetId); t.followers.push(user.id); notify(targetId, 'follow', user.id, `${user.name} started following you.`); }
+  });
+  return !following;
+}
+
+export async function toggleBlock(targetId) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  if (firebaseReady) {
+    // Deterministic doc id ({by}_{target}) to match firestore.rules helpers.
+    const ref = doc(db, 'blocks', `${user.id}_${targetId}`);
+    const snap = await getDoc(ref);
+    if (snap.exists()) { await deleteDoc(ref); return false; }
+    await setDoc(ref, { by: user.id, target: targetId, createdAt: Date.now() });
+    return true;
+  }
+  let blocked = false;
+  mutate((s) => {
+    const i = s.blocks.findIndex((b) => b.by === user.id && b.target === targetId);
+    if (i >= 0) { s.blocks.splice(i, 1); blocked = false; }
+    else { s.blocks.push({ by: user.id, target: targetId }); blocked = true; }
+  });
+  return blocked;
+}
+
+// -------------------------------------------------------------------------
+// MESSAGING
+// -------------------------------------------------------------------------
+export async function openConversation(otherId) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const existing = data().conversations.find((c) => c.participants.includes(user.id) && c.participants.includes(otherId) && c.participants.length === 2);
+  if (existing) return existing;
+  const conv = { participants: [user.id, otherId], createdAt: Date.now() };
+  if (firebaseReady) {
+    const ref = await addDoc(collection(db, 'conversations'), conv);
+    return { id: ref.id, ...conv };
+  }
+  const full = { id: genId('conv'), ...conv };
+  mutate((s) => { s.conversations.push(full); });
+  return full;
+}
+
+export async function sendMessage(conversationId, { text, image }) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const msg = { conversationId, senderId: user.id, text: String(text || '').trim(), image: image || '', createdAt: Date.now(), status: 'sent', readBy: [user.id] };
+  if (!msg.text && !msg.image) throw new Error('Message cannot be empty.');
+  if (firebaseReady) {
+    const ref = await addDoc(collection(db, 'messages'), msg);
+    const conv = data().conversations.find((c) => c.id === conversationId);
+    const other = conv?.participants.find((p) => p !== user.id);
+    if (other) await addDoc(collection(db, 'notifications'), { userId: other, type: 'message', actorId: user.id, text: `${user.name} sent you a message.`, postId: '', conversationId, read: false, createdAt: Date.now() });
+    return { id: ref.id, ...msg };
+  }
+  const full = { id: genId('m'), ...msg };
+  mutate((s) => {
+    s.messages.push(full);
+    const conv = s.conversations.find((c) => c.id === conversationId);
+    const other = conv?.participants.find((p) => p !== user.id);
+    if (other) notify(other, 'message', user.id, `${user.name} sent you a message.`, { conversationId });
+  });
+  return full;
+}
+
+export async function markConversationRead(conversationId) {
+  const user = me(); if (!user) return;
+  if (firebaseReady) {
+    const mine = data().messages.filter((m) => m.conversationId === conversationId && !m.readBy?.includes(user.id));
+    for (const m of mine) await updateDoc(doc(db, 'messages', m.id), { readBy: arrayUnion(user.id), status: 'read' });
+    return;
+  }
+  mutate((s) => {
+    for (const m of s.messages) {
+      if (m.conversationId === conversationId && m.senderId !== user.id) {
+        m.readBy = [...new Set([...(m.readBy || []), user.id])];
+        m.status = 'read';
+      }
+    }
+  });
+}
+
+// -------------------------------------------------------------------------
+// NOTIFICATIONS
+// -------------------------------------------------------------------------
+export async function markAllNotificationsRead() {
+  const user = me(); if (!user) return;
+  if (firebaseReady) {
+    const mine = data().notifications.filter((n) => n.userId === user.id && !n.read);
+    for (const n of mine) await updateDoc(doc(db, 'notifications', n.id), { read: true });
+    return;
+  }
+  mutate((s) => { for (const n of s.notifications) if (n.userId === user.id) n.read = true; });
+}
+
+export async function markNotificationRead(id) {
+  if (firebaseReady) { await updateDoc(doc(db, 'notifications', id), { read: true }); return; }
+  mutate((s) => { const n = s.notifications.find((x) => x.id === id); if (n) n.read = true; });
+}
+
+// -------------------------------------------------------------------------
+// ADMIN
+// -------------------------------------------------------------------------
+export async function adminSetRole(userId, role) {
+  if (firebaseReady) { await updateDoc(doc(db, 'users', userId), { role }); return; }
+  mutate((s) => { const u = s.users.find((x) => x.id === userId); if (u) u.role = role; });
+}
+
+export async function adminResolveReport(reportId, action) {
+  if (firebaseReady) {
+    if (action === 'remove-post') {
+      const rep = data().reports.find((r) => r.id === reportId);
+      if (rep?.targetType === 'post') await deleteDoc(doc(db, 'posts', rep.targetId));
+    }
+    await updateDoc(doc(db, 'reports', reportId), { status: action === 'dismiss' ? 'dismissed' : 'actioned' });
+    return;
+  }
+  mutate((s) => {
+    const rep = s.reports.find((r) => r.id === reportId);
+    if (!rep) return;
+    if (action === 'remove-post' && rep.targetType === 'post') s.posts = s.posts.filter((p) => p.id !== rep.targetId);
+    rep.status = action === 'dismiss' ? 'dismissed' : 'actioned';
+  });
+}
+
+export async function adminSetMaintenance(enabled) {
+  if (firebaseReady) { await setDoc(doc(db, 'config', 'app'), { maintenanceMode: enabled }, { merge: true }); return; }
+  mutate((s) => { s.config.maintenanceMode = enabled; });
+}
+
+// -------------------------------------------------------------------------
+// BOTS — admin + demo simulation
+// -------------------------------------------------------------------------
+export async function saveBot(bot) {
+  const b = normaliseBot(bot);
+  if (firebaseReady) {
+    await setDoc(doc(db, 'bots', b.id || genId('bot')), { ...b, id: undefined }, { merge: true });
+    await setDoc(doc(db, 'botBrains', b.id), { botId: b.id, systemPrompt: b.personality.systemPrompt, provider: 'gemini-ready', model: 'template-fallback', updatedAt: Date.now() }, { merge: true });
+    return b;
+  }
+  mutate((s) => {
+    const i = s.bots.findIndex((x) => x.id === b.id);
+    if (i >= 0) s.bots[i] = b; else s.bots.push(b);
+    if (!s.users.some((u) => u.id === b.id)) {
+      s.users.push({ id: b.id, name: b.name, username: b.username, email: '', password: '', bio: b.bio, avatar: b.avatar, cover: '', role: 'bot', isBot: true, botId: b.id, online: true, createdAt: Date.now(), followers: [], following: [], settings: {} });
+    } else {
+      const u = s.users.find((x) => x.id === b.id);
+      Object.assign(u, { name: b.name, username: b.username, bio: b.bio, avatar: b.avatar });
+    }
+    s.botBrains[b.id] = { botId: b.id, systemPrompt: b.personality.systemPrompt, provider: 'gemini-ready', model: 'template-fallback', updatedAt: Date.now() };
+    if (!s.botMemories[b.id]) s.botMemories[b.id] = [];
+    s.botLogs.unshift({ id: genId('log'), botId: b.id, level: 'info', message: `Bot ${b.name} saved by admin.`, createdAt: Date.now() });
+  });
+  return b;
+}
+
+export async function deleteBot(botId) {
+  if (firebaseReady) {
+    await deleteDoc(doc(db, 'bots', botId));
+    await deleteDoc(doc(db, 'botBrains', botId));
+    return;
+  }
+  mutate((s) => {
+    s.bots = s.bots.filter((b) => b.id !== botId);
+    s.users = s.users.filter((u) => u.id !== botId);
+    delete s.botBrains[botId];
+    delete s.botMemories[botId];
+  });
+}
+
+export async function setGlobalBotEnabled(enabled) {
+  if (firebaseReady) { await setDoc(doc(db, 'botSettings', 'global'), { enabled }, { merge: true }); return; }
+  mutate((s) => { s.botSettings.global.enabled = enabled; });
+}
+
+export async function addBotMemory(botId, text) {
+  const entry = { id: genId('mem'), text, createdAt: Date.now(), updatedAt: Date.now(), pinned: false };
+  if (firebaseReady) {
+    const ref = doc(db, 'botMemories', botId);
+    const snap = await getDoc(ref);
+    const items = snap.exists() ? (snap.data().items || []) : [];
+    await setDoc(ref, { botId, items: [...items, entry] });
+    return;
+  }
+  mutate((s) => { (s.botMemories[botId] = s.botMemories[botId] || []).push(entry); });
+}
+
+export async function deleteBotMemory(botId, memoryId) {
+  if (firebaseReady) {
+    const ref = doc(db, 'botMemories', botId);
+    const snap = await getDoc(ref);
+    if (snap.exists()) await setDoc(ref, { botId, items: (snap.data().items || []).filter((m) => m.id !== memoryId) });
+    return;
+  }
+  mutate((s) => { if (s.botMemories[botId]) s.botMemories[botId] = s.botMemories[botId].filter((m) => m.id !== memoryId); });
+}
+
+// Client-side demo bot simulation: one runner cycle against local state.
+// In Firebase mode the real engine lives in Cloud Functions (botRunner);
+// this simulation is used only for demo mode so bot activity is visible.
+export function runDemoBotCycle() {
+  if (firebaseReady) return { ran: false, reason: 'Bot engine runs in Cloud Functions when Firebase is configured.' };
+  const s = getState();
+  if (!s.botSettings.global.enabled) return { ran: false, reason: 'Global bot kill switch is off.' };
+  const results = [];
+  mutate((st) => {
+    st.botSettings.counters = st.botSettings.counters || {};
+    for (const bot of st.bots) {
+      const counters = st.botSettings.counters[bot.id] || { postsToday: 0, commentsToday: 0, likesToday: 0, messagesToday: 0, lastActionAt: 0 };
+      const decision = decideBotAction(bot, { ...counters, lastActionAt: 0 }, true);
+      if (decision.action === 'none') { results.push({ bot: bot.name, action: 'none', reason: decision.reason }); continue; }
+      if (decision.action === 'post') {
+        const text = generateTemplatePost(bot);
+        st.posts.unshift({ id: genId('p'), authorId: bot.id, text: `AI Bot post · ${text}`, image: '', visibility: 'public', createdAt: Date.now(), editedAt: 0, likes: [], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [] });
+        counters.postsToday += 1;
+        st.botActivities.unshift({ id: genId('act'), botId: bot.id, action: 'post', detail: text.slice(0, 90), createdAt: Date.now(), status: 'ok' });
+      } else if (decision.action === 'comment') {
+        const target = st.posts.find((p) => p.authorId !== bot.id);
+        if (target) {
+          const text = generateTemplateComment(bot);
+          target.comments.push({ id: genId('c'), authorId: bot.id, text, createdAt: Date.now(), replies: [] });
+          counters.commentsToday += 1;
+          st.botActivities.unshift({ id: genId('act'), botId: bot.id, action: 'comment', detail: text.slice(0, 90), createdAt: Date.now(), status: 'ok' });
+          const author = st.users.find((u) => u.id === target.authorId);
+          if (author && !author.isBot) {
+            st.notifications.unshift({ id: genId('n'), userId: author.id, type: 'comment', actorId: bot.id, text: `${bot.name} (AI Bot) commented on your post.`, postId: target.id, conversationId: '', read: false, createdAt: Date.now() });
+          }
+        }
+      } else if (decision.action === 'like') {
+        const target = st.posts.find((p) => p.authorId !== bot.id && !p.likes.includes(bot.id));
+        if (target) { target.likes.push(bot.id); counters.likesToday += 1; st.botActivities.unshift({ id: genId('act'), botId: bot.id, action: 'like', detail: 'Liked a post.', createdAt: Date.now(), status: 'ok' }); }
+      }
+      counters.lastActionAt = Date.now();
+      st.botSettings.counters[bot.id] = counters;
+      results.push({ bot: bot.name, action: decision.action });
+    }
+    st.aiUsage.callsToday += results.filter((r) => r.action !== 'none').length;
+    st.aiUsage.updatedAt = Date.now();
+  });
+  return { ran: true, results };
+}
+
+// Bot reply in a 1-1 conversation (demo mode): uses the bot's OWN memories.
+export function demoBotReply(botUserId, userText) {
+  if (firebaseReady) return null;
+  const s = getState();
+  const bot = s.bots.find((b) => b.id === botUserId);
+  if (!bot || !bot.active || !s.botSettings.global.enabled) return null;
+  const memories = s.botMemories[bot.id] || [];
+  const interest = bot.personality.interests.find((i) => String(userText).toLowerCase().includes(i.split(' ')[0].toLowerCase()));
+  const reply = interest
+    ? `I love talking about ${interest}! As an AI bot I am still learning, but here is my take: it is a great topic to explore together. What part interests you most?`
+    : `Thanks for messaging me! I am ${bot.name}, an AI bot with a ${bot.personality.tone} style. My favourite topics are ${bot.personality.interests.join(', ') || 'good conversation'}. Tell me more about what you said: "${String(userText).slice(0, 60)}"`;
+  mutate((st) => {
+    st.botMemories[bot.id] = memoryFromConversation(st.botMemories[bot.id] || memories, userText, reply);
+    st.botActivities.unshift({ id: genId('act'), botId: bot.id, action: 'message', detail: 'Replied to a message.', createdAt: Date.now(), status: 'ok' });
+  });
+  return reply;
+}
+
+export { resetDemo, findUser, userByUsername, friendIdsOf, blockedIdsOf };
+export { postLimiter };

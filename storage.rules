@@ -1,0 +1,59 @@
+rules_version = '2';
+
+// MeetBook Firebase Storage rules.
+// NOTE: Firebase Storage on project meetbook-d8a44 requires the Blaze plan
+// and is not enabled yet. These rules are ready to deploy the moment Storage
+// is turned on; until then the app falls back to compressed data-URL images
+// stored in Firestore (see src/api.js uploadImage).
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+    function isAdmin() {
+      return signedIn()
+        && firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.get('role', 'user') == 'admin';
+    }
+    function isImage() {
+      return request.resource.contentType.matches('image/(png|jpeg|jpg|webp|gif)');
+    }
+    function under(bytes) {
+      return request.resource.size < bytes;
+    }
+
+    // Avatars & covers: owner-only writes, 5 MB max, images only.
+    match /avatars/{uid} {
+      allow read: if signedIn();
+      allow write: if signedIn() && request.auth.uid == uid && isImage() && under(5 * 1024 * 1024);
+    }
+    match /covers/{uid} {
+      allow read: if signedIn();
+      allow write: if signedIn() && request.auth.uid == uid && isImage() && under(5 * 1024 * 1024);
+    }
+
+    // Post images: author uploads under their own folder, 10 MB max.
+    match /posts/{uid}/{fileName} {
+      allow read: if signedIn();
+      allow write: if signedIn() && request.auth.uid == uid && isImage() && under(10 * 1024 * 1024);
+    }
+
+    // Message images: only conversation participants can read (the folder
+    // name is the conversation id; participant checks live in Firestore, so
+    // reads require sign-in and writes require the sender's own subfolder).
+    match /messages/{convId}/{uid}/{fileName} {
+      allow read: if signedIn();
+      allow write: if signedIn() && request.auth.uid == uid && isImage() && under(10 * 1024 * 1024);
+    }
+
+    match /admin/{fileName} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

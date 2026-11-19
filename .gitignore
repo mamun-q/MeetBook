@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.local
+.DS_Store
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+# Service account / credential files — never commit
+*service-account*.json
+serviceAccountKey.json
+firebase-adminsdk*.json
+.google/
+functions/node_modules/
