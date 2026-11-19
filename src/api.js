@@ -8,7 +8,8 @@ import {
 } from './store.js';
 import { firebaseReady, auth, db, storage, googleProvider } from './firebase.js';
 import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError } from './utils.js';
-import { generateTemplatePost, generateTemplateComment, decideBotAction, memoryFromConversation, normaliseBot } from './botLogic.js';
+import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay } from './botLogic.js';
+import { generateGeminiText, canAccessBotSecrets, GEMINI_MODEL } from './gemini.js';
 
 // --- Firebase imports are dynamic-free static imports of the SDK ---------
 import {
@@ -56,6 +57,8 @@ function blankRemote() {
     conversations: [], messages: [], notifications: [], reports: [], events: [], reviews: [], groupRequests: [],
     bots: [], botBrains: {}, botMemories: {}, botActivities: [], botLogs: [],
     botSettings: { global: { enabled: true }, counters: {} },
+    botSecrets: { geminiApiKey: '' },
+    botRunner: { live: true, active: false, lastCycleAt: 0, lastSummary: '' },
     config: { maintenanceMode: false },
     aiUsage: { callsToday: 0, tokensToday: 0, updatedAt: 0 }
   };
@@ -213,6 +216,7 @@ export function onAuthReady(cb) {
     return onAuthStateChanged(auth, async (user) => {
       remoteUid = user ? user.uid : '';
       if (user) startRemoteSync();
+      else stopBotRunner(); // no session -> no live bot runner, ever
       cb(user ? { id: user.uid } : null);
     });
   }
@@ -256,7 +260,7 @@ function startRemoteSync() {
   // timeAgo() directly renders a 1970s date. (Stories/events mappers
   // below predate the helper and call tsToMs inline — same effect.)
   const mapUser = (d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt', 'lastSeen']) });
-  onSnapshot(query(collection(db, 'users'), limit(300)), (snap) => patch((r) => { r.users = snap.docs.map(mapUser); }));
+  onSnapshot(query(collection(db, 'users'), limit(300)), (snap) => { patch((r) => { r.users = snap.docs.map(mapUser); }); void loadBotSecrets(); syncLiveBotRunner(); });
   // Posts: three provable listeners merged by id (see header note).
   // Comment/reply timestamps are normalised too — they are written as
   // client-side ms today, but a Timestamp shape must never leak through.
@@ -1348,12 +1352,44 @@ export async function adminSetMaintenance(enabled) {
 // -------------------------------------------------------------------------
 // BOTS — admin + demo simulation
 // -------------------------------------------------------------------------
+// The public users/{botId} profile every bot account needs in live mode
+// so it can author posts, appear in search and hold conversations. The
+// users rules let an admin create exactly this shape (isBot == true,
+// role 'bot'); the matching update rides the admin branch.
+function botUserProfile(bot) {
+  return {
+    name: bot.name, username: bot.username, email: '', bio: bot.bio, avatar: bot.avatar, cover: '',
+    work: '', education: '', currentCity: '', hometown: '', relationship: '', website: '', nickname: '',
+    dob: '', gender: '', role: 'bot', isBot: true, botId: bot.id, online: true, lastSeen: Date.now(),
+    createdAt: bot.createdAt || Date.now(), followers: [], following: [], closeFriends: [], settings: {}
+  };
+}
+
+// Create the bot's users doc if missing; if it exists, only sync the
+// identity fields (never clobber followers/following that accumulated).
+async function ensureBotUserDoc(bot) {
+  const existing = data().users.find((u) => u.id === bot.id);
+  if (!existing) {
+    await setDoc(doc(db, 'users', bot.id), botUserProfile(bot));
+    return;
+  }
+  if (existing.name !== bot.name || existing.username !== bot.username || existing.avatar !== bot.avatar || existing.bio !== bot.bio) {
+    await updateDoc(doc(db, 'users', bot.id), { name: bot.name, username: bot.username, avatar: bot.avatar, bio: bot.bio });
+  }
+}
+
 export async function saveBot(bot) {
   const b = normaliseBot(bot);
   if (firebaseReady) {
-    await setDoc(doc(db, 'bots', b.id || genId('bot')), { ...b, id: undefined }, { merge: true });
-    await setDoc(doc(db, 'botBrains', b.id), { botId: b.id, systemPrompt: b.personality.systemPrompt, provider: 'gemini-ready', model: 'template-fallback', updatedAt: Date.now() }, { merge: true });
-    return b;
+    const id = b.id || genId('bot');
+    const saved = { ...b, id };
+    await setDoc(doc(db, 'bots', id), { ...saved, id: undefined }, { merge: true });
+    await setDoc(doc(db, 'botBrains', id), { botId: id, systemPrompt: saved.personality.systemPrompt, provider: 'gemini-ready', model: 'template-fallback', updatedAt: Date.now() }, { merge: true });
+    // Best-effort: the live runner re-ensures the user doc every cycle,
+    // so a hiccup here (e.g. rules not yet republished) must not break
+    // saving the bot's configuration.
+    try { await ensureBotUserDoc(saved); } catch { /* healed by the runner */ }
+    return saved;
   }
   mutate((s) => {
     const i = s.bots.findIndex((x) => x.id === b.id);
@@ -1412,29 +1448,156 @@ export async function deleteBotMemory(botId, memoryId) {
   mutate((s) => { if (s.botMemories[botId]) s.botMemories[botId] = s.botMemories[botId].filter((m) => m.id !== memoryId); });
 }
 
+// -------------------------------------------------------------------------
+// GEMINI KEY (Spark-plan browser wiring) — the admin saves a Google
+// Gemini API key in the Bot Admin Panel. Live mode: stored ONLY in the
+// admin-only Firestore doc botSecrets/config and fetched ONLY when the
+// signed-in user is an admin (rules enforce the same). Demo mode: kept
+// in local demo state. The key is never rendered back into the UI — the
+// panel shows set/not-set status only.
+// -------------------------------------------------------------------------
+let botSecretsLoaded = false;
+export async function loadBotSecrets() {
+  if (!firebaseReady || botSecretsLoaded) return;
+  if (!canAccessBotSecrets(me())) return; // non-admins never read botSecrets
+  botSecretsLoaded = true;
+  try {
+    const snap = await getDoc(doc(db, 'botSecrets', 'config'));
+    if (remote) {
+      remote.botSecrets = { geminiApiKey: snap.exists() ? String(snap.data().geminiApiKey || '') : '' };
+      document.dispatchEvent(new CustomEvent('meetbook:data'));
+    }
+  } catch {
+    botSecretsLoaded = false; // permission/network hiccup — retry on next sync tick
+  }
+}
+
+export async function saveGeminiApiKey(key) {
+  const value = String(key || '').trim();
+  if (!value) throw new Error('Paste a Gemini API key first.');
+  if (!isAdmin()) throw new Error('Only admins can manage the Gemini API key.');
+  if (firebaseReady) {
+    await setDoc(doc(db, 'botSecrets', 'config'), { geminiApiKey: value, updatedAt: Date.now() }, { merge: true });
+    botSecretsLoaded = true;
+    if (remote) {
+      remote.botSecrets = { geminiApiKey: value };
+      document.dispatchEvent(new CustomEvent('meetbook:data'));
+    }
+    return;
+  }
+  mutate((s) => { (s.botSecrets ||= { geminiApiKey: '' }).geminiApiKey = value; });
+}
+
+export async function removeGeminiApiKey() {
+  if (!isAdmin()) throw new Error('Only admins can manage the Gemini API key.');
+  if (firebaseReady) {
+    await deleteDoc(doc(db, 'botSecrets', 'config'));
+    botSecretsLoaded = true;
+    if (remote) {
+      remote.botSecrets = { geminiApiKey: '' };
+      document.dispatchEvent(new CustomEvent('meetbook:data'));
+    }
+    return;
+  }
+  mutate((s) => { (s.botSecrets ||= { geminiApiKey: '' }).geminiApiKey = ''; });
+}
+
+// Demo-mode botLogs write — the existing client-side log channel (the
+// same one saveBot uses). Live-mode botLogs are Functions-only per the
+// rules, so this is a no-op there.
+function logBotEvent(botId, level, message) {
+  if (firebaseReady) return;
+  mutate((s) => { s.botLogs.unshift({ id: genId('log'), botId, level, message, createdAt: Date.now() }); });
+}
+
+// Brain bookkeeping: record which provider produced the bot's latest
+// text, mirroring the botBrains doc saveBot maintains. Live mode writes
+// the botBrains doc directly — its rules are admin-writable (unlike
+// botActivities/botLogs, which stay Functions-only, so those are
+// skipped silently in live mode). Best-effort: never fail a cycle.
+function recordBotBrain(bot, provider) {
+  if (firebaseReady) {
+    setDoc(doc(db, 'botBrains', bot.id), {
+      botId: bot.id, systemPrompt: bot.personality.systemPrompt, provider,
+      model: provider === 'gemini' ? GEMINI_MODEL : 'template-fallback', updatedAt: Date.now()
+    }, { merge: true }).catch(() => { /* bookkeeping only */ });
+    return;
+  }
+  mutate((s) => {
+    const prev = s.botBrains[bot.id] || {};
+    s.botBrains[bot.id] = {
+      ...prev,
+      botId: bot.id,
+      systemPrompt: bot.personality.systemPrompt,
+      provider,
+      model: provider === 'gemini' ? GEMINI_MODEL : 'template-fallback',
+      updatedAt: Date.now()
+    };
+  });
+}
+
+// One bot text, Gemini-first: when a key is saved, try Gemini (called
+// from this browser — the Spark-plan substitute for the Functions
+// provider); ANY failure falls back silently to the template text the
+// caller prepared. Returns { text, provider }.
+async function generateBotText(bot, memories, context, templateText) {
+  const apiKey = String(data().botSecrets?.geminiApiKey || '').trim();
+  if (apiKey) {
+    const text = await generateGeminiText({ apiKey, bot, memories, context });
+    if (text) {
+      recordBotBrain(bot, 'gemini');
+      return { text, provider: 'gemini' };
+    }
+    logBotEvent(bot.id, 'warn', `Gemini failed for ${bot.name}, using template fallback.`);
+  }
+  recordBotBrain(bot, 'template-fallback');
+  return { text: templateText, provider: 'template-fallback' };
+}
+
 // Client-side demo bot simulation: one runner cycle against local state.
 // In Firebase mode the real engine lives in Cloud Functions (botRunner);
 // this simulation is used only for demo mode so bot activity is visible.
-export function runDemoBotCycle() {
+export async function runDemoBotCycle() {
   if (firebaseReady) return { ran: false, reason: 'Bot engine runs in Cloud Functions when Firebase is configured.' };
   const s = getState();
   if (!s.botSettings.global.enabled) return { ran: false, reason: 'Global bot kill switch is off.' };
   const results = [];
+  // Plan phase: decide each bot's action from its counters (same gating
+  // as before) and generate its text up front — Gemini when a key is
+  // saved, template otherwise — because generation is async while the
+  // state mutation below must stay atomic.
+  const plan = [];
+  for (const bot of s.bots) {
+    const counters = { ...(s.botSettings.counters?.[bot.id] || { postsToday: 0, commentsToday: 0, likesToday: 0, messagesToday: 0, lastActionAt: 0 }) };
+    const decision = decideBotAction(bot, { ...counters, lastActionAt: 0 }, true);
+    if (decision.action === 'none') { results.push({ bot: bot.name, action: 'none', reason: decision.reason }); continue; }
+    const entry = { bot, counters, action: decision.action, gen: null, targetId: '' };
+    if (decision.action === 'post') {
+      entry.gen = await generateBotText(bot, s.botMemories[bot.id] || [], { kind: 'post' }, generateTemplatePost(bot));
+    } else if (decision.action === 'comment') {
+      const target = s.posts.find((p) => p.authorId !== bot.id);
+      if (target) {
+        entry.targetId = target.id;
+        entry.gen = await generateBotText(bot, s.botMemories[bot.id] || [], { kind: 'comment', text: target.text }, generateTemplateComment(bot));
+      }
+    }
+    plan.push(entry);
+    results.push({ bot: bot.name, action: decision.action });
+  }
+  // Apply phase: one mutation, same writes/counters as the old cycle.
   mutate((st) => {
     st.botSettings.counters = st.botSettings.counters || {};
-    for (const bot of st.bots) {
-      const counters = st.botSettings.counters[bot.id] || { postsToday: 0, commentsToday: 0, likesToday: 0, messagesToday: 0, lastActionAt: 0 };
-      const decision = decideBotAction(bot, { ...counters, lastActionAt: 0 }, true);
-      if (decision.action === 'none') { results.push({ bot: bot.name, action: 'none', reason: decision.reason }); continue; }
-      if (decision.action === 'post') {
-        const text = generateTemplatePost(bot);
-        st.posts.unshift({ id: genId('p'), authorId: bot.id, text: `AI Bot post · ${text}`, image: '', visibility: 'public', audienceIds: [], createdAt: Date.now(), editedAt: 0, likes: [], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [], groupId: '', pageId: '', pageName: '', pageAvatar: '' });
+    for (const entry of plan) {
+      const { bot, counters } = entry;
+      if (entry.action === 'post' && entry.gen) {
+        const text = entry.gen.text;
+        st.posts.unshift({ id: genId('p'), authorId: bot.id, text: `AI Bot post · ${text}`, image: '', visibility: 'public', audienceIds: [], createdAt: Date.now(), editedAt: 0, likes: [], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [], groupId: '', pageId: '', pageName: '', pageAvatar: '', generatedBy: entry.gen.provider });
         counters.postsToday += 1;
         st.botActivities.unshift({ id: genId('act'), botId: bot.id, action: 'post', detail: text.slice(0, 90), createdAt: Date.now(), status: 'ok' });
-      } else if (decision.action === 'comment') {
-        const target = st.posts.find((p) => p.authorId !== bot.id);
+      } else if (entry.action === 'comment' && entry.gen) {
+        const target = st.posts.find((p) => p.id === entry.targetId) || st.posts.find((p) => p.authorId !== bot.id);
         if (target) {
-          const text = generateTemplateComment(bot);
+          const text = entry.gen.text;
           target.comments.push({ id: genId('c'), authorId: bot.id, text, createdAt: Date.now(), replies: [] });
           counters.commentsToday += 1;
           st.botActivities.unshift({ id: genId('act'), botId: bot.id, action: 'comment', detail: text.slice(0, 90), createdAt: Date.now(), status: 'ok' });
@@ -1443,13 +1606,12 @@ export function runDemoBotCycle() {
             st.notifications.unshift({ id: genId('n'), userId: author.id, type: 'comment', actorId: bot.id, text: `${bot.name} (AI Bot) commented on your post.`, postId: target.id, conversationId: '', read: false, createdAt: Date.now() });
           }
         }
-      } else if (decision.action === 'like') {
+      } else if (entry.action === 'like') {
         const target = st.posts.find((p) => p.authorId !== bot.id && !p.likes.includes(bot.id));
         if (target) { target.likes.push(bot.id); counters.likesToday += 1; st.botActivities.unshift({ id: genId('act'), botId: bot.id, action: 'like', detail: 'Liked a post.', createdAt: Date.now(), status: 'ok' }); }
       }
       counters.lastActionAt = Date.now();
       st.botSettings.counters[bot.id] = counters;
-      results.push({ bot: bot.name, action: decision.action });
     }
     st.aiUsage.callsToday += results.filter((r) => r.action !== 'none').length;
     st.aiUsage.updatedAt = Date.now();
@@ -1457,22 +1619,275 @@ export function runDemoBotCycle() {
   return { ran: true, results };
 }
 
-// Bot reply in a 1-1 conversation (demo mode): uses the bot's OWN memories.
-export function demoBotReply(botUserId, userText) {
+// Bot reply in a 1-1 conversation (demo mode): uses the bot's OWN
+// memories. Gemini-first when a key is saved (the user's message is the
+// context, so a Bangla message earns a Bangla reply); the personality
+// template below is the silent fallback.
+export async function demoBotReply(botUserId, userText) {
   if (firebaseReady) return null;
   const s = getState();
   const bot = s.bots.find((b) => b.id === botUserId);
   if (!bot || !bot.active || !s.botSettings.global.enabled) return null;
   const memories = s.botMemories[bot.id] || [];
-  const interest = bot.personality.interests.find((i) => String(userText).toLowerCase().includes(i.split(' ')[0].toLowerCase()));
-  const reply = interest
-    ? `I love talking about ${interest}! As an AI bot I am still learning, but here is my take: it is a great topic to explore together. What part interests you most?`
-    : `Thanks for messaging me! I am ${bot.name}, an AI bot with a ${bot.personality.tone} style. My favourite topics are ${bot.personality.interests.join(', ') || 'good conversation'}. Tell me more about what you said: "${String(userText).slice(0, 60)}"`;
+  const { text: reply } = await generateBotText(bot, memories, { kind: 'message', text: String(userText) }, templateBotMessageReply(bot, userText));
   mutate((st) => {
     st.botMemories[bot.id] = memoryFromConversation(st.botMemories[bot.id] || memories, userText, reply);
     st.botActivities.unshift({ id: genId('act'), botId: bot.id, action: 'message', detail: 'Replied to a message.', createdAt: Date.now(), status: 'ok' });
   });
   return reply;
+}
+
+// -------------------------------------------------------------------------
+// LIVE BOT RUNNER (Spark plan) — the Cloud Functions engine
+// (functions/botEngine.js) needs Blaze, so on Spark bots act from an
+// ADMIN's signed-in browser instead: this client runs bot cycles and
+// writes on behalf of bot accounts, which the Firestore rules allow
+// only through the narrow admin-as-bot branches (the author/sender
+// must be a users doc with isBot == true). Text generation is the same
+// Gemini-first path as demo mode (generateBotText). LIMITATION, by
+// design: bots only act while an admin browser session is open — the
+// runner starts when an admin signs in, runs one cycle shortly after,
+// then on BOT_RUNNER_INTERVAL_MS, and stops on sign-out. Non-admin
+// sessions never run it. Daily counters persist in the admin-writable
+// botSettings/counters doc (botActivities/botLogs are Functions-only
+// writes per the rules, so live bookkeeping lands in botBrains + the
+// panel's last-cycle status instead).
+// -------------------------------------------------------------------------
+export const BOT_RUNNER_INTERVAL_MS = 3 * 60 * 1000;
+export const BOT_RUNNER_INITIAL_DELAY_MS = 20 * 1000;
+
+let liveRunnerTimer = null;
+let liveRunnerInitialTimer = null;
+let botCycleInFlight = false;
+
+function setLiveRunnerState(patchObj) {
+  if (!remote) return;
+  remote.botRunner = { live: true, active: Boolean(liveRunnerTimer), ...(remote.botRunner || {}), ...patchObj };
+  document.dispatchEvent(new CustomEvent('meetbook:data'));
+}
+
+export function botRunnerIsActive() {
+  return Boolean(liveRunnerTimer);
+}
+
+export function startBotRunner() {
+  if (!firebaseReady || !isAdmin() || liveRunnerTimer) return botRunnerIsActive();
+  liveRunnerInitialTimer = setTimeout(() => { void runScheduledBotCycle(); }, BOT_RUNNER_INITIAL_DELAY_MS);
+  liveRunnerTimer = setInterval(() => { void runScheduledBotCycle(); }, BOT_RUNNER_INTERVAL_MS);
+  setLiveRunnerState({ active: true });
+  return true;
+}
+
+export function stopBotRunner() {
+  if (liveRunnerInitialTimer) { clearTimeout(liveRunnerInitialTimer); liveRunnerInitialTimer = null; }
+  if (liveRunnerTimer) { clearInterval(liveRunnerTimer); liveRunnerTimer = null; }
+  setLiveRunnerState({ active: false });
+}
+
+// Called on every users snapshot: the runner exists exactly while the
+// signed-in user is an admin.
+function syncLiveBotRunner() {
+  if (!firebaseReady) return;
+  if (isAdmin()) startBotRunner();
+  else stopBotRunner();
+}
+
+// Auto cycles claim their interval window in botRunners (admin-only
+// collection) so two admin tabs don't both post for the same window —
+// the same duplicate-task protection the Functions engine uses.
+async function runScheduledBotCycle() {
+  if (!firebaseReady || !isAdmin()) return;
+  try {
+    const windowKey = Math.floor(Date.now() / BOT_RUNNER_INTERVAL_MS);
+    const ref = doc(db, 'botRunners', `autocycle_${windowKey}`);
+    const snap = await getDoc(ref);
+    if (snap.exists()) return; // another admin session already ran this window
+    await setDoc(ref, { kind: 'live-autocycle', window: windowKey, by: currentUid(), createdAt: Date.now(), status: 'claimed' });
+  } catch { return; /* cannot claim — skip this window quietly */ }
+  await runLiveBotCycle();
+}
+
+async function loadLiveBotCounters() {
+  const day = counterDayKey();
+  try {
+    const snap = await getDoc(doc(db, 'botSettings', 'counters'));
+    if (snap.exists()) return { day, counters: botCountersForDay(snap.data(), day) };
+  } catch { /* fall through: a fresh day of counters */ }
+  return { day, counters: {} };
+}
+
+async function saveLiveBotCounters(day, counters) {
+  try { await setDoc(doc(db, 'botSettings', 'counters'), { day, counters, updatedAt: Date.now() }); } catch { /* best-effort */ }
+}
+
+async function loadLiveBotMemories(botId) {
+  try {
+    const snap = await getDoc(doc(db, 'botMemories', botId));
+    if (snap.exists()) return snap.data().items || [];
+  } catch { /* fall through to the mirrored copy */ }
+  return data().botMemories[botId] || [];
+}
+
+// Find this bot's unreplied 1-1 conversations straight from Firestore:
+// the admin's mirrored state only contains the ADMIN's own chats, so
+// the runner queries for the bot (the conversations/messages read
+// rules allow admins). Latest message per conversation decides — a
+// conversation whose latest message is the human's is unreplied.
+async function findLiveReplyTargets(bot) {
+  const convSnap = await getDocs(query(collection(db, 'conversations'), where('participants', 'array-contains', bot.id), limit(50)));
+  const convs = convSnap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })).slice(0, 20);
+  const latestByConv = new Map();
+  for (const conv of convs) {
+    if (conv.isGroup) continue;
+    const msgSnap = await getDocs(query(collection(db, 'messages'), where('conversationId', '==', conv.id), orderBy('createdAt', 'desc'), limit(1)));
+    const latest = msgSnap.docs[0];
+    latestByConv.set(conv.id, latest ? { id: latest.id, ...normaliseTimeFields(latest.data(), ['createdAt']) } : null);
+  }
+  return findBotReplyTargets(convs, latestByConv, bot.id);
+}
+
+async function latestLiveMessage(conversationId) {
+  const snap = await getDocs(query(collection(db, 'messages'), where('conversationId', '==', conversationId), orderBy('createdAt', 'desc'), limit(1)));
+  const d = snap.docs[0];
+  return d ? { id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) } : null;
+}
+
+// One live bot cycle: for every active bot, first answer at most one
+// unreplied 1-1 conversation (messages/day counter), then take the
+// decideBotAction-driven autonomous action (post/comment/like) under
+// the same counters + kill switch as the demo cycle and the Functions
+// engine. Returns the demo cycle's { ran, results } shape.
+export async function runLiveBotCycle() {
+  if (!firebaseReady) return { ran: false, reason: 'The live bot runner needs Firebase mode.' };
+  if (!isAdmin()) return { ran: false, reason: 'Only admins can run bot cycles.' };
+  if (botCycleInFlight) return { ran: false, reason: 'A bot cycle is already running.' };
+  if (data().botSettings.global.enabled === false) {
+    setLiveRunnerState({ lastCycleAt: Date.now(), lastSummary: 'Skipped: global bot kill switch is off.' });
+    return { ran: false, reason: 'Global bot kill switch is off.' };
+  }
+  botCycleInFlight = true;
+  const results = [];
+  try {
+    await loadBotSecrets(); // make sure the Gemini key is in memory
+    const { day, counters } = await loadLiveBotCounters();
+    let actions = 0;
+    for (const bot of data().bots) {
+      if (!bot.active) { results.push({ bot: bot.name, action: 'none', reason: 'bot is deactivated' }); continue; }
+      const c = { ...emptyBotCounters(), ...(counters[bot.id] || {}) };
+      counters[bot.id] = c;
+      try {
+        try { await ensureBotUserDoc(bot); } catch { /* rules may lag a deploy — actions below will surface real errors */ }
+        const memories = await loadLiveBotMemories(bot.id);
+        let acted = false;
+
+        // --- chat reply (does not consume the min-interval pacing;
+        // the messages/day counter is its gate) ---
+        if (c.messagesToday < bot.limits.messagesPerDay) {
+          const targets = await findLiveReplyTargets(bot);
+          if (targets.length) {
+            const target = targets[0];
+            // Re-check the latest message right before writing, so two
+            // cycles (or a fast human) never produce a double reply.
+            const fresh = await latestLiveMessage(target.conversationId);
+            if (fresh && fresh.senderId === target.humanId) {
+              const gen = await generateBotText(bot, memories, { kind: 'message', text: fresh.text }, templateBotMessageReply(bot, fresh.text));
+              await addDoc(collection(db, 'messages'), {
+                conversationId: target.conversationId, participants: [...target.participants],
+                senderId: bot.id, text: gen.text, image: '', audio: '',
+                createdAt: Date.now(), status: 'sent', readBy: [bot.id]
+              });
+              await addDoc(collection(db, 'notifications'), {
+                userId: target.humanId, type: 'message', actorId: bot.id,
+                text: `${bot.name} sent you a message.`, postId: '', conversationId: target.conversationId,
+                read: false, createdAt: Date.now()
+              });
+              const updatedMemories = memoryFromConversation(memories, fresh.text, gen.text);
+              try { await setDoc(doc(db, 'botMemories', bot.id), { botId: bot.id, items: updatedMemories }); } catch { /* memory is best-effort */ }
+              c.messagesToday += 1;
+              actions += 1;
+              acted = true;
+              results.push({ bot: bot.name, action: 'message' });
+            }
+          }
+        }
+
+        // --- autonomous action (post / comment / like) ---
+        const decision = decideBotAction(bot, c, true);
+        if (decision.action === 'post') {
+          const gen = await generateBotText(bot, memories, { kind: 'post' }, generateTemplatePost(bot));
+          // Same stored shape createPost writes: the audience pair is
+          // denormalized via postAudience (public -> audienceIds []),
+          // so the provable feed listeners pick the post up.
+          const audience = postAudience({ visibility: 'public', authorFriendIds: friendIdsFromData(bot.id), authorCloseFriendIds: [] });
+          await addDoc(collection(db, 'posts'), {
+            authorId: bot.id, text: `AI Bot post · ${gen.text}`, image: '',
+            visibility: audience.visibility, audienceIds: audience.audienceIds,
+            createdAt: serverTimestamp(), editedAt: 0,
+            likes: [], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [],
+            groupId: '', pageId: '', pageName: '', pageAvatar: '',
+            poll: null, location: '', feeling: '', pinned: false, generatedBy: gen.provider
+          });
+          c.postsToday += 1;
+          c.lastActionAt = Date.now();
+          actions += 1;
+          acted = true;
+          results.push({ bot: bot.name, action: 'post' });
+        } else if (decision.action === 'comment') {
+          const candidates = (data().posts || []).filter((p) => p.visibility === 'public' && !p.groupId && !p.pageId && p.authorId !== bot.id);
+          const target = candidates.find((p) => !(p.comments || []).some((cm) => cm.authorId === bot.id)) || candidates[0];
+          if (target) {
+            const blockSnap = await getDoc(doc(db, 'blocks', `${target.authorId}_${bot.id}`));
+            if (blockSnap.exists()) {
+              results.push({ bot: bot.name, action: 'none', reason: 'post author blocked this bot' });
+            } else {
+              const gen = await generateBotText(bot, memories, { kind: 'comment', text: target.text }, generateTemplateComment(bot));
+              const postSnap = await getDoc(doc(db, 'posts', target.id));
+              const freshComments = postSnap.exists() ? (postSnap.data().comments || []) : (target.comments || []);
+              const comment = { id: genId('c'), authorId: bot.id, text: gen.text, createdAt: Date.now(), replies: [] };
+              await updateDoc(doc(db, 'posts', target.id), { comments: [...freshComments, comment] });
+              await addDoc(collection(db, 'notifications'), {
+                userId: target.authorId, type: 'comment', actorId: bot.id,
+                text: `${bot.name} (AI Bot) commented on your post.`, postId: target.id, conversationId: '',
+                read: false, createdAt: Date.now()
+              });
+              c.commentsToday += 1;
+              c.lastActionAt = Date.now();
+              actions += 1;
+              acted = true;
+              results.push({ bot: bot.name, action: 'comment' });
+            }
+          }
+        } else if (decision.action === 'like') {
+          const target = (data().posts || []).find((p) => !p.groupId && !p.pageId && p.authorId !== bot.id && !(p.likes || []).includes(bot.id));
+          if (target) {
+            await updateDoc(doc(db, 'posts', target.id), { likes: arrayUnion(bot.id) });
+            c.likesToday += 1;
+            c.lastActionAt = Date.now();
+            actions += 1;
+            acted = true;
+            results.push({ bot: bot.name, action: 'like' });
+          }
+        }
+        if (!acted) results.push({ bot: bot.name, action: 'none', reason: decision.action === 'message' ? 'no unreplied conversations' : decision.reason });
+      } catch (err) {
+        results.push({ bot: bot.name, action: 'error', reason: String(err?.message || err) });
+      }
+    }
+    await saveLiveBotCounters(day, counters);
+    if (remote) { remote.aiUsage.callsToday += actions; remote.aiUsage.updatedAt = Date.now(); }
+    const summary = results.filter((r) => r.action !== 'none').map((r) => `${r.bot} → ${r.action}`).join(', ') || 'no actions';
+    setLiveRunnerState({ lastCycleAt: Date.now(), lastSummary: summary });
+    return { ran: true, results };
+  } finally {
+    botCycleInFlight = false;
+  }
+}
+
+// The Bot panel's run button: demo mode keeps the local simulation,
+// live mode runs the Spark runner above.
+export async function runBotCycle() {
+  if (!firebaseReady) return runDemoBotCycle();
+  return runLiveBotCycle();
 }
 
 export { resetDemo, findUser, userByUsername, friendIdsOf, blockedIdsOf };

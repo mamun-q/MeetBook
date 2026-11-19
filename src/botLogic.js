@@ -114,6 +114,60 @@ export function decideBotAction(bot, counters = {}, globalEnabled = true, now = 
   return { action: 'none', reason: 'all daily limits reached' };
 }
 
+// Template fallback for a 1-1 chat reply (the demo cycle and the live
+// Spark runner share it, so a bot sounds the same in both): if the
+// user's text mentions one of the bot's interests, riff on that;
+// otherwise introduce itself and echo a slice of what was said.
+export function templateBotMessageReply(bot, userText) {
+  const b = normaliseBot(bot);
+  const interest = b.personality.interests.find((i) => String(userText).toLowerCase().includes(i.split(' ')[0].toLowerCase()));
+  return interest
+    ? `I love talking about ${interest}! As an AI bot I am still learning, but here is my take: it is a great topic to explore together. What part interests you most?`
+    : `Thanks for messaging me! I am ${b.name}, an AI bot with a ${b.personality.tone} style. My favourite topics are ${b.personality.interests.join(', ') || 'good conversation'}. Tell me more about what you said: "${String(userText).slice(0, 60)}"`;
+}
+
+// Pick the 1-1 conversations where a bot owes a chat reply: the bot is
+// one of exactly two participants (never group chats), and the latest
+// message is from the OTHER participant — so the bot has not replied
+// yet (once it replies, its own message becomes the latest and the
+// conversation drops out of this list; that is the no-double-reply
+// marker). Oldest unanswered first. Pure: latestByConv maps
+// conversationId -> latest message object (or null), as a Map or object.
+export function findBotReplyTargets(conversations = [], latestByConv = {}, botId) {
+  const targets = [];
+  for (const conv of conversations || []) {
+    if (!conv || conv.isGroup) continue;
+    const parts = conv.participants || [];
+    if (parts.length !== 2 || !parts.includes(botId)) continue;
+    const humanId = parts.find((p) => p !== botId);
+    if (!humanId) continue;
+    const last = latestByConv instanceof Map ? latestByConv.get(conv.id) : latestByConv[conv.id];
+    if (!last || last.senderId !== humanId) continue;
+    targets.push({ conversationId: conv.id, humanId, participants: [...parts], lastMessage: last });
+  }
+  return targets.sort((a, b) => (a.lastMessage.createdAt || 0) - (b.lastMessage.createdAt || 0));
+}
+
+// Daily counters for the live runner are persisted per calendar day
+// (botSettings/counters doc in Firestore, demo state in demo mode).
+export function emptyBotCounters() {
+  return { postsToday: 0, commentsToday: 0, likesToday: 0, messagesToday: 0, lastActionAt: 0 };
+}
+
+export function counterDayKey(now = Date.now()) {
+  const d = new Date(now);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// The counters map to use today: a stored doc from a previous day (or a
+// malformed one) resets every bot to zero.
+export function botCountersForDay(stored, dayKey) {
+  if (!stored || stored.day !== dayKey || typeof stored.counters !== 'object' || !stored.counters) return {};
+  const out = {};
+  for (const [id, c] of Object.entries(stored.counters)) out[id] = { ...emptyBotCounters(), ...(c || {}) };
+  return out;
+}
+
 export function memoryFromConversation(existing = [], userText, botText, now = Date.now()) {
   const entry = {
     id: `mem_${now.toString(36)}_${Math.random().toString(36).slice(2, 7)}`,

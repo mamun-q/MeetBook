@@ -675,11 +675,12 @@ document.addEventListener('click', async (e) => {
     case 'reset-demo': if (!firebaseReady && await confirmModal('Reset demo data?', 'Local demo data returns to its seeded state.')) { api.resetDemo(); toast('Demo data reset.', 'success'); render(); } else if (firebaseReady) toast('Demo reset is only available in demo mode.', 'error'); break;
     case 'bot-kill-switch': await handle(api.setGlobalBotEnabled(actEl.dataset.on === '1'), actEl.dataset.on === '1' ? 'Bots enabled.' : 'All bots stopped.'); break;
     case 'bot-run-cycle': {
-      const r = api.runDemoBotCycle();
+      const r = await api.runBotCycle();
       toast(r.ran ? `Bot cycle ran: ${r.results.map((x) => `${x.bot} → ${x.action}`).join(', ')}` : `Bot cycle skipped: ${r.reason}`, r.ran ? 'success' : 'error');
       render();
       break;
     }
+    case 'gemini-key-remove': if (await confirmModal('Remove the Gemini API key?', 'Bots will go back to template replies until a new key is saved.')) await handle(api.removeGeminiApiKey(), 'Gemini API key removed.'); break;
     case 'bot-new': { const modal = openModal(V.botFormHtml(null)); modal.querySelector('[data-close]').onclick = closeModal; break; }
     case 'bot-edit': { const bot = d.bots.find((b) => b.id === actEl.dataset.id); const modal = openModal(V.botFormHtml(bot)); modal.querySelector('[data-close]').onclick = closeModal; break; }
     case 'bot-toggle': { const bot = d.bots.find((b) => b.id === actEl.dataset.id); if (bot) await handle(api.saveBot({ ...bot, active: !bot.active }), bot.active ? 'Bot deactivated.' : 'Bot activated.'); break; }
@@ -846,8 +847,8 @@ document.addEventListener('submit', async (e) => {
           : null;
         const other = api.data().users.find((u) => u.id === otherId);
         if (other?.isBot) {
-          setTimeout(() => {
-            const reply = api.demoBotReply(otherId, text);
+          setTimeout(async () => {
+            const reply = await api.demoBotReply(otherId, text);
             if (reply) {
               demoMutate((s) => {
                 s.messages.push({ id: genId('m'), conversationId: convId, senderId: otherId, text: reply, image: '', createdAt: Date.now(), status: 'delivered', readBy: [otherId] });
@@ -935,6 +936,14 @@ document.addEventListener('submit', async (e) => {
   if (form.dataset.botMemoryForm) {
     const text = String(fd.get('text') || '').trim();
     if (text) await handle(api.addBotMemory(form.dataset.botMemoryForm, text), 'Memory added.');
+    return;
+  }
+  if (form.id === 'gemini-key-form') {
+    // The key goes straight to saveGeminiApiKey (admin-only doc); the
+    // input is never re-rendered with a value, so the key never appears
+    // back in the page.
+    const key = String(fd.get('geminiKey') || '').trim();
+    if (key) await handle(api.saveGeminiApiKey(key), 'Gemini API key saved.');
     return;
   }
 });

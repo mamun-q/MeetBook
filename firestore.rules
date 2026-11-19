@@ -12,6 +12,14 @@ rules_version = '2';
 //  - Bot collections are writable only by admins from the client; the real
 //    bot engine writes with the Admin SDK from Cloud Functions, which
 //    bypasses these rules under controlled backend permissions.
+//  - SPARK LIVE RUNNER: with no Functions deployed, bots act from an
+//    admin's signed-in browser instead. A few write rules therefore carry
+//    narrow "admin-as-bot" branches (users create, posts create,
+//    messages create): an admin may write AS an account only when that
+//    account's users doc has isBot == true (isBotUser()). Bot comments,
+//    replies and likes need no branch of their own — comments/replies
+//    live in the posts.comments array and likes in posts.likes, and the
+//    posts update rule already allows admins to update any post.
 //  - PROVABLE QUERIES: Firestore denies a list query unless the rules are
 //    provable from the query's own constraints ("rules are not filters"),
 //    so READ rules for client-listened collections (posts, messages,
@@ -38,12 +46,28 @@ service cloud.firestore {
         && exists(/databases/$(database)/documents/users/$(request.auth.uid))
         && userDoc(request.auth.uid).data.get('role', 'user') == 'admin';
     }
+    // True when the given uid belongs to a bot account (users/{uid} with
+    // isBot == true). Used by the narrow admin-as-bot write branches
+    // below: on the Spark plan there are no Cloud Functions, so bots act
+    // from an admin's signed-in browser, and the admin may write ONLY as
+    // accounts that are bots — never as another human.
+    function isBotUser(uid) {
+      return exists(/databases/$(database)/documents/users/$(uid))
+        && userDoc(uid).data.get('isBot', false) == true;
+    }
     // ------------------------------------------------------------ users
     match /users/{uid} {
       allow read: if signedIn();
-      allow create: if isSelf(uid)
-        && request.resource.data.get('role', 'user') == 'user'
-        && request.resource.data.get('isBot', false) == false;
+      allow create: if (isSelf(uid)
+          && request.resource.data.get('role', 'user') == 'user'
+          && request.resource.data.get('isBot', false) == false)
+        // An admin may create a BOT's profile document (the public users
+        // doc every bot account needs so it can author posts, appear in
+        // search and hold conversations). Pinned to isBot docs with the
+        // 'bot' role — admins cannot mint human accounts this way.
+        || (isAdmin()
+          && request.resource.data.get('isBot', false) == true
+          && request.resource.data.get('role', 'user') == 'bot');
       // Users may edit their own profile, but may not grant themselves a
       // role or turn themselves into a bot — those fields are admin-only.
       allow update: if (isSelf(uid)
@@ -97,12 +121,19 @@ service cloud.firestore {
       // Page posts (pageId set) follow the normal path: authorId is the
       // page owner's uid, so authorship checks work unchanged. Group posts
       // additionally require group membership at creation time.
+      // Spark-plan bot branch: an admin may create a post authored by a
+      // BOT account (isBotUser check on the author doc) — plain feed
+      // posts only: no group posts and no page posts as a bot.
       allow create: if signedIn()
-        && request.resource.data.authorId == request.auth.uid
         && request.resource.data.get('likes', []).size() == 0
-        && (request.resource.data.get('groupId', '') == ''
-            || (exists(/databases/$(database)/documents/groups/$(request.resource.data.groupId))
-                && request.auth.uid in get(/databases/$(database)/documents/groups/$(request.resource.data.groupId)).data.get('members', [])));
+        && ((request.resource.data.authorId == request.auth.uid
+             && (request.resource.data.get('groupId', '') == ''
+                 || (exists(/databases/$(database)/documents/groups/$(request.resource.data.groupId))
+                     && request.auth.uid in get(/databases/$(database)/documents/groups/$(request.resource.data.groupId)).data.get('members', []))))
+            || (isAdmin()
+                && isBotUser(request.resource.data.authorId)
+                && request.resource.data.get('groupId', '') == ''
+                && request.resource.data.get('pageId', '') == ''));
       // Author edits content; any signed-in reader may update engagement
       // arrays (likes/reactions/savedBy/shares/comments) but NOT authorship,
       // the post body, its group/page assignment, or its audience —
@@ -227,9 +258,16 @@ service cloud.firestore {
     match /messages/{msgId} {
       allow read: if signedIn() && (request.auth.uid in resource.data.get('participants', []) || isAdmin());
       allow create: if signedIn()
-        && request.resource.data.senderId == request.auth.uid
-        && request.auth.uid in request.resource.data.get('participants', [])
-        && request.auth.uid in get(/databases/$(database)/documents/conversations/$(request.resource.data.conversationId)).data.participants;
+        && ((request.resource.data.senderId == request.auth.uid
+             && request.auth.uid in request.resource.data.get('participants', [])
+             && request.auth.uid in get(/databases/$(database)/documents/conversations/$(request.resource.data.conversationId)).data.participants)
+            // Spark-plan bot branch: an admin may send a message AS a
+            // bot, only into a conversation the bot itself belongs to,
+            // with the bot in the message's denormalized participants.
+            || (isAdmin()
+                && isBotUser(request.resource.data.senderId)
+                && request.resource.data.senderId in request.resource.data.get('participants', [])
+                && request.resource.data.senderId in get(/databases/$(database)/documents/conversations/$(request.resource.data.conversationId)).data.participants));
       // Only read receipts / status may change after sending; the text,
       // the sender and the participant set are pinned.
       allow update: if signedIn() && request.auth.uid in resource.data.get('participants', [])
@@ -364,6 +402,12 @@ service cloud.firestore {
     match /botLogs/{id} {
       allow read: if isAdmin();
       allow write: if false; // written by Functions (Admin SDK) only
+    }
+    // Holds the Gemini API key (botSecrets/config). Admin-only both ways:
+    // non-admin clients must never read the key — on the Spark plan the
+    // admin's browser fetches it to call Gemini directly (src/gemini.js).
+    match /botSecrets/{id} {
+      allow read, write: if isAdmin();
     }
 
     // ------------------------------------------------------------- config

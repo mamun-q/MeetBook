@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   normaliseBot, selectMemories, buildBotPrompt, generateTemplatePost,
-  generateTemplateComment, decideBotAction, memoryFromConversation, DEFAULT_BOT_LIMITS
+  generateTemplateComment, decideBotAction, memoryFromConversation, DEFAULT_BOT_LIMITS,
+  templateBotMessageReply, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay
 } from '../src/botLogic.js';
 
 const nova = {
@@ -78,5 +79,63 @@ describe('memoryFromConversation', () => {
     const after = memoryFromConversation(before, 'hello space', 'hi there');
     expect(after.length).toBe(100);
     expect(after[after.length - 1].text).toContain('hello space');
+  });
+});
+
+describe('templateBotMessageReply', () => {
+  it('riffs on a mentioned interest', () => {
+    const text = templateBotMessageReply(nova, 'tell me about space please');
+    expect(text).toContain('space');
+    expect(text).toContain('AI bot');
+  });
+  it('falls back to an introduction naming the bot and its topics', () => {
+    const text = templateBotMessageReply(sage, 'hello there');
+    expect(text).toContain('Sage');
+    expect(text).toContain('books');
+  });
+});
+
+describe('findBotReplyTargets', () => {
+  const convs = [
+    { id: 'c1', participants: ['human1', 'bot_nova'], isGroup: false },
+    { id: 'c2', participants: ['human2', 'bot_nova'], isGroup: false },
+    { id: 'c3', participants: ['human1', 'bot_nova', 'human2'], isGroup: true },
+    { id: 'c4', participants: ['human1', 'human2'], isGroup: false },
+    { id: 'c5', participants: ['human3', 'bot_nova'], isGroup: false }
+  ];
+  const latest = {
+    c1: { id: 'm1', senderId: 'human1', text: 'hi', createdAt: 300 },
+    c2: { id: 'm2', senderId: 'bot_nova', text: 'already answered', createdAt: 100 },
+    c3: { id: 'm3', senderId: 'human1', text: 'group msg', createdAt: 50 },
+    c4: { id: 'm4', senderId: 'human1', text: 'not for the bot', createdAt: 10 },
+    c5: { id: 'm5', senderId: 'human3', text: 'older unanswered', createdAt: 200 }
+  };
+  it('picks only unreplied human-last 1-1 conversations, oldest first', () => {
+    const targets = findBotReplyTargets(convs, latest, 'bot_nova');
+    expect(targets.map((x) => x.conversationId)).toEqual(['c5', 'c1']);
+    expect(targets[0].humanId).toBe('human3');
+    expect(targets[1].lastMessage.text).toBe('hi');
+  });
+  it('accepts a Map for latest messages and skips empty conversations', () => {
+    const map = new Map(Object.entries(latest));
+    map.set('c1', null);
+    const targets = findBotReplyTargets(convs, map, 'bot_nova');
+    expect(targets.map((x) => x.conversationId)).toEqual(['c5']);
+  });
+});
+
+describe('live runner counters', () => {
+  it('counterDayKey formats a local calendar day', () => {
+    const key = counterDayKey(new Date(2026, 0, 5, 12, 0).getTime());
+    expect(key).toBe('2026-01-05');
+  });
+  it('botCountersForDay keeps same-day counters and resets stale days', () => {
+    const stored = { day: '2026-01-05', counters: { bot_nova: { postsToday: 2, lastActionAt: 9 } } };
+    const today = botCountersForDay(stored, '2026-01-05');
+    expect(today.bot_nova.postsToday).toBe(2);
+    expect(today.bot_nova.messagesToday).toBe(0); // defaults filled in
+    expect(botCountersForDay(stored, '2026-01-06')).toEqual({});
+    expect(botCountersForDay(null, '2026-01-05')).toEqual({});
+    expect(emptyBotCounters()).toEqual({ postsToday: 0, commentsToday: 0, likesToday: 0, messagesToday: 0, lastActionAt: 0 });
   });
 });

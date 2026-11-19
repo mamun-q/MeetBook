@@ -1029,10 +1029,26 @@ export function botsView(d, meUser) {
       <div class="row gap wrap">
         <span class="grow"><b>Global bot kill switch</b><br/><span class="muted small">When off, no bot may post, comment, like or message — enforced in the bot engine and Cloud Functions.</span></span>
         <button class="btn ${globalOn ? 'btn-danger' : 'btn-primary'}" data-act="bot-kill-switch" data-on="${globalOn ? '0' : '1'}">${globalOn ? '⛔ Stop all bots' : '▶️ Enable bots'}</button>
-        <button class="btn btn-ghost" data-act="bot-run-cycle">Run one demo cycle</button>
+        <button class="btn btn-ghost" data-act="bot-run-cycle">${t('botRunCycle')}</button>
         <button class="btn btn-primary" data-act="bot-new">+ Create bot</button>
       </div>
       <p class="muted small">Status: <b>${globalOn ? 'ENABLED' : 'STOPPED'}</b> · AI usage today: ${d.aiUsage?.callsToday || 0} calls · ~${d.aiUsage?.tokensToday || 0} tokens (template fallback uses 0 provider tokens).</p>
+    </div>
+    ${firebaseReady ? `<div class="card stack">
+      <h3>🛰️ ${t('botRunnerTitle')}</h3>
+      <p class="small"><b>${d.botRunner?.active ? t('botRunnerActive') : t('botRunnerInactive')}</b></p>
+      ${d.botRunner?.lastCycleAt ? `<p class="small">${t('botLastCycle')}: ${timeAgo(d.botRunner.lastCycleAt)} — ${escapeHtml(d.botRunner.lastSummary || '')}</p>` : ''}
+      <p class="muted small">${t('botRunnerNote')}</p>
+    </div>` : ''}
+    <div class="card stack">
+      <h3>🔑 ${t('geminiApiKeyTitle')}</h3>
+      <p class="muted small">${t('geminiApiKeyHelp')}</p>
+      <p class="small">Status: <b>${d.botSecrets?.geminiApiKey ? t('geminiKeySet') : t('geminiKeyNotSet')}</b></p>
+      <form id="gemini-key-form" class="row gap wrap">
+        <input type="password" name="geminiKey" class="grow" placeholder="${t('geminiKeyPlaceholder')}" autocomplete="off" />
+        <button class="btn btn-primary" type="submit">${t('save')}</button>
+        ${d.botSecrets?.geminiApiKey ? `<button class="btn btn-danger" type="button" data-act="gemini-key-remove">${t('geminiKeyRemove')}</button>` : ''}
+      </form>
     </div>
     ${d.bots.map((b) => botCardHtml(d, b)).join('') || emptyState('🤖', 'No bots yet. Create your first AI bot.')}
     <div class="card stack">

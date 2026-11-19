@@ -141,6 +141,9 @@ function seed() {
       { id: uid('log'), botId: 'bot_nova', level: 'info', message: 'Runner cycle completed: 1 post created.', createdAt: now - 4 * H }
     ],
     botSettings: { global: { enabled: true }, counters: {} },
+    // Demo-only home for the Gemini API key (in live mode it lives in
+    // the admin-only Firestore doc botSecrets/config — never here).
+    botSecrets: { geminiApiKey: '' },
     config: { maintenanceMode: false },
     aiUsage: { callsToday: 7, tokensToday: 2140, updatedAt: now }
   };
@@ -157,6 +160,7 @@ function load() {
         for (const key of ['stories', 'groups', 'pages', 'events', 'reviews', 'groupRequests']) {
           if (!Array.isArray(parsed[key])) parsed[key] = [];
         }
+        if (!parsed.botSecrets || typeof parsed.botSecrets !== 'object') parsed.botSecrets = { geminiApiKey: '' };
         for (const u of parsed.users) if (!Array.isArray(u.closeFriends)) u.closeFriends = [];
         return parsed;
       }
