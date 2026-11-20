@@ -28,7 +28,7 @@
 // botSecrets/config too (the aiUsage collection has no Firestore rules
 // match, so the catch-all would deny it — botSecrets is admin
 // read/write, which is exactly the runner's access).
-import { buildGeminiPrompt, generateGeminiDetailed, getLastGeminiFailure, GEMINI_MODEL } from './gemini.js';
+import { buildGeminiPrompt, generateGeminiDetailed, getLastGeminiFailure, getLastGeminiAttempts, GEMINI_MODEL } from './gemini.js';
 import { normaliseBot } from './botLogic.js';
 
 export const AI_ROUTER_TIMEOUT_MS = 20_000;
@@ -284,10 +284,10 @@ async function attemptOpenAiCompat({ entry, cfg, model, prompt, doFetch, timeout
 // same request (that would resend to the same targets).
 async function attemptGeminiRouted({ cfg, model, prompt, bot, doFetch, timeoutMs }) {
   const r = await generateGeminiDetailed({ apiKey: cfg.apiKey, bot: { ...bot, model }, prompt, fetchImpl: doFetch, timeoutMs });
-  if (r) return { ok: true, text: r.text, model: r.model, usage: r.usage };
+  if (r) return { ok: true, text: r.text, model: r.model, usage: r.usage, attempts: r.attempts || 1 };
   const detail = getLastGeminiFailure();
   const status = Number(/^HTTP (\d+)/.exec(detail || '')?.[1]) || 0;
-  return { ok: false, status, message: detail };
+  return { ok: false, status, message: detail, attempts: getLastGeminiAttempts() || 1 };
 }
 
 // ---------------------------------------------------------------------
@@ -362,12 +362,12 @@ export async function generateRouted({ bot, memories = [], context = {}, config,
       ? await attemptGeminiRouted({ cfg, model, prompt, bot: b, doFetch, timeoutMs })
       : await attemptOpenAiCompat({ entry, cfg, model, prompt, doFetch, timeoutMs });
     if (r.ok) {
-      onAttempt?.(entry.id, { ok: true, usage: r.usage || null, status: 200 });
+      onAttempt?.(entry.id, { ok: true, usage: r.usage || null, status: 200, attempts: r.attempts || 1 });
       lastRoutedFailure = '';
       return { text: r.text, provider: entry.id, model: r.model || model, usage: r.usage || null };
     }
     const exhausted = r.status === 429;
-    onAttempt?.(entry.id, { ok: false, usage: null, status: r.status || 0, exhausted });
+    onAttempt?.(entry.id, { ok: false, usage: null, status: r.status || 0, exhausted, attempts: r.attempts || 1 });
     if (exhausted) {
       // Counters are per-day maps, so a +24h stamp means "the rest of
       // today" — tomorrow's fresh map starts un-exhausted.
@@ -396,6 +396,6 @@ export async function testProvider(providerId, { config, fetchImpl, timeoutMs = 
   const r = entry.kind === 'gemini-native'
     ? await attemptGeminiRouted({ cfg, model, prompt, bot: { name: 'MeetBook', model }, doFetch, timeoutMs })
     : await attemptOpenAiCompat({ entry, cfg, model, prompt, doFetch, timeoutMs });
-  if (r.ok) return { ok: true, detail: `Connected — ${entry.label} replied via ${r.model || model || 'default model'}.`, usage: r.usage || null };
-  return { ok: false, detail: formatRoutedFailure({ entry, status: r.status || 0, message: r.message || '' }) };
+  if (r.ok) return { ok: true, detail: `Connected — ${entry.label} replied via ${r.model || model || 'default model'}.`, usage: r.usage || null, attempts: r.attempts || 1 };
+  return { ok: false, detail: formatRoutedFailure({ entry, status: r.status || 0, message: r.message || '' }), attempts: r.attempts || 1 };
 }

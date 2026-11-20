@@ -125,9 +125,11 @@ describe('findBotReplyTargets', () => {
 });
 
 describe('live runner counters', () => {
-  it('counterDayKey formats a local calendar day', () => {
-    const key = counterDayKey(new Date(2026, 0, 5, 12, 0).getTime());
-    expect(key).toBe('2026-01-05');
+  it('counterDayKey uses the Asia/Dhaka calendar day on any runtime', () => {
+    // 2026-01-05 19:30 UTC is already 2026-01-06 01:30 in Dhaka.
+    expect(counterDayKey(Date.UTC(2026, 0, 5, 19, 30))).toBe('2026-01-06');
+    // 2026-01-05 12:00 UTC is 18:00 the same day in Dhaka.
+    expect(counterDayKey(Date.UTC(2026, 0, 5, 12, 0))).toBe('2026-01-05');
   });
   it('botCountersForDay keeps same-day counters and resets stale days', () => {
     const stored = { day: '2026-01-05', counters: { bot_nova: { postsToday: 2, lastActionAt: 9 } } };

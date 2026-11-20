@@ -203,6 +203,9 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 /* Gentle entrance for feed posts (transform/opacity only). */
 @keyframes mb-rise { from { opacity: 0; transform: translateY(6px); } }
 .post-card { padding-bottom: 8px; animation: mb-rise .3s ease-out both; }
+/* Notification deep-link: briefly ring the post a notification opened. */
+.post-card.flash { animation: post-flash 1.8s ease; }
+@keyframes post-flash { 0%, 55% { box-shadow: 0 0 0 3px var(--brand); } 100% { box-shadow: 0 0 0 0 transparent; } }
 .post-head { display: flex; justify-content: space-between; align-items: flex-start; }
 .post-head a { color: var(--text); }
 .post-head a:hover { text-decoration: none; }

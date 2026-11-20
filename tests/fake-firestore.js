@@ -136,6 +136,18 @@ export async function deleteDoc(ref) {
 }
 export async function getDoc(ref) { return docSnap(ref.__col, ref.__id); }
 export async function getDocs(q) { return querySnap(q.__col, q.__constraints || []); }
+// Minimal transaction: runs the callback against the same in-memory
+// store (no contention simulation — the app's claim logic only needs
+// get-then-set semantics to be exercised).
+export async function runTransaction(db, fn) {
+  const tx = {
+    get: async (ref) => docSnap(ref.__col, ref.__id),
+    set: async (ref, data, opts = {}) => writeDoc(ref.__col, ref.__id, data, Boolean(opts.merge)),
+    update: async (ref, data) => writeDoc(ref.__col, ref.__id, data, true),
+    delete: async (ref) => { colMap(ref.__col).delete(ref.__id); scheduleFlush(ref.__col); }
+  };
+  return fn(tx);
+}
 export async function getCountFromServer(q) {
   const rows = runQuery(q.__col, q.__constraints || []);
   return { data: () => ({ count: rows.length }) };

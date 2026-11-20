@@ -455,7 +455,13 @@ export function friendsView(d, meUser) {
     const n = mutualFriendCount(d.friendships, meUser.id, u.id);
     return n > 0 ? `<span class="muted small">${n} ${n === 1 ? t('mutualFriend') : t('mutualFriends')}</span>` : '';
   };
-  const person = (u, actions, extra = '') => `<div class="card person-card">${avatarHtml(u, 56)}<a href="#/profile/${u.id}"><b>${escapeHtml(u.name)}</b></a><span class="muted small">@${escapeHtml(u.username)}</span>${extra}${u.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''}<div class="row gap wrap center">${actions}</div></div>`;
+  const person = (u, actions, extra = '') => {
+    // A friendship can outlive the other account (admin deletion):
+    // rendering a card for a missing user used to throw and take the
+    // whole Friends page down with it.
+    if (!u) return '';
+    return `<div class="card person-card">${avatarHtml(u, 56)}<a href="#/profile/${u.id}"><b>${escapeHtml(u.name)}</b></a><span class="muted small">@${escapeHtml(u.username)}</span>${extra}${u.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''}<div class="row gap wrap center">${actions}</div></div>`;
+  };
   return `<div class="page">
     <h2>👥 ${t('friends')}</h2>
     <h3>${t('requestsReceived')}</h3>
@@ -972,6 +978,15 @@ export function messagesView(d, meUser, activeConvId = '') {
 // Emoji set for the Messenger picker (~24 common ones).
 const CHAT_EMOJIS = ['😀', '😂', '🤣', '😍', '🥰', '😊', '😎', '🤔', '😴', '😢', '😮', '😅', '😭', '👍', '👏', '🙏', '❤️', '🔥', '🎉', '✨', '🌙', '☕', '🍰', '📷'];
 
+// Media URLs in message docs are only ever http(s) uploads or data:
+// URLs — anything else (a crafted javascript: URL in a synced doc)
+// must never reach an href/src, where a tap would run script in the
+// MeetBook origin. escapeHtml alone does not stop that.
+function safeMediaUrl(u) {
+  const s = String(u || '');
+  return /^(https?:|data:)/i.test(s) ? s : '#';
+}
+
 // Message body text: escaped first, then the @handles of the users
 // recorded in m.mentions are wrapped in a highlight span.
 function messageTextHtml(m, byId) {
@@ -1009,9 +1024,9 @@ function messageHtml(m, meUser, byId, isGroup = false, conv = null) {
       ${isGroup && !mine ? `<span class="msg-sender">${escapeHtml(nicknameFor(conv, m.senderId, byId[m.senderId]?.name || ''))}</span>` : ''}
       ${m.forwarded ? `<span class="msg-forwarded">↪️ ${t('forwarded')}</span>` : ''}
       ${m.replyToId ? `<button type="button" class="msg-quote" data-act="jump-message" data-id="${m.replyToId}"><b>${escapeHtml(m.replyToName || '')}</b><span>${escapeHtml(m.replyToText || '')}</span></button>` : ''}
-      ${m.image ? `<img class="msg-image" src="${escapeHtml(cldImg(m.image, 800))}" alt="Shared photo" loading="lazy" decoding="async" />` : ''}
-      ${m.audio ? `<audio class="msg-audio" controls preload="metadata" src="${escapeHtml(m.audio)}"></audio>` : ''}
-      ${m.file ? `<a class="msg-file" href="${escapeHtml(m.file.url || '#')}" target="_blank" rel="noopener noreferrer" download="${escapeHtml(m.file.name || 'file')}"><span class="msg-file-icon">📄</span><span class="grow"><b>${escapeHtml(m.file.name || t('file'))}</b><small>${formatBytes(m.file.size)} · ${t('download')}</small></span></a>` : ''}
+      ${m.image ? `<img class="msg-image" src="${escapeHtml(safeMediaUrl(cldImg(m.image, 800)))}" alt="Shared photo" loading="lazy" decoding="async" />` : ''}
+      ${m.audio ? `<audio class="msg-audio" controls preload="metadata" src="${escapeHtml(safeMediaUrl(m.audio))}"></audio>` : ''}
+      ${m.file ? `<a class="msg-file" href="${escapeHtml(safeMediaUrl(m.file.url))}" target="_blank" rel="noopener noreferrer" download="${escapeHtml(m.file.name || 'file')}"><span class="msg-file-icon">📄</span><span class="grow"><b>${escapeHtml(m.file.name || t('file'))}</b><small>${formatBytes(m.file.size)} · ${t('download')}</small></span></a>` : ''}
       ${m.sticker ? `<p class="msg-sticker">${escapeHtml(m.sticker)}</p>` : ''}
       ${m.location ? `<a class="msg-location" href="${escapeHtml(mapsUrl(m.location))}" target="_blank" rel="noopener noreferrer"><span class="msg-location-pin">📍</span><span class="grow"><b>${t('sharedLocation')}</b><small>${Number(m.location.lat).toFixed(5)}, ${Number(m.location.lng).toFixed(5)} · ${t('openInMaps')}</small></span></a>` : ''}
       ${m.poll ? (() => { const total = chatPollTotal(m.poll); return `<div class="chat-poll"><b>📊 ${escapeHtml(m.poll.question || '')}</b>${(m.poll.options || []).map((o) => { const pct = total ? Math.round((o.votes || []).length / total * 100) : 0; const voted = (o.votes || []).includes(meUser.id); return `<button type="button" class="chat-poll-option ${voted ? 'voted' : ''}" data-act="vote-poll" data-id="${m.id}" data-option="${o.id}"><span class="chat-poll-fill" style="width:${pct}%"></span><span class="chat-poll-text">${voted ? '✓ ' : ''}${escapeHtml(o.text)}</span><span class="chat-poll-count">${(o.votes || []).length} · ${pct}%</span></button>`; }).join('')}<span class="muted small">${total} ${t('votes')}</span></div>`; })() : ''}

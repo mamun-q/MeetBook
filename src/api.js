@@ -20,7 +20,7 @@ import {
 } from 'firebase/auth';
 import {
   collection, doc, setDoc, getDoc, getDocs, getCountFromServer, addDoc, updateDoc, deleteDoc,
-  query, where, orderBy, limit, onSnapshot, serverTimestamp, arrayUnion, arrayRemove
+  query, where, orderBy, limit, onSnapshot, serverTimestamp, arrayUnion, arrayRemove, runTransaction
 } from 'firebase/firestore';
 import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage';
 
@@ -243,8 +243,17 @@ export async function loginWithGoogle() {
   const snap = await getDoc(ref);
   if (!snap.exists()) {
     const base = (cred.user.email || 'user').split('@')[0].replace(/[^a-z0-9_.]/gi, '').toLowerCase() || 'user';
+    // The email prefix is NOT unique across domains (two Google
+    // accounts can share it) — probe Firestore and suffix until free,
+    // or @mentions and username lookups would conflate two people.
+    let username = base.slice(0, 24);
+    for (let i = 0; i < 5; i++) {
+      const taken = await getDocs(query(collection(db, 'users'), where('username', '==', username)));
+      if (taken.empty) break;
+      username = `${base.slice(0, 20)}${Math.floor(100 + Math.random() * 900)}`;
+    }
     await setDoc(ref, {
-      name: cred.user.displayName || 'MeetBook User', username: base.slice(0, 24), email: cred.user.email || '',
+      name: cred.user.displayName || 'MeetBook User', username, email: cred.user.email || '',
       bio: '', avatar: cred.user.photoURL || '', cover: '', work: '', education: '', currentCity: '',
       hometown: '', relationship: '', website: '', nickname: '', dob: '', gender: '', role: 'user', isBot: false, online: true,
       lastSeen: Date.now(), createdAt: Date.now(), followers: [], following: [], closeFriends: [], settings: {}
@@ -289,8 +298,22 @@ export async function deleteAccount() {
   const user = me();
   if (!user) throw new Error('Not signed in.');
   if (firebaseReady) {
+    // Snapshot the profile first: if the Auth deletion then fails
+    // (deleteUser commonly rejects with requires-recent-login on an
+    // older session), restore the doc so the account is not stranded
+    // profile-less while its email stays registered.
+    const profileSnap = { ...user };
+    delete profileSnap.password;
     await deleteDoc(doc(db, 'users', user.id));
-    await deleteUser(auth.currentUser);
+    try {
+      await deleteUser(auth.currentUser);
+    } catch (err) {
+      try { await setDoc(doc(db, 'users', user.id), profileSnap); } catch { /* restore is best-effort */ }
+      if (String(err?.code || err?.message || '').includes('requires-recent-login')) {
+        throw new Error('For security, please log out, log back in, and delete the account right away.');
+      }
+      throw err;
+    }
     remoteUid = '';
     return;
   }
@@ -353,6 +376,12 @@ function stopRemoteSync() {
   unsubscribers = [];
   syncStarted = false;
   syncUid = '';
+  // Per-session state must not leak into the next account on this tab:
+  // the bot-secrets loaded flag (a fresh admin would never re-read the
+  // keys) and optimistic post echoes (the previous account's just-made
+  // post could render in the next account's feed).
+  botSecretsLoaded = false;
+  localEchoPosts = [];
   remote = blankRemote();
   emitData();
 }
@@ -531,7 +560,11 @@ function startRemoteSync() {
     listen(query(collection(db, 'conversations'), where('participants', 'array-contains', remoteUid)),
       (snap) => patch((r) => { r.conversations = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
     const applyMessages = (snap) => patch((r) => { r.messages = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); });
-    listen(query(collection(db, 'messages'), where('participants', 'array-contains', remoteUid), orderBy('createdAt', 'asc'), limit(500)),
+    // NEWEST 500, not oldest: an ascending limit() returns the FIRST
+    // 500 documents, so past 500 total messages every newer DM fell
+    // outside the window and the inbox silently froze. Descending +
+    // limit keeps the most recent 500; the view sorts for display.
+    listen(query(collection(db, 'messages'), where('participants', 'array-contains', remoteUid), orderBy('createdAt', 'desc'), limit(500)),
       applyMessages,
       () => {
         // The ordered query needs a composite index; if it is missing or
@@ -566,6 +599,12 @@ export async function updateProfile(userId, patch) {
     patch.username = v.value;
     const clash = data().users.some((u) => u.username === v.value && u.id !== userId);
     if (clash) throw new Error('That username is already taken.');
+    if (firebaseReady) {
+      // The local mirror is capped (~300 users) and may not have
+      // loaded — verify against Firestore itself before writing.
+      const taken = await getDocs(query(collection(db, 'users'), where('username', '==', v.value)));
+      if (taken.docs.some((d) => d.id !== userId)) throw new Error('That username is already taken.');
+    }
   }
   if (firebaseReady) { await updateDoc(doc(db, 'users', userId), patch); return; }
   mutate((s) => {
@@ -580,9 +619,16 @@ export async function compressImageToDataUrl(file, maxBytes = 200 * 1024, maxDim
   const bitmap = await createImageBitmap(file).catch(() => null);
   if (!bitmap) {
     // Last-resort fallback if the browser cannot decode the image.
+    // CAPPED: the raw file as a data URL has no size limit, and stored
+    // into a Firestore document anything over ~1 MB makes the WRITE
+    // fail with a confusing size error — fail here, clearly, instead.
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result));
+      reader.onload = () => {
+        const url = String(reader.result);
+        if (url.length > 900_000) reject(new Error('That image could not be processed — please try a smaller or standard image file.'));
+        else resolve(url);
+      };
       reader.onerror = reject;
       reader.readAsDataURL(file);
     });
@@ -717,7 +763,7 @@ export async function createPost({ text, image, visibility, groupId = '', pageId
       const ref = await addDoc(collection(db, 'posts'), { ...post, createdAt: serverTimestamp() });
       echo.id = ref.id;
       if (remergePosts) remergePosts(); else emitData();
-      fanOutMentions(post.text, author, ref.id);
+      fanOutMentions(post.text, author, ref.id).catch(() => { /* mention notifications are best-effort; an unhandled rejection here used to be the only trace */ });
       return { id: ref.id, ...post };
     } catch (err) {
       localEchoPosts = localEchoPosts.filter((p) => p !== echo);
@@ -773,7 +819,7 @@ export async function toggleLike(postId) {
     try {
       await updateDoc(doc(db, 'posts', postId), { likes: has ? arrayRemove(user.id) : arrayUnion(user.id) });
     } catch (err) { patchRemotePost(postId, undoLike); throw err; }
-    if (!has && post) await createNotification({ userId: post.authorId, type: 'like', actorId: user.id, text: `${user.name} liked your post.`, postId, conversationId: '', read: false, createdAt: Date.now() });
+    if (!has && post) { try { await createNotification({ userId: post.authorId, type: 'like', actorId: user.id, text: `${user.name} liked your post.`, postId, conversationId: '', read: false, createdAt: Date.now() }); } catch { /* the like itself already succeeded */ } }
     return;
   }
   mutate((s) => {
@@ -896,6 +942,9 @@ export async function sharePost(postId) {
       if (remergePosts) remergePosts(); else emitData();
       throw err;
     }
+    // Demo mode notifies the original author of a share; live mode
+    // never did. Best-effort — the share itself is already committed.
+    try { await createNotification({ userId: original.authorId, type: 'share', actorId: user.id, text: `${user.name} shared your post.`, postId, conversationId: '', read: false, createdAt: Date.now() }); } catch { /* share already saved */ }
     return;
   }
   mutate((s) => {
@@ -924,7 +973,18 @@ export async function addComment(postId, text, parentCommentId = '') {
     try {
       await updateDoc(doc(db, 'posts', postId), { comments });
     } catch (err) { patchRemotePost(postId, (p) => { p.comments = prevComments; }); throw err; }
-    if (post) await createNotification({ userId: post.authorId, type: parentCommentId ? 'reply' : 'comment', actorId: user.id, text: `${user.name} ${parentCommentId ? 'replied to a comment' : 'commented on your post.'}`, postId, conversationId: '', read: false, createdAt: Date.now() });
+    // Notification parity with demo mode: a REPLY notifies the parent
+    // comment's author (not the post author), a top-level comment
+    // notifies the post author, and @mentions in the comment fan out.
+    if (post) {
+      const parent = parentCommentId ? prevComments.find((c) => c.id === parentCommentId) : null;
+      if (parent) {
+        try { await createNotification({ userId: parent.authorId, type: 'reply', actorId: user.id, text: `${user.name} replied to your comment.`, postId, conversationId: '', read: false, createdAt: Date.now() }); } catch { /* comment already saved */ }
+      } else {
+        try { await createNotification({ userId: post.authorId, type: 'comment', actorId: user.id, text: `${user.name} commented on your post.`, postId, conversationId: '', read: false, createdAt: Date.now() }); } catch { /* comment already saved */ }
+      }
+      fanOutMentions(comment.text, user, postId).catch(() => { /* mentions are best-effort */ });
+    }
     return comment;
   }
   mutate((s) => {
@@ -1066,8 +1126,14 @@ export async function updateGroup(groupId, patch) {
 export async function deleteGroup(groupId) {
   if (firebaseReady) {
     // Remove the group's posts first so no orphaned group posts remain.
+    // Per-doc catch: the posts delete rule is author-or-admin, so a
+    // non-admin creator cannot delete OTHER members' posts — one such
+    // post used to abort the whole delete halfway (some posts gone,
+    // group still there). Now every deletable post goes, the group doc
+    // is deleted, and any undeletable posts become unreachable orphans
+    // (their group no longer exists, so no surface renders them).
     const snap = await getDocs(query(collection(db, 'posts'), where('groupId', '==', groupId)));
-    for (const d of snap.docs) await deleteDoc(doc(db, 'posts', d.id));
+    for (const d of snap.docs) { try { await deleteDoc(doc(db, 'posts', d.id)); } catch { /* foreign post — see note above */ } }
     await deleteDoc(doc(db, 'groups', groupId));
     return true;
   }
@@ -1390,6 +1456,14 @@ export async function sendFriendRequest(toId) {
 }
 
 export async function respondFriendRequest(friendshipId, accept) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  // Only the RECIPIENT may accept (or decline) a request. The sender
+  // flipping their own request to "accepted" would bypass consent —
+  // the rules pin the same thing, this check gives a clean error.
+  const rel = data().friendships.find((x) => x.id === friendshipId);
+  if (accept && rel && rel.to !== user.id && !isAdminRole(user)) {
+    throw new Error('Only the person who received this request can accept it.');
+  }
   if (firebaseReady) {
     if (accept) await updateDoc(doc(db, 'friendships', friendshipId), { status: 'accepted' });
     else await deleteDoc(doc(db, 'friendships', friendshipId));
@@ -1420,7 +1494,12 @@ export async function toggleFollow(targetId) {
   const following = (user.following || []).includes(targetId);
   if (firebaseReady) {
     await updateDoc(doc(db, 'users', user.id), { following: following ? arrayRemove(targetId) : arrayUnion(targetId) });
+    // The followers write touches ANOTHER user's doc — the rules allow
+    // exactly this one-field delta (adding/removing only yourself).
     await updateDoc(doc(db, 'users', targetId), { followers: following ? arrayRemove(user.id) : arrayUnion(user.id) });
+    if (!following) {
+      try { await createNotification({ userId: targetId, type: 'follow', actorId: user.id, text: `${user.name} started following you.`, postId: '', conversationId: '', read: false, createdAt: Date.now() }); } catch { /* the follow itself already succeeded */ }
+    }
     return !following;
   }
   mutate((s) => {
@@ -1496,8 +1575,14 @@ export async function openConversation(otherId) {
       mirrorConversation(found);
       return found;
     }
-    const ref = await addDoc(collection(db, 'conversations'), conv);
-    const created = { id: ref.id, ...conv };
+    // Create under a DETERMINISTIC id (the sorted uid pair): two
+    // simultaneous opens — double-tap, two tabs, both sides at once —
+    // write the SAME document instead of minting two threads. setDoc
+    // on an existing doc is an update the participants rule allows,
+    // and the payload is identical either way.
+    const convId = `dm_${[user.id, otherId].sort().join('_')}`;
+    await setDoc(doc(db, 'conversations', convId), conv);
+    const created = { id: convId, ...conv };
     // Mirror it at once: until the listener delivers the server copy,
     // a second open (double-tap, another entry point) must find this
     // conversation locally instead of creating a duplicate.
@@ -1602,9 +1687,12 @@ export async function sendMessage(conversationId, { text, image, audio = '', rep
       remote.messages = [...remote.messages, { id: ref.id, ...msg }];
       emitData();
     }
+    // Notifications are best-effort from here: the message is already
+    // committed and mirrored, so a notification failure must not make
+    // the sender see "send failed" and resend a duplicate.
     for (const other of others) {
       const n = noteFor(other);
-      await createNotification({ userId: other, type: n.type, actorId: user.id, text: n.text, postId: '', conversationId, read: false, createdAt: Date.now() });
+      try { await createNotification({ userId: other, type: n.type, actorId: user.id, text: n.text, postId: '', conversationId, read: false, createdAt: Date.now() }); } catch { /* message already sent */ }
     }
     await acceptIfRequest();
     return { id: ref.id, ...msg };
@@ -1670,7 +1758,9 @@ export async function toggleMessageReaction(messageId, emoji) {
     try {
       await updateDoc(doc(db, 'messages', messageId), { reactions: next });
     } catch (err) {
-      if (prev) patchRemoteMessage(messageId, (m) => { m.reactions = prev; });
+      // Roll back even when there was no previous reactions object
+      // (first-ever reaction): the original state is "no key at all".
+      patchRemoteMessage(messageId, (m) => { if (prev) m.reactions = prev; else delete m.reactions; });
       throw err;
     }
     return next;
@@ -1714,7 +1804,12 @@ export async function setConversationTheme(conversationId, themeId) {
   const theme = chatTheme(themeId).id;
   if (firebaseReady) {
     patchRemoteConversation(conversationId, (c) => { c.theme = theme; });
-    await updateDoc(doc(db, 'conversations', conversationId), { theme });
+    try {
+      await updateDoc(doc(db, 'conversations', conversationId), { theme });
+    } catch (err) {
+      patchRemoteConversation(conversationId, (c) => { c.theme = conv.theme; });
+      throw err;
+    }
     return theme;
   }
   mutate((s) => { const c = s.conversations.find((x) => x.id === conversationId); if (c) c.theme = theme; });
@@ -1827,7 +1922,12 @@ export async function setConversationEmoji(conversationId, emoji) {
   const value = String(emoji || '👍').slice(0, 8);
   if (firebaseReady) {
     patchRemoteConversation(conversationId, (c) => { c.emoji = value; });
-    await updateDoc(doc(db, 'conversations', conversationId), { emoji: value });
+    try {
+      await updateDoc(doc(db, 'conversations', conversationId), { emoji: value });
+    } catch (err) {
+      patchRemoteConversation(conversationId, (c) => { c.emoji = conv.emoji; });
+      throw err;
+    }
     return value;
   }
   mutate((s) => { const c = s.conversations.find((x) => x.id === conversationId); if (c) c.emoji = value; });
@@ -1955,7 +2055,17 @@ export async function createConversationInvite(conversationId) {
   if (firebaseReady) {
     await setDoc(doc(db, 'invites', code), { conversationId, createdBy: user.id, createdAt: Date.now() });
     patchRemoteConversation(conversationId, (c) => { c.joinCode = code; });
-    await updateDoc(doc(db, 'conversations', conversationId), { joinCode: code });
+    try {
+      await updateDoc(doc(db, 'conversations', conversationId), { joinCode: code });
+    } catch (err) {
+      // Roll the mirror back and drop the invite doc: without the
+      // conversation-side joinCode the rules' self-join branch can
+      // never pass, and a mirror that KEEPS the code would make every
+      // retry return this same broken link forever.
+      patchRemoteConversation(conversationId, (c) => { c.joinCode = ''; });
+      try { await deleteDoc(doc(db, 'invites', code)); } catch { /* best-effort */ }
+      throw err;
+    }
     return code;
   }
   mutate((s) => { const c = s.conversations.find((x) => x.id === conversationId); if (c) c.joinCode = code; });
@@ -1970,6 +2080,12 @@ export async function joinConversationByCode(code) {
     const snap = await getDoc(doc(db, 'invites', clean));
     if (!snap.exists()) throw new Error('That invite link is not valid.');
     const conversationId = snap.data().conversationId;
+    // Already a member? Joining again is a no-op SUCCESS, not an
+    // error: arrayUnion of an existing member produces a no-change
+    // update, which the self-join rule (exactly +1 participant)
+    // rejects with a raw permission-denied message.
+    const convSnap = await getDoc(doc(db, 'conversations', conversationId));
+    if (convSnap.exists() && (convSnap.data().participants || []).includes(user.id)) return conversationId;
     await updateDoc(doc(db, 'conversations', conversationId), { participants: arrayUnion(user.id) });
     return conversationId;
   }
@@ -2205,9 +2321,13 @@ export async function adminSetVerified(userId, verified, reason = '') {
 // signed-out, and their content is gone. Logged as 'delete-user'.
 export async function adminDeleteUser(userId, reason = '') {
   const { target } = requireUserManager(userId, { superOnly: true });
-  const ownPosts = data().posts.filter((p) => p.authorId === userId);
   if (firebaseReady) {
-    for (const p of ownPosts) { try { await deleteDoc(doc(db, 'posts', p.id)); } catch { /* best-effort cleanup */ } }
+    // Query Firestore DIRECTLY for the user's posts: the admin mirror
+    // only holds a listener subset (public + audience + own, capped),
+    // so filtering it left the deleted user's older/friends-only posts
+    // orphaned in other people's feeds.
+    const snap = await getDocs(query(collection(db, 'posts'), where('authorId', '==', userId)));
+    for (const d of snap.docs) { try { await deleteDoc(doc(db, 'posts', d.id)); } catch { /* best-effort cleanup */ } }
     await deleteDoc(doc(db, 'users', userId));
   } else {
     mutate((s) => {
@@ -2378,7 +2498,12 @@ export async function saveBot(bot) {
     // OMITTED from the stored data, never set to undefined.
     const { id: _omitId, ...botPayload } = saved;
     await setDoc(doc(db, 'bots', id), botPayload, { merge: true });
-    await setDoc(doc(db, 'botBrains', id), { botId: id, systemPrompt: saved.personality.systemPrompt, provider: 'gemini-ready', model: 'template-fallback', updatedAt: Date.now() }, { merge: true });
+    // Preserve the REAL last-used provider/model stamps: recordBotBrain
+    // maintains them after every generation, and stamping placeholder
+    // values here made the Bot Center claim "template-fallback" for a
+    // bot actually answering via a live provider.
+    const prevBrain = data().botBrains?.[id] || {};
+    await setDoc(doc(db, 'botBrains', id), { botId: id, systemPrompt: saved.personality.systemPrompt, provider: prevBrain.provider || saved.provider || '', model: prevBrain.model || saved.model || '', updatedAt: Date.now() }, { merge: true });
     // Best-effort: the live runner re-ensures the user doc every cycle,
     // so a hiccup here (e.g. rules not yet republished) must not break
     // saving the bot's configuration.
@@ -2395,7 +2520,7 @@ export async function saveBot(bot) {
       const u = s.users.find((x) => x.id === b.id);
       Object.assign(u, { name: b.name, username: b.username, bio: b.bio, avatar: b.avatar });
     }
-    s.botBrains[b.id] = { botId: b.id, systemPrompt: b.personality.systemPrompt, provider: 'gemini-ready', model: 'template-fallback', updatedAt: Date.now() };
+    s.botBrains[b.id] = { botId: b.id, systemPrompt: b.personality.systemPrompt, provider: s.botBrains[b.id]?.provider || b.provider || '', model: s.botBrains[b.id]?.model || b.model || '', updatedAt: Date.now() };
     if (!s.botMemories[b.id]) s.botMemories[b.id] = [];
     s.botLogs.unshift({ id: genId('log'), botId: b.id, level: 'info', message: `Bot ${b.name} saved by admin.`, createdAt: Date.now() });
   });
@@ -2768,16 +2893,21 @@ export async function removeProviderKey(providerId) {
   );
 }
 
-export async function saveProviderEndpoint(endpoint) {
-  const entry = assertProvider('ollama');
+export async function saveProviderEndpoint(providerId, endpoint) {
+  // Back-compat: the original signature was saveProviderEndpoint(url)
+  // and always wrote Ollama's endpoint (the only endpoint-based
+  // provider). Accept that shape, but honour an explicit provider id
+  // when the caller passes one (the endpoint form carries it).
+  if (endpoint === undefined) { endpoint = providerId; providerId = 'ollama'; }
+  const entry = assertProvider(providerId || 'ollama');
   if (!isAdmin()) throw new Error('Only admins can manage provider settings.');
   const value = String(endpoint || '').trim().replace(/\/+$/, '');
   let parsed;
   try { parsed = new URL(value); } catch { throw new Error('Enter a valid endpoint URL (e.g. http://localhost:11434/v1).'); }
   if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('The endpoint must start with http:// or https://.');
   await patchBotSecrets(
-    { providers: { ollama: { endpoint: value } } },
-    (s) => { (s.providers ||= {}).ollama = { ...(s.providers.ollama || {}), endpoint: value }; }
+    { providers: { [entry.id]: { endpoint: value } } },
+    (s) => { (s.providers ||= {})[entry.id] = { ...(s.providers[entry.id] || {}), endpoint: value }; }
   );
   return entry;
 }
@@ -2808,6 +2938,10 @@ export async function testProviderConnection(providerId) {
   if (!isAdmin()) throw new Error('Only admins can test providers.');
   await loadBotSecrets();
   const result = await testAiProvider(entry.id, { config: resolveAiConfig(data().botSecrets || {}, data().config || {}) });
+  // A test connection is a REAL generation — count it, or repeated
+  // test clicks silently burn the provider's free daily quota while
+  // the panel (and the router's cap guard) see nothing.
+  recordAiUsage(entry.id, { ok: result.ok, usage: result.usage || null, status: result.ok ? 200 : 0, attempts: result.attempts || 1 });
   const health = { ok: result.ok, detail: result.detail, at: Date.now() };
   if (firebaseReady) {
     if (remote) {
@@ -2834,8 +2968,12 @@ function bumpAiUsage(usage, providerId, attempt) {
   const providers = normaliseUsageMap(base.providers);
   const p = providers[providerId];
   if (p) {
-    p.calls += 1;
-    if (!attempt.ok) p.errors += 1;
+    // One routed call can be several REAL provider requests (Gemini's
+    // model chain tries up to 3 models); the router reports the true
+    // count in attempt.attempts so calls/errors are never understated.
+    const attempts = Math.max(1, Number(attempt.attempts) || 1);
+    p.calls += attempts;
+    p.errors += attempt.ok ? attempts - 1 : attempts;
     if (attempt.usage) {
       p.promptTokens += attempt.usage.promptTokens || 0;
       p.completionTokens += attempt.usage.completionTokens || 0;
@@ -3072,9 +3210,17 @@ async function runScheduledBotCycle() {
   try {
     const windowKey = Math.floor(Date.now() / BOT_RUNNER_INTERVAL_MS);
     const ref = doc(db, 'botRunners', `autocycle_${windowKey}`);
-    const snap = await getDoc(ref);
-    if (snap.exists()) return; // another admin session already ran this window
-    await setDoc(ref, { kind: 'live-autocycle', window: windowKey, by: currentUid(), createdAt: Date.now(), status: 'claimed' });
+    // Atomic claim via transaction: the old get-then-set let two admin
+    // tabs both observe "not claimed" and both run the window. The
+    // GitHub Actions runner claims the same window doc the same way,
+    // so browser and runner can never run a cycle over each other.
+    const claimed = await runTransaction(db, async (tx) => {
+      const snap = await tx.get(ref);
+      if (snap.exists()) return false;
+      tx.set(ref, { kind: 'live-autocycle', window: windowKey, by: currentUid(), createdAt: Date.now(), status: 'claimed' });
+      return true;
+    });
+    if (!claimed) return; // another session already ran this window
   } catch { return; /* cannot claim — skip this window quietly */ }
   await runLiveBotCycle();
 }
@@ -3089,7 +3235,10 @@ async function loadLiveBotCounters() {
 }
 
 async function saveLiveBotCounters(day, counters) {
-  try { await setDoc(doc(db, 'botSettings', 'counters'), { day, counters, updatedAt: Date.now() }); } catch { /* best-effort */ }
+  // merge: true — the counters map deep-merges per bot, so a cycle
+  // never wipes another writer's increments for OTHER bots (the whole
+  // doc used to be overwritten, last writer wins).
+  try { await setDoc(doc(db, 'botSettings', 'counters'), { day, counters, updatedAt: Date.now() }, { merge: true }); } catch { /* best-effort */ }
 }
 
 async function loadLiveBotMemories(botId) {
@@ -3195,6 +3344,10 @@ export async function runLiveBotCycle() {
               senderId: bot.id, text: gen.text, image: '', audio: '',
               createdAt: Date.now(), status: 'sent', readBy: [bot.id]
             });
+            // Count the reply NOW, before the notification/memory
+            // writes: if one of those throws, the delivered message
+            // used to go uncounted and the daily cap leaked.
+            c.messagesToday += 1;
             await createNotification({
               userId: target.humanId, type: 'message', actorId: bot.id,
               text: `${bot.name} sent you a message.`, postId: '', conversationId: target.conversationId,
@@ -3202,7 +3355,6 @@ export async function runLiveBotCycle() {
             });
             const updatedMemories = memoryFromConversation(memories, fresh.text, gen.text);
             try { await setDoc(doc(db, 'botMemories', bot.id), { botId: bot.id, items: updatedMemories }); } catch { /* memory is best-effort */ }
-            c.messagesToday += 1;
             actions += 1;
             acted = true;
             results.push({ bot: bot.name, action: 'message' });
@@ -3247,20 +3399,24 @@ export async function runLiveBotCycle() {
               const freshComments = postSnap.exists() ? (postSnap.data().comments || []) : (target.comments || []);
               const comment = { id: genId('c'), authorId: bot.id, text: gen.text, createdAt: Date.now(), replies: [] };
               await updateDoc(doc(db, 'posts', target.id), { comments: [...freshComments, comment] });
+              c.commentsToday += 1;
+              c.lastActionAt = Date.now();
               await createNotification({
                 userId: target.authorId, type: 'comment', actorId: bot.id,
                 text: `${bot.name} (AI Bot) commented on your post.`, postId: target.id, conversationId: '',
                 read: false, createdAt: Date.now()
               });
-              c.commentsToday += 1;
-              c.lastActionAt = Date.now();
               actions += 1;
               acted = true;
               results.push({ bot: bot.name, action: 'comment' });
             }
           }
         } else if (decision.action === 'like') {
-          const target = (data().posts || []).find((p) => !p.groupId && !p.pageId && p.authorId !== bot.id && !(p.likes || []).includes(bot.id));
+          // PUBLIC posts only — the comment filter above always had
+          // this check, the like filter did not, so bots could like
+          // friends-only posts they were never in the audience for
+          // (the admin-signed runner can READ every post).
+          const target = (data().posts || []).find((p) => p.visibility === 'public' && !p.groupId && !p.pageId && p.authorId !== bot.id && !(p.likes || []).includes(bot.id));
           if (target) {
             await updateDoc(doc(db, 'posts', target.id), { likes: arrayUnion(bot.id) });
             c.likesToday += 1;

@@ -910,7 +910,6 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'delete-post': if (await confirmModal('Delete post?', 'This post and its comments will be removed.')) await handle(api.deletePost(postId), 'Post deleted.'); break;
-    case 'admin-delete-post': if (await confirmModal('Remove this post?', 'Admin moderation: the post will be deleted for everyone.')) await handle(api.deletePost(actEl.dataset.id), 'Post removed.'); break;
     case 'report-post': {
       const modal = openModal(V.reportFormHtml('post', postId));
       modal.querySelector('[data-close]').onclick = closeModal;
@@ -993,9 +992,14 @@ document.addEventListener('click', async (e) => {
     case 'delete-page': if (await confirmModal('Delete page?', 'The page and all of its posts will be removed. This cannot be undone.')) { await handle(api.deletePage(actEl.dataset.id), 'Page deleted.'); location.hash = '#/pages'; } break;
     case 'follow-page': await handle(api.toggleFollowPage(actEl.dataset.id)); break;
     case 'block': {
-      const target = d.users.find((u) => u.id === actEl.dataset.id);
-      const willBlock = !(d.blocks || []).some((b) => b.by === user.id && b.target === target?.id);
-      if (!willBlock || await confirmModal(`Block ${target?.name}?`, 'They will not be able to see your posts or message you.')) await handle(api.toggleBlock(target.id), willBlock ? 'User blocked.' : 'User unblocked.');
+      // Resolve by the dataset id, not by a users lookup: the target
+      // may be a deleted account (Settings still lists the block), and
+      // dereferencing a missing user used to throw before the unblock
+      // could run — the stale block was unremovable.
+      const targetId = actEl.dataset.id;
+      const target = d.users.find((u) => u.id === targetId);
+      const willBlock = !(d.blocks || []).some((b) => b.by === user.id && b.target === targetId);
+      if (!willBlock || await confirmModal(`Block ${target?.name || 'this user'}?`, 'They will not be able to see your posts or message you.')) await handle(api.toggleBlock(targetId), willBlock ? 'User blocked.' : 'User unblocked.');
       break;
     }
     case 'message-user': {
@@ -1012,6 +1016,18 @@ document.addEventListener('click', async (e) => {
     case 'notif-open': {
       await handle(api.markNotificationRead(actEl.dataset.id));
       if (actEl.dataset.conv) location.hash = `#/messages/${actEl.dataset.conv}`;
+      else if (actEl.dataset.post) {
+        // Land ON the post the notification points to (the view stamps
+        // data-post on every notification; this handler never read
+        // it, so like/comment notifications just dumped you at the
+        // top of the feed).
+        const postId = actEl.dataset.post;
+        location.hash = '#/';
+        setTimeout(() => {
+          const el = document.querySelector(`[data-post="${postId}"]`);
+          if (el) { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 2000); }
+        }, 400);
+      }
       else location.hash = '#/';
       break;
     }
@@ -1126,7 +1142,6 @@ document.addEventListener('click', async (e) => {
       render();
       break;
     }
-    case 'gemini-key-remove': if (await confirmModal('Remove the Gemini API key?', 'Bots will go back to template replies until a new key is saved.')) await handle(api.removeGeminiApiKey(), 'Gemini API key removed.'); break;
     // ---- AI Providers (Stage A): enable/disable, key removal, health
     // test and the paid-provider approval gate.
     case 'provider-toggle': {
@@ -1402,8 +1417,8 @@ document.addEventListener('submit', async (e) => {
     return;
   }
   if (form.id === 'edit-post-form') {
-    await handle(api.editPost(form.dataset.id, String(fd.get('text') || '')), 'Post updated.');
-    closeModal();
+    const r = await handle(api.editPost(form.dataset.id, String(fd.get('text') || '')), 'Post updated.');
+    if (r) closeModal(); // stay open on failure so the edited text is not lost
     return;
   }
   if (form.id === 'edit-message-form') {
@@ -1591,7 +1606,7 @@ document.addEventListener('submit', async (e) => {
     return;
   }
   if (form.dataset.providerEndpointForm) {
-    await handle(api.saveProviderEndpoint(String(fd.get('endpoint') || '')), 'Endpoint saved.');
+    await handle(api.saveProviderEndpoint(form.dataset.providerEndpointForm, String(fd.get('endpoint') || '')), 'Endpoint saved.');
     return;
   }
   if (form.dataset.providerModelForm) {
@@ -1683,7 +1698,11 @@ document.addEventListener('input', (e) => {
   if (e.target.id !== 'conv-search') return;
   const q = e.target.value.trim().toLowerCase();
   document.querySelectorAll('.conv-item[data-search]').forEach((el) => {
-    el.style.display = !q || (el.dataset.search || '').includes(q) ? '' : 'none';
+    // Hide the whole row WRAP: the ⋯ menu button is a sibling of the
+    // .conv-item inside .conv-item-wrap, and hiding only the item left
+    // orphan ⋯ buttons floating in the filtered list.
+    const row = el.closest('.conv-item-wrap') || el;
+    row.style.display = !q || (el.dataset.search || '').includes(q) ? '' : 'none';
   });
 });
 

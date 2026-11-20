@@ -113,7 +113,23 @@ service cloud.firestore {
       allow update: if isSuperAdmin()
         || ((isSelf(uid) || isAdmin())
           && request.resource.data.get('role', 'user') == resource.data.get('role', 'user')
-          && request.resource.data.get('isBot', false) == resource.data.get('isBot', false));
+          && request.resource.data.get('isBot', false) == resource.data.get('isBot', false))
+        // Follow/unfollow: any signed-in user may change ANOTHER
+        // user's followers list by exactly one entry — their own uid,
+        // added or removed — and nothing else on the doc. Without
+        // this branch, follow always failed for non-admins (the
+        // second write of toggleFollow was denied) and left the two
+        // accounts' following/followers permanently out of sync.
+        || (request.auth != null
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['followers'])
+          && ((request.resource.data.get('followers', []).size() == resource.data.get('followers', []).size() + 1
+              && request.resource.data.get('followers', []).hasAll(resource.data.get('followers', []))
+              && request.auth.uid in request.resource.data.get('followers', [])
+              && !(request.auth.uid in resource.data.get('followers', [])))
+            || (request.resource.data.get('followers', []).size() == resource.data.get('followers', []).size() - 1
+              && resource.data.get('followers', []).hasAll(request.resource.data.get('followers', []))
+              && request.auth.uid in resource.data.get('followers', [])
+              && !(request.auth.uid in request.resource.data.get('followers', [])))))
       allow delete: if isSelf(uid) || isAdmin();
     }
 
@@ -132,8 +148,16 @@ service cloud.firestore {
         && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid || isAdmin());
       allow create: if signedIn() && writerStatusOk() && request.resource.data.from == request.auth.uid
         && request.resource.data.status == 'pending';
-      allow update: if signedIn()
-        && (resource.data.to == request.auth.uid || resource.data.from == request.auth.uid || isAdmin());
+      // Only the RECIPIENT can accept, and the only change an update
+      // may make is pending -> accepted on the status field. The
+      // sender flipping their own request to "accepted" (possible
+      // under the old from-or-to rule) bypassed consent entirely.
+      // Declining/cancelling is a delete, allowed for both sides.
+      allow update: if signedIn() && (isAdmin()
+        || (resource.data.to == request.auth.uid
+          && resource.data.status == 'pending'
+          && request.resource.data.status == 'accepted'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])));
       allow delete: if signedIn()
         && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid || isAdmin());
     }

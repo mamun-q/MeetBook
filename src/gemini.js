@@ -59,8 +59,15 @@ export function buildGeminiPrompt(bot, memories = [], context = {}) {
 // produced the recorded (last) failure, e.g.
 // "HTTP 400 (gemini-3.5-flash-lite): API key not valid. ...".
 let lastGeminiFailure = '';
+let lastGeminiAttempts = 0;
 export function getLastGeminiFailure() {
   return lastGeminiFailure;
+}
+// How many real HTTP attempts the last generateGeminiDetailed call
+// made (the model chain can try up to 3 models for one routed call) —
+// the router's usage accounting needs the true count, not 1.
+export function getLastGeminiAttempts() {
+  return lastGeminiAttempts;
 }
 export function resetLastGeminiFailure() {
   lastGeminiFailure = '';
@@ -190,12 +197,14 @@ export async function generateGeminiDetailed({ apiKey, bot, memories = [], conte
     const r = await attemptGeminiOnce({ key, model, prompt: finalPrompt, doFetch, timeoutMs });
     if (r.text) {
       lastGeminiFailure = '';
-      return { text: r.text, model, usage: r.usage || null };
+      lastGeminiAttempts = attempts;
+      return { text: r.text, model, usage: r.usage || null, attempts };
     }
     lastFailure = r.failure;
     lastModel = model;
   }
   lastGeminiFailure = formatGeminiFailure(lastFailure, lastModel, attempts > 1);
+  lastGeminiAttempts = attempts;
   return null;
 }
 

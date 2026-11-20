@@ -166,9 +166,15 @@ export function emptyBotCounters() {
   return { postsToday: 0, commentsToday: 0, likesToday: 0, messagesToday: 0, lastActionAt: 0 };
 }
 
+// Bot daily caps reset on the DHAKA calendar day — the same day the
+// AI provider usage counters use (aiProviders.dhakaDayKey). This used
+// to be the runtime-LOCAL day, which silently disagreed with the usage
+// day whenever a runner/browser was not itself in Asia/Dhaka, and the
+// two writers of botSettings/counters kept zeroing each other's doc.
 export function counterDayKey(now = Date.now()) {
-  const d = new Date(now);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Dhaka', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(now));
+  const get = (type) => parts.find((p) => p.type === type)?.value || '';
+  return `${get('year')}-${get('month')}-${get('day')}`;
 }
 
 // The counters map to use today: a stored doc from a previous day (or a

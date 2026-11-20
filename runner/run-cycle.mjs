@@ -18,7 +18,7 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithEmailAndPassword } from 'firebase/auth';
 import {
   getFirestore, collection, doc, getDoc, getDocs, addDoc, setDoc, updateDoc,
-  query, where, orderBy, limit, serverTimestamp, arrayUnion
+  query, where, orderBy, limit, serverTimestamp, arrayUnion, runTransaction
 } from 'firebase/firestore';
 import { DEFAULT_FIREBASE_CONFIG } from '../src/firebase-config.js';
 import {
@@ -54,8 +54,11 @@ function bumpUsage(providerId, attempt) {
   const providers = normaliseUsageMap(base.providers);
   const p = providers[providerId];
   if (p) {
-    p.calls += 1;
-    if (!attempt.ok) p.errors += 1;
+    // One routed call can be several REAL provider requests (Gemini's
+    // model chain); attempt.attempts carries the true count.
+    const attempts = Math.max(1, Number(attempt.attempts) || 1);
+    p.calls += attempts;
+    p.errors += attempt.ok ? attempts - 1 : attempts;
     if (attempt.usage) {
       p.promptTokens += attempt.usage.promptTokens || 0;
       p.completionTokens += attempt.usage.completionTokens || 0;
@@ -132,6 +135,24 @@ async function main() {
   }
   console.log(`Signed in as ${email} (role: ${myRole}).`);
 
+  // Claim the current 3-minute autocycle window — the SAME doc the
+  // browser runner claims (atomically, via transaction). If an admin
+  // browser already ran this window, skip: two runners acting on the
+  // same counter snapshot used to exceed daily caps and lose each
+  // other's increments.
+  const windowKey = Math.floor(Date.now() / (3 * 60 * 1000));
+  const claimRef = doc(db, 'botRunners', `autocycle_${windowKey}`);
+  const claimed = await runTransaction(db, async (tx) => {
+    const snap = await tx.get(claimRef);
+    if (snap.exists()) return false;
+    tx.set(claimRef, { kind: 'gh-actions-runner', window: windowKey, by: cred.user.uid, createdAt: Date.now(), status: 'claimed' });
+    return true;
+  }).catch(() => false);
+  if (!claimed) {
+    console.log('Bot cycle skipped: this window was already claimed by another runner.');
+    return;
+  }
+
   const globalSnap = await getDoc(doc(db, 'botSettings', 'global'));
   const globalEnabled = !globalSnap.exists() || globalSnap.data().enabled !== false;
   if (!globalEnabled) {
@@ -183,6 +204,9 @@ async function main() {
             senderId: bot.id, text: gen.text, image: '', audio: '',
             createdAt: Date.now(), status: 'sent', readBy: [bot.id]
           });
+          // Count NOW — a notification/memory failure after this
+          // point must not leave a delivered message uncounted.
+          c.messagesToday += 1;
           if (target.humanId !== bot.id) {
             await addDoc(collection(db, 'notifications'), {
               userId: target.humanId, type: 'message', actorId: bot.id,
@@ -193,7 +217,6 @@ async function main() {
           const updatedMemories = memoryFromConversation(memories, fresh.text, gen.text);
           try { await setDoc(doc(db, 'botMemories', bot.id), { botId: bot.id, items: updatedMemories }); } catch { /* best-effort */ }
           await recordBotBrain(bot, gen.provider, gen.model);
-          c.messagesToday += 1;
           acted = true;
           results.push(`${bot.name} → message (via ${gen.provider})`);
         }
@@ -227,7 +250,15 @@ async function main() {
           if (!blockSnap.exists()) {
             const gen = await generateBotText(bot, memories, { kind: 'comment', text: target.text }, generateTemplateComment(bot), secretsDoc, platformConfig);
             const comment = { id: `c_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`, authorId: bot.id, text: gen.text, createdAt: Date.now(), replies: [] };
-            await updateDoc(doc(db, 'posts', target.id), { comments: [...(target.comments || []), comment] });
+            // Re-read the post AFTER generating (the browser cycle
+            // does this too): appending to the pre-generation snapshot
+            // used to silently erase any human comment added while
+            // the bot was "thinking".
+            const freshSnap = await getDoc(doc(db, 'posts', target.id));
+            const freshComments = freshSnap.exists() ? (freshSnap.data().comments || []) : (target.comments || []);
+            await updateDoc(doc(db, 'posts', target.id), { comments: [...freshComments, comment] });
+            c.commentsToday += 1;
+            c.lastActionAt = Date.now();
             if (target.authorId !== bot.id) {
               await addDoc(collection(db, 'notifications'), {
                 userId: target.authorId, type: 'comment', actorId: bot.id,
@@ -236,8 +267,6 @@ async function main() {
               });
             }
             await recordBotBrain(bot, gen.provider, gen.model);
-            c.commentsToday += 1;
-            c.lastActionAt = Date.now();
             acted = true;
             results.push(`${bot.name} → comment (via ${gen.provider})`);
           }
@@ -246,7 +275,11 @@ async function main() {
         const postsSnap = await getDocs(query(collection(db, 'posts'), orderBy('createdAt', 'desc'), limit(30)));
         const target = postsSnap.docs
           .map((d) => ({ id: d.id, ...d.data() }))
-          .find((p) => !p.groupId && !p.pageId && p.authorId !== bot.id && !(p.likes || []).includes(bot.id));
+          // PUBLIC posts only, like the comment filter — the runner
+          // signs in as an admin and can READ every post, so without
+          // this check bots liked friends-only posts they were never
+          // in the audience for.
+          .find((p) => p.visibility === 'public' && !p.groupId && !p.pageId && p.authorId !== bot.id && !(p.likes || []).includes(bot.id));
         if (target) {
           await updateDoc(doc(db, 'posts', target.id), { likes: arrayUnion(bot.id) });
           c.likesToday += 1;
@@ -261,7 +294,9 @@ async function main() {
     }
   }
 
-  await setDoc(doc(db, 'botSettings', 'counters'), { day, counters, updatedAt: Date.now() });
+  // merge: true — deep-merges the counters map per bot instead of
+  // overwriting the whole doc (last-writer-wins lost increments).
+  await setDoc(doc(db, 'botSettings', 'counters'), { day, counters, updatedAt: Date.now() }, { merge: true });
   if (aiUsage) {
     await setDoc(doc(db, 'botSecrets', 'config'), { aiUsage: { day: aiUsage.day, providers: aiUsage.providers }, updatedAt: Date.now() }, { merge: true });
   }

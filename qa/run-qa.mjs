@@ -56,8 +56,11 @@ async function checkRoute(page, route, viewportName, bag) {
   await page.goto(BASE + '#/' + route, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(2600); // let Firestore data + render settle
   for (const e of bag) report(e.kind, where, e.detail);
-  const blank = await page.evaluate(() => (document.querySelector('#app')?.innerText || '').trim().length);
-  if (blank < 20) report('blank-page', where, `app rendered only ${blank} chars of text`);
+  // Blank check measures the ROUTE CONTENT (.shell), not #app: the
+  // app chrome (topbar/nav/footer) alone exceeds the old threshold,
+  // so a route whose view rendered empty used to pass as "fine".
+  const blank = await page.evaluate(() => (document.querySelector('.shell')?.innerText || '').trim().length);
+  if (blank < 20) report('blank-page', where, `route content rendered only ${blank} chars of text`);
   const overflow = await page.evaluate(() => Math.max(
     document.documentElement.scrollWidth - document.documentElement.clientWidth,
     document.body ? document.body.scrollWidth - document.documentElement.clientWidth : 0,
@@ -113,7 +116,11 @@ async function smokeTests(browser) {
     await page.waitForSelector('#composer-form textarea', { timeout: 15000 });
     await page.fill('#composer-form textarea', marker);
     await page.click('#composer-form button[type="submit"], #composer-form .btn-primary');
-    await page.waitForFunction((m) => document.body.innerText.includes(m), marker, { timeout: 20000 });
+    // The marker must appear inside a rendered POST CARD — checking
+    // body text was satisfied by the composer textarea itself (its
+    // current value is part of innerText), a false pass when the
+    // publish actually failed.
+    await page.waitForFunction((m) => [...document.querySelectorAll('.post-card')].some((el) => el.innerText.includes(m)), marker, { timeout: 20000 });
     notes.push('smoke: post published and visible');
     const card = page.locator('.post-card', { hasText: marker }).first();
     await card.locator('.post-menu-wrap button').first().click();
@@ -133,7 +140,14 @@ async function smokeTests(browser) {
     if (await conv.count()) {
       await conv.click();
       await page.waitForSelector('.thread-head', { timeout: 10000 });
-      notes.push('smoke: message thread opened');
+      // The header alone is not proof: the 2026-11-20 DM bug rendered
+      // the thread with a silently EMPTY message list. Require actual
+      // message rows or the thread's own empty-state text.
+      await page.waitForFunction(() => {
+        const b = document.querySelector('#thread-body');
+        return Boolean(b && (b.querySelector('.msg-row') || b.innerText.trim().length > 0));
+      }, { timeout: 10000 });
+      notes.push('smoke: message thread opened, messages region rendered');
     } else {
       notes.push('smoke: no conversations exist for the Test account — thread open skipped');
     }
