@@ -1176,3 +1176,39 @@ export function mapsUrl(location) {
   if (!location) return '#';
   return `https://www.google.com/maps?q=${location.lat},${location.lng}`;
 }
+
+// ------------------------------------------------------- Useful Pack
+// Vanish mode: messages sent while a conversation's vanish flag is on
+// carry an expiresAt; once past it, every client simply stops showing
+// them (the doc stays as an empty shell — Spark has no server timer).
+export const VANISH_TTL_MS = 60_000;
+
+export function isVanishExpired(message, now = Date.now()) {
+  return Boolean(message?.vanish && message.expiresAt && now > message.expiresAt);
+}
+
+// Timed mute: mutedBy holds the flag, mutedUntil[uid] the expiry.
+// No expiry entry = muted until manually unmuted.
+export function isMutedNow(conv, userId, now = Date.now()) {
+  if (!isConversationFlagged(conv, 'mutedBy', userId)) return false;
+  const until = conv?.mutedUntil?.[userId];
+  return !until || until > now;
+}
+
+// A 1-1 conversation is a message request when the other person is not
+// my friend (and not a bot) and I have not accepted the chat yet.
+export function isMessageRequest(conv, userId, friendIds, usersByIdMap) {
+  if (!conv || conv.isGroup) return false;
+  const otherId = (conv.participants || []).find((p) => p !== userId);
+  if (!otherId) return false;
+  if (usersByIdMap?.[otherId]?.isBot) return false;
+  if (friendIds && typeof friendIds.has === 'function' && friendIds.has(otherId)) return false;
+  return !(conv.acceptedBy || []).includes(userId);
+}
+
+export function formatBytes(bytes) {
+  const n = Number(bytes) || 0;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}

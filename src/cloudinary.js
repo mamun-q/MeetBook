@@ -33,6 +33,26 @@ export async function uploadToCloudinary(file, cfg = CLOUDINARY_CONFIG, fetchImp
   return data.secure_url;
 }
 
+// Upload ANY file (documents, PDFs, archives) through the same unsigned
+// preset using Cloudinary's `auto` resource type — images stay images,
+// everything else is stored as a raw file. Verified live against the
+// meetbook preset (raw uploads accepted).
+export function cloudinaryAutoUploadUrl(cfg = CLOUDINARY_CONFIG) {
+  return `https://api.cloudinary.com/v1_1/${cfg.cloudName}/auto/upload`;
+}
+
+export async function uploadFileToCloudinary(file, cfg = CLOUDINARY_CONFIG, fetchImpl = fetch) {
+  const body = new FormData();
+  body.append('file', file);
+  body.append('upload_preset', cfg.uploadPreset);
+  const res = await fetchImpl(cloudinaryAutoUploadUrl(cfg), { method: 'POST', body });
+  if (!res || !res.ok) throw new Error(`Cloudinary file upload failed (HTTP ${res ? res.status : 'no response'})`);
+  const data = await res.json();
+  const url = data?.secure_url || data?.url;
+  if (!url) throw new Error('Cloudinary file upload returned no URL');
+  return url;
+}
+
 // Right-size a Cloudinary delivery URL at render time: f_auto serves
 // WebP/AVIF where the browser supports them, q_auto picks a sane quality,
 // and w_<n>,c_limit caps the width without ever upscaling — so a phone on a

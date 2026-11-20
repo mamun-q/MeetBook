@@ -7,11 +7,11 @@ import {
   getState, mutate, findUser, userByUsername, friendIdsOf, blockedIdsOf, notify, resetDemo
 } from './store.js';
 import { firebaseReady, auth, db, storage, googleProvider } from './firebase.js';
-import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme, canEditMessage, chatPollVote } from './utils.js';
+import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme, canEditMessage, chatPollVote, VANISH_TTL_MS } from './utils.js';
 import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay } from './botLogic.js';
 import { canAccessBotSecrets, botModel } from './gemini.js';
 import { providerById, resolveAiConfig, generateRouted, testProvider as testAiProvider, getLastRoutedFailure, resetLastRoutedFailure, anyProviderConfigured, dhakaDayKey, normaliseUsageMap, usageTotals } from './aiProviders.js';
-import { isCloudinaryConfigured, uploadToCloudinary } from './cloudinary.js';
+import { isCloudinaryConfigured, uploadToCloudinary, uploadFileToCloudinary } from './cloudinary.js';
 
 // --- Firebase imports are dynamic-free static imports of the SDK ---------
 import {
@@ -1541,7 +1541,7 @@ export async function createGroupConversation({ title, memberIds }) {
   return full;
 }
 
-export async function sendMessage(conversationId, { text, image, audio = '', replyToId = '', forwarded = false, sticker = '', location = null, poll = null }) {
+export async function sendMessage(conversationId, { text, image, audio = '', replyToId = '', forwarded = false, sticker = '', location = null, poll = null, file = null }) {
   const user = me(); if (!user) throw new Error('Sign in first.');
   const conv = data().conversations.find((c) => c.id === conversationId);
   // Participants are DENORMALIZED onto the message: the messages read
@@ -1556,7 +1556,21 @@ export async function sendMessage(conversationId, { text, image, audio = '', rep
   if (sticker) msg.sticker = String(sticker);
   if (location) msg.location = { lat: Number(location.lat), lng: Number(location.lng) };
   if (poll) msg.poll = poll;
-  if (!msg.text && !msg.image && !msg.audio && !msg.sticker && !msg.location && !msg.poll) throw new Error('Message cannot be empty.');
+  if (file) msg.file = { name: String(file.name || 'file').slice(0, 120), size: Number(file.size) || 0, type: String(file.type || ''), url: String(file.url || '') };
+  if (!msg.text && !msg.image && !msg.audio && !msg.sticker && !msg.location && !msg.poll && !msg.file) throw new Error('Message cannot be empty.');
+  // Vanish mode (Useful Pack): while the conversation's vanish flag is
+  // on, new messages self-hide for everyone VANISH_TTL_MS after sending.
+  if (conv?.vanish) { msg.vanish = true; msg.expiresAt = msg.createdAt + VANISH_TTL_MS; }
+  // @mentions in group chats: resolve @usernames in the text against
+  // the participant list; mentioned members get a mention notification.
+  if (conv?.isGroup && msg.text) {
+    const handles = extractMentions(msg.text);
+    if (handles.length) {
+      const usersByIdMap = Object.fromEntries(data().users.map((u) => [u.id, u]));
+      const mentioned = (conv.participants || []).filter((pid) => pid !== user.id && handles.includes(String(usersByIdMap[pid]?.username || '').toLowerCase()));
+      if (mentioned.length) msg.mentions = mentioned;
+    }
+  }
   // Reply/quote (Chat Pack): snapshot the quoted message onto the new
   // one — its id, its author's name and a ≤120-char snippet — but only
   // when the original really belongs to this conversation.
@@ -1569,7 +1583,17 @@ export async function sendMessage(conversationId, { text, image, audio = '', rep
   const noteText = msg.sticker ? `${user.name} sent you a sticker.`
     : msg.location ? `${user.name} shared their location with you.`
     : msg.poll ? `${user.name} created a poll in your chat.`
+    : msg.file ? `${user.name} sent you a file.`
     : msg.audio && !msg.text ? `${user.name} sent you a voice message.` : `${user.name} sent you a message.`;
+  const noteFor = (other) => msg.mentions?.includes(other)
+    ? { type: 'mention', text: `${user.name} mentioned you in ${conv?.title || 'a group chat'}.` }
+    : { type: 'message', text: noteText };
+  // Replying to a message request accepts it (Messenger behaviour).
+  const acceptIfRequest = async () => {
+    if (conv && !conv.isGroup && !(conv.acceptedBy || []).includes(user.id)) {
+      try { await patchConversationFields(conversationId, { acceptedBy: [...(conv.acceptedBy || []), user.id] }, ['acceptedBy']); } catch { /* best effort */ }
+    }
+  };
   if (firebaseReady) {
     const ref = await addDoc(collection(db, 'messages'), msg);
     // Mirror my own message at once (same id the listener will deliver):
@@ -1579,15 +1603,18 @@ export async function sendMessage(conversationId, { text, image, audio = '', rep
       emitData();
     }
     for (const other of others) {
-      await createNotification({ userId: other, type: 'message', actorId: user.id, text: noteText, postId: '', conversationId, read: false, createdAt: Date.now() });
+      const n = noteFor(other);
+      await createNotification({ userId: other, type: n.type, actorId: user.id, text: n.text, postId: '', conversationId, read: false, createdAt: Date.now() });
     }
+    await acceptIfRequest();
     return { id: ref.id, ...msg };
   }
   const full = { id: genId('m'), ...msg };
   mutate((s) => {
     s.messages.push(full);
-    for (const other of others) notify(other, 'message', user.id, noteText, { conversationId });
+    for (const other of others) { const n = noteFor(other); notify(other, n.type, user.id, n.text, { conversationId }); }
   });
+  await acceptIfRequest();
   return full;
 }
 
@@ -1771,7 +1798,7 @@ export async function forwardMessage(messageId, targetConversationId) {
 // (archivedBy / mutedBy), so they follow the user across devices.
 export async function setConversationFlag(conversationId, flag, on) {
   const user = me(); if (!user) throw new Error('Sign in first.');
-  if (!['archivedBy', 'mutedBy'].includes(flag)) throw new Error('Unknown flag.');
+  if (!['archivedBy', 'mutedBy', 'pinnedBy'].includes(flag)) throw new Error('Unknown flag.');
   const conv = data().conversations.find((c) => c.id === conversationId);
   if (!conv || !conv.participants?.includes(user.id)) throw new Error('Conversation not found.');
   const next = on
@@ -1851,6 +1878,107 @@ export async function setNickname(conversationId, userId, nickname) {
   if (clean) next[userId] = clean; else delete next[userId];
   await patchConversationFields(conversationId, { nicknames: next }, ['nicknames']);
   return next;
+}
+
+// ------------------------------------------------------- Useful Pack
+// Message requests: accepting adds me to the conversation's
+// acceptedBy; replying accepts automatically (inside sendMessage).
+export async function acceptConversationRequest(conversationId) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const conv = data().conversations.find((c) => c.id === conversationId);
+  if (!conv?.participants?.includes(user.id)) throw new Error('Conversation not found.');
+  if ((conv.acceptedBy || []).includes(user.id)) return conv.acceptedBy;
+  const next = [...(conv.acceptedBy || []), user.id];
+  await patchConversationFields(conversationId, { acceptedBy: next }, ['acceptedBy']);
+  return next;
+}
+
+// Vanish mode toggle — a plain conversation flag any participant can
+// flip; sendMessage stamps expiresAt on messages sent while it is on.
+export async function setConversationVanish(conversationId, on) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const conv = data().conversations.find((c) => c.id === conversationId);
+  if (!conv?.participants?.includes(user.id)) throw new Error('Conversation not found.');
+  await patchConversationFields(conversationId, { vanish: Boolean(on) }, ['vanish']);
+  return Boolean(on);
+}
+
+// Timed mute: durationMs null = unmute, Infinity = mute forever,
+// otherwise mute until Date.now() + durationMs.
+export async function setConversationMute(conversationId, durationMs) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const conv = data().conversations.find((c) => c.id === conversationId);
+  if (!conv?.participants?.includes(user.id)) throw new Error('Conversation not found.');
+  const mutedBy = new Set(conv.mutedBy || []);
+  const mutedUntil = { ...(conv.mutedUntil || {}) };
+  if (durationMs === null) { mutedBy.delete(user.id); delete mutedUntil[user.id]; }
+  else {
+    mutedBy.add(user.id);
+    if (Number.isFinite(durationMs)) mutedUntil[user.id] = Date.now() + durationMs; else delete mutedUntil[user.id];
+  }
+  await patchConversationFields(conversationId, { mutedBy: [...mutedBy], mutedUntil }, ['mutedBy', 'mutedUntil']);
+  return { mutedBy: [...mutedBy], mutedUntil };
+}
+
+// Chat file attachments: Cloudinary `auto` upload (verified against
+// the free unsigned preset), with the small-file data-URL fallback the
+// photo pipeline used before Cloudinary. Hard cap 10 MB.
+export async function uploadMessageFile(file) {
+  if (!file) throw new Error('No file selected.');
+  if (file.size > 10 * 1024 * 1024) throw new Error('That file is over the 10 MB chat limit.');
+  const meta = { name: file.name || 'file', size: file.size, type: file.type || '' };
+  if (isCloudinaryConfigured()) {
+    try { return { ...meta, url: await uploadFileToCloudinary(file) }; } catch { /* fall through to the fallback */ }
+  }
+  if (file.size <= 700 * 1024) {
+    const url = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('Could not read that file.'));
+      reader.readAsDataURL(file);
+    });
+    return { ...meta, url };
+  }
+  throw new Error('That file could not be uploaded — it is too large for the free fallback.');
+}
+
+// Group invite links: the code is the id of an `invites` doc pointing
+// at the conversation (readable by any signed-in user who HAS the
+// code); joining rides the rules' self-join branch, which only allows
+// adding yourself when such an invite exists.
+export async function createConversationInvite(conversationId) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const conv = data().conversations.find((c) => c.id === conversationId);
+  if (!conv?.isGroup || !conv.participants?.includes(user.id)) throw new Error('Conversation not found.');
+  if (conv.joinCode) return conv.joinCode;
+  const code = genId('inv');
+  if (firebaseReady) {
+    await setDoc(doc(db, 'invites', code), { conversationId, createdBy: user.id, createdAt: Date.now() });
+    patchRemoteConversation(conversationId, (c) => { c.joinCode = code; });
+    await updateDoc(doc(db, 'conversations', conversationId), { joinCode: code });
+    return code;
+  }
+  mutate((s) => { const c = s.conversations.find((x) => x.id === conversationId); if (c) c.joinCode = code; });
+  return code;
+}
+
+export async function joinConversationByCode(code) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const clean = String(code || '').trim();
+  if (!clean) throw new Error('That invite link is not valid.');
+  if (firebaseReady) {
+    const snap = await getDoc(doc(db, 'invites', clean));
+    if (!snap.exists()) throw new Error('That invite link is not valid.');
+    const conversationId = snap.data().conversationId;
+    await updateDoc(doc(db, 'conversations', conversationId), { participants: arrayUnion(user.id) });
+    return conversationId;
+  }
+  const conv = data().conversations.find((c) => c.joinCode === clean);
+  if (!conv) throw new Error('That invite link is not valid.');
+  if (!conv.participants.includes(user.id)) {
+    mutate((s) => { const c = s.conversations.find((x) => x.id === conv.id); if (c) c.participants = [...c.participants, user.id]; });
+  }
+  return conv.id;
 }
 
 export async function renameGroupConversation(conversationId, title) {

@@ -747,6 +747,21 @@ a, button, input, select, textarea, label { touch-action: manipulation; }
 .chat-poll-text { flex: 1; position: relative; overflow-wrap: anywhere; }
 .chat-poll-count { position: relative; font-size: .78rem; color: var(--muted); white-space: nowrap; }
 .msg-picker-more { flex-wrap: wrap; max-width: 248px; }
+
+/* ------------------------------------------------------- Useful Pack
+   Message requests, vanish mode, file cards, pinned chats, timed
+   mute, @mentions and invite links. */
+.request-banner { display: flex; gap: 10px; align-items: center; margin: 8px 12px 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); font-size: .88rem; }
+.vanish-banner { margin: 8px 12px 0; padding: 7px 12px; border-radius: 999px; background: linear-gradient(135deg, rgba(123, 97, 255, .16), rgba(24, 119, 242, .16)); color: var(--text); font-size: .8rem; text-align: center; }
+.msg-vanish { border: 1px dashed var(--brand-2); }
+.msg-file { display: flex; gap: 10px; align-items: center; text-decoration: none; color: inherit; background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; padding: 9px 12px; min-width: min(230px, 60vw); }
+.msg-file small { display: block; color: var(--muted); font-size: .75rem; }
+.msg-file-icon { font-size: 1.4rem; }
+.mention-badge { background: var(--brand); color: #fff; border-radius: 50%; width: 20px; height: 20px; display: grid; place-items: center; font-size: .75rem; font-weight: 700; flex: none; align-self: center; }
+.msg-mention { color: var(--brand); font-weight: 700; background: rgba(24, 119, 242, .12); border-radius: 5px; padding: 0 3px; }
+.mention-menu { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-md); padding: 4px; max-height: 220px; overflow-y: auto; }
+.mention-item { display: flex; gap: 8px; align-items: center; text-align: left; background: none; border: none; border-radius: 8px; padding: 6px 8px; cursor: pointer; color: var(--text); font: inherit; }
+.mention-item:hover { background: var(--surface-2); }
 .emoji-swatch:hover { transform: scale(1.12); }
 .emoji-swatch.active { border-color: var(--brand); box-shadow: 0 0 0 2px var(--brand); }
 

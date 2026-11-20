@@ -1,7 +1,7 @@
 // HTML generators for every route. Pure string builders: they read the shared
 // dataset (api.data()) and never touch the DOM directly — main.js renders
 // and binds events centrally.
-import { escapeHtml, timeAgo, canViewPost, canViewGroup, canViewGroupPost, isGroupMember, searchByName, truncate, paginate, groupStoriesByAuthor, canViewStory, storyBackgroundCss, STORY_BACKGROUNDS, memoriesFor, upcomingEvents, canViewEvent, averageRating, FEELINGS, plural, mutualFriendCount, isStaff, canModerate, isAdminRole, accountStatus, canManageUser, canChangeRole, ASSIGNABLE_ROLES, platformStats, analyticsSeries, spamSuspects, reportStatus, reportCategory, reportNeedsAttention, countPostComments, botConversationSummaries, recentClientErrors, collapseDuplicateNotifications, REPORT_CATEGORIES, REPORT_OUTCOMES, typingUserIds, reactionChips, pinnedMessages, messageSnippet, chatTheme, CHAT_THEMES, MESSAGE_REACTIONS, reviewText, isEmojiOnlyText, canEditMessage, isMessageVisibleTo, isConversationFlagged, STICKER_PACKS, REACTION_EMOJI_SET, chatPollTotal, nicknameFor, mapsUrl } from './utils.js';
+import { escapeHtml, timeAgo, canViewPost, canViewGroup, canViewGroupPost, isGroupMember, searchByName, truncate, paginate, groupStoriesByAuthor, canViewStory, storyBackgroundCss, STORY_BACKGROUNDS, memoriesFor, upcomingEvents, canViewEvent, averageRating, FEELINGS, plural, mutualFriendCount, isStaff, canModerate, isAdminRole, accountStatus, canManageUser, canChangeRole, ASSIGNABLE_ROLES, platformStats, analyticsSeries, spamSuspects, reportStatus, reportCategory, reportNeedsAttention, countPostComments, botConversationSummaries, recentClientErrors, collapseDuplicateNotifications, REPORT_CATEGORIES, REPORT_OUTCOMES, typingUserIds, reactionChips, pinnedMessages, messageSnippet, chatTheme, CHAT_THEMES, MESSAGE_REACTIONS, reviewText, isEmojiOnlyText, canEditMessage, isMessageVisibleTo, isConversationFlagged, STICKER_PACKS, REACTION_EMOJI_SET, chatPollTotal, nicknameFor, mapsUrl, isVanishExpired, isMutedNow, isMessageRequest, formatBytes } from './utils.js';
 import { botModel } from './gemini.js';
 import { cldImg } from './cloudinary.js';
 import { AI_PROVIDERS, providerById, resolveAiConfig, usageTotals } from './aiProviders.js';
@@ -815,34 +815,46 @@ export function eventFormHtml() {
 }
 
 // ------------------------------------------------------------------ MESSAGES
+// Full invite URL for a group-chat join code. `location` only exists
+// in the browser; in tests this degrades to the bare hash route.
+export function inviteLinkFor(code) {
+  const base = typeof location !== 'undefined' ? `${location.origin}${location.pathname}` : '';
+  return `${base}#/messages?join=${code}`;
+}
+
 export function messagesView(d, meUser, activeConvId = '') {
   const byId = usersById(d);
+  const myFriendIds = friendIdsOfData(d, meUser.id);
   const myConvs = d.conversations.filter((c) => c.participants.includes(meUser.id))
     .map((c) => {
       const isGroup = Boolean(c.isGroup);
       const otherId = c.participants.find((p) => p !== meUser.id);
-      const msgs = d.messages.filter((m) => m.conversationId === c.id && isMessageVisibleTo(m, meUser.id)).sort((a, b) => a.createdAt - b.createdAt);
+      const msgs = d.messages.filter((m) => m.conversationId === c.id && isMessageVisibleTo(m, meUser.id) && !isVanishExpired(m)).sort((a, b) => a.createdAt - b.createdAt);
       const last = msgs[msgs.length - 1];
       const unread = msgs.filter((m) => m.senderId !== meUser.id && !(m.readBy || []).includes(meUser.id)).length;
+      const mentionUnread = msgs.some((m) => m.senderId !== meUser.id && !(m.readBy || []).includes(meUser.id) && (m.mentions || []).includes(meUser.id));
       const title = isGroup ? (c.title || t('groupChat')) : nicknameFor(c, otherId, byId[otherId]?.name || 'Unknown');
       const avatarUser = isGroup ? { name: title, username: title, avatar: c.photo || '' } : byId[otherId];
       let preview = 'Say hello';
       if (last?.unsent) preview = `🚫 ${t('messageUnsent')}`;
-      else if (last) preview = last.audio && !last.text ? `🎤 ${t('voiceMessage')}` : last.sticker ? `🎨 ${t('sticker')}` : last.location ? `📍 ${t('sharedLocation')}` : last.poll ? `📊 ${t('poll')}: ${last.poll.question}` : (last.text || (last.image ? '📷 Photo' : 'Say hello'));
+      else if (last) preview = last.audio && !last.text ? `🎤 ${t('voiceMessage')}` : last.sticker ? `🎨 ${t('sticker')}` : last.location ? `📍 ${t('sharedLocation')}` : last.poll ? `📊 ${t('poll')}: ${last.poll.question}` : last.file ? `📎 ${last.file.name || t('file')}` : (last.text || (last.image ? '📷 Photo' : 'Say hello'));
       if (isGroup && last && last.senderId !== meUser.id && !last.unsent) preview = `${nicknameFor(c, last.senderId, (byId[last.senderId]?.name || '').split(' ')[0])}: ${preview}`;
       const archived = isConversationFlagged(c, 'archivedBy', meUser.id);
-      const muted = isConversationFlagged(c, 'mutedBy', meUser.id);
-      return { conv: c, isGroup, other: byId[otherId], title, avatarUser, searchText: title.toLowerCase(), last, unread, msgs, preview, archived, muted };
+      const muted = isMutedNow(c, meUser.id);
+      const pinned = isConversationFlagged(c, 'pinnedBy', meUser.id);
+      const request = isMessageRequest(c, meUser.id, myFriendIds, byId);
+      return { conv: c, isGroup, other: byId[otherId], title, avatarUser, searchText: title.toLowerCase(), last, unread, mentionUnread, msgs, preview, archived, muted, pinned, request };
     })
-    .sort((a, b) => (b.last?.createdAt || b.conv.createdAt) - (a.last?.createdAt || a.conv.createdAt));
-  const active = myConvs.find((x) => x.conv.id === activeConvId) || myConvs.find((x) => !x.archived) || myConvs[0];
-  // Conversation list filter (Messenger Complete Pack): All / Unread /
-  // Archived chips. Archived chats leave the main list entirely.
+    .sort((a, b) => Number(b.pinned) - Number(a.pinned) || (b.last?.createdAt || b.conv.createdAt) - (a.last?.createdAt || a.conv.createdAt));
+  const active = myConvs.find((x) => x.conv.id === activeConvId) || myConvs.find((x) => !x.archived && !x.request) || myConvs.find((x) => !x.archived) || myConvs[0];
+  // Conversation list filter: All / Unread / Requests / Archived chips.
+  // Archived chats and unaccepted message requests each live in their
+  // own list, like Messenger.
   const filter = uiState.convFilter || 'all';
-  const listedConvs = myConvs.filter((x) => filter === 'archived' ? x.archived : filter === 'unread' ? (!x.archived && x.unread > 0) : !x.archived);
+  const listedConvs = myConvs.filter((x) => filter === 'archived' ? x.archived : filter === 'requests' ? (!x.archived && x.request) : filter === 'unread' ? (!x.archived && !x.request && x.unread > 0) : (!x.archived && !x.request));
   const archivedCount = myConvs.filter((x) => x.archived).length;
+  const requestsCount = myConvs.filter((x) => x.request && !x.archived).length;
   // Active-now rail: people (and bots) currently online, friends first.
-  const myFriendIds = friendIdsOfData(d, meUser.id);
   const onlineUsers = d.users.filter((u) => u.id !== meUser.id && u.online)
     .sort((a, b) => Number(myFriendIds.has(b.id)) - Number(myFriendIds.has(a.id))).slice(0, 12);
   return `<div class="messenger card ${activeConvId ? 'has-open' : ''}">
@@ -854,18 +866,20 @@ export function messagesView(d, meUser, activeConvId = '') {
         <button class="btn btn-sm ${filter === 'all' ? 'btn-primary' : 'btn-ghost'}" data-act="conv-filter" data-filter="all">${t('allChats')}</button>
         <button class="btn btn-sm ${filter === 'unread' ? 'btn-primary' : 'btn-ghost'}" data-act="conv-filter" data-filter="unread">${t('unreadChats')}</button>
         <button class="btn btn-sm ${filter === 'archived' ? 'btn-primary' : 'btn-ghost'}" data-act="conv-filter" data-filter="archived">🗄️ ${t('archivedChats')}${archivedCount ? ` (${archivedCount})` : ''}</button>
+        <button class="btn btn-sm ${filter === 'requests' ? 'btn-primary' : 'btn-ghost'}" data-act="conv-filter" data-filter="requests">📩 ${t('messageRequests')}${requestsCount ? ` (${requestsCount})` : ''}</button>
       </div>
       ${listedConvs.map((x) => `<div class="conv-item-wrap">
         <button class="conv-item ${active?.conv.id === x.conv.id ? 'active' : ''}" data-act="open-conv" data-id="${x.conv.id}" data-search="${escapeHtml(x.searchText)}">
-        ${avatarHtml(x.avatarUser, 44)}<span class="grow left conv-item-text"><b class="conv-title">${x.isGroup ? '👥 ' : ''}${escapeHtml(x.title)}</b> ${!x.isGroup && x.other?.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''}<span class="conv-preview muted small">${x.muted ? '🔕 ' : ''}${escapeHtml(x.preview)}</span></span>
-        ${x.unread && !x.muted ? `<span class="unread-badge">${x.unread}</span>` : ''}${x.unread && x.muted ? `<span class="unread-badge muted-badge">${x.unread}</span>` : ''}
+        ${avatarHtml(x.avatarUser, 44)}<span class="grow left conv-item-text"><b class="conv-title">${x.pinned ? '📌 ' : ''}${x.isGroup ? '👥 ' : ''}${escapeHtml(x.title)}</b> ${!x.isGroup && x.other?.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''}<span class="conv-preview muted small">${x.muted ? '🔕 ' : ''}${escapeHtml(x.preview)}</span></span>
+        ${x.mentionUnread ? `<span class="mention-badge" title="${t('mentionedYou')}">@</span>` : ''}${x.unread && !x.muted ? `<span class="unread-badge">${x.unread}</span>` : ''}${x.unread && x.muted ? `<span class="unread-badge muted-badge">${x.unread}</span>` : ''}
         </button>
         <button class="icon-btn conv-menu-btn" data-act="conv-menu" data-id="${x.conv.id}" title="${t('conversationOptions')}" aria-label="${t('conversationOptions')}">⋯</button>
         <div class="menu conv-menu ${uiState.convMenuFor === x.conv.id ? '' : 'hidden'}" id="conv-menu-${x.conv.id}">
+          <button data-act="conv-pin" data-id="${x.conv.id}">${x.pinned ? `📌 ${t('unpinChat')}` : `📌 ${t('pinChat')}`}</button>
           <button data-act="conv-archive" data-id="${x.conv.id}">${x.archived ? `📤 ${t('unarchiveChat')}` : `🗄️ ${t('archiveChat')}`}</button>
-          <button data-act="conv-mute" data-id="${x.conv.id}">${x.muted ? `🔔 ${t('unmuteChat')}` : `🔕 ${t('muteChat')}`}</button>
+          ${x.muted ? `<button data-act="conv-mute" data-id="${x.conv.id}" data-ms="">🔔 ${t('unmuteChat')}</button>` : `<button data-act="conv-mute" data-id="${x.conv.id}" data-ms="3600000">🔕 ${t('muteFor1Hour')}</button><button data-act="conv-mute" data-id="${x.conv.id}" data-ms="86400000">🔕 ${t('muteFor24Hours')}</button><button data-act="conv-mute" data-id="${x.conv.id}" data-ms="inf">🔕 ${t('muteForever')}</button>`}
         </div>
-      </div>`).join('') || `<p class="muted small">${filter === 'archived' ? t('noArchivedChats') : t('noMessages')}</p>
+      </div>`).join('') || `<p class="muted small">${filter === 'archived' ? t('noArchivedChats') : filter === 'requests' ? t('noRequests') : t('noMessages')}</p>
       <div class="stack"><h4>Start a chat</h4>${d.users.filter((u) => u.id !== meUser.id).slice(0, 6).map((u) => `<button class="conv-item" data-act="message-user" data-id="${u.id}">${avatarHtml(u, 36)}<span>${escapeHtml(u.name)}</span>${u.isBot ? `<span class="badge badge-bot">${t('aiBot')}</span>` : ''}</button>`).join('')}</div>`}
     </div>
     <div class="conv-thread">
@@ -886,6 +900,10 @@ export function messagesView(d, meUser, activeConvId = '') {
           <div class="emoji-swatches">${['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '🎉', '😍', '👏', '💯', '🌙'].map((e) => `<button type="button" class="emoji-swatch ${(active.conv.emoji || '👍') === e ? 'active' : ''}" data-act="set-conv-emoji" data-conv="${active.conv.id}" data-emoji="${e}" aria-label="${t('chatEmoji')} ${e}">${e}</button>`).join('')}</div>
           <p class="muted small">${t('chatEmojiHint')}</p>
         </div>
+        <div class="conv-info-section"><h4>🫥 ${t('vanishMode')}</h4>
+          <div class="row gap-sm"><span class="grow small">${active.conv.vanish ? t('vanishOnText') : t('vanishOffText')}</span><button class="btn btn-ghost btn-sm" data-act="vanish-toggle" data-conv="${active.conv.id}">${active.conv.vanish ? t('turnOff') : t('turnOn')}</button></div>
+          <p class="muted small">${t('vanishHint')}</p>
+        </div>
         <div class="conv-info-section"><h4>🏷️ ${t('nicknames')}</h4>
           ${active.conv.participants.map((id) => `<div class="row gap-sm"><span class="grow row gap-sm">${avatarHtml(byId[id], 28)}<span>${escapeHtml(nicknameFor(active.conv, id, byId[id]?.name || ''))}${active.conv.nicknames?.[id] ? ` <span class="muted small">(${escapeHtml(byId[id]?.name || '')})</span>` : ''}</span></span><button class="btn btn-ghost btn-sm" data-act="set-nickname" data-conv="${active.conv.id}" data-id="${id}">${t('setNickname')}</button></div>`).join('')}
           <p class="muted small">${t('nicknameHint')}</p>
@@ -900,6 +918,9 @@ export function messagesView(d, meUser, activeConvId = '') {
             <input name="title" class="grow" value="${escapeHtml(conv.title || '')}" maxlength="60" aria-label="${t('groupName')}" />
             <button class="btn btn-ghost btn-sm" type="submit">${t('renameGroup')}</button>
           </form>
+          <div class="stack gap-sm"><b class="small">🔗 ${t('inviteLink')}</b>
+          ${conv.joinCode ? `<div class="row gap-sm"><input class="grow" readonly value="${escapeHtml(inviteLinkFor(conv.joinCode))}" aria-label="${t('inviteLink')}" /><button class="btn btn-ghost btn-sm" data-act="copy-invite" data-link="${escapeHtml(inviteLinkFor(conv.joinCode))}">${t('copyLink')}</button></div>` : (conv.createdBy === meUser.id ? `<button class="btn btn-ghost btn-sm" data-act="create-invite" data-conv="${conv.id}">${t('createInviteLink')}</button>` : '')}
+          <span class="muted small">${t('inviteHint')}</span></div>
           ${conv.participants.map((id) => `<div class="row gap-sm"><span class="grow row gap-sm">${avatarHtml(byId[id], 28)}<span>${escapeHtml(byId[id]?.name || '')}</span>${conv.createdBy === id ? `<span class="badge badge-ok">${t('groupCreator')}</span>` : ''}</span>${id !== meUser.id && canManage ? `<button class="btn btn-ghost btn-sm" data-act="group-remove-member" data-conv="${conv.id}" data-id="${id}">${t('removeMember')}</button>` : ''}</div>`).join('')}
           ${addable.length ? `<details><summary>${t('addMembers')}</summary><form id="group-add-form" data-conv="${conv.id}" class="stack group-pick-list">${addable.map((u) => `<label class="row gap-sm"><input type="checkbox" name="member" value="${u.id}" /> ${avatarHtml(u, 26)}<span>${escapeHtml(u.name)}</span></label>`).join('')}<div class="row gap end"><button class="btn btn-primary btn-sm" type="submit">${t('addMembers')}</button></div></form></details>` : ''}
           <button class="btn btn-danger btn-sm" data-act="group-leave" data-conv="${conv.id}">🚪 ${t('leaveGroup')}</button>
@@ -909,12 +930,17 @@ export function messagesView(d, meUser, activeConvId = '') {
         ${active.msgs.map((m) => messageHtml(m, meUser, byId, active.isGroup, active.conv)).join('') || '<p class="muted center">No messages yet. Say hello 👋</p>'}
       </div>
       <div class="typing-row" id="typing-row">${typingIndicatorHtml(active.conv, meUser, byId)}</div>
+      ${active.request ? `<div class="request-banner">📩 <span class="grow"><b>${escapeHtml(active.other?.name || '')}</b> ${t('requestHint')}</span><button class="btn btn-primary btn-sm" data-act="accept-request" data-id="${active.conv.id}">${t('acceptRequest')}</button></div>` : ''}
+      ${active.conv.vanish ? `<div class="vanish-banner">🫥 ${t('vanishBanner')}</div>` : ''}
       <div class="composer-wrap">
+        <div id="mention-menu" class="mention-menu hidden"></div>
         <div id="reply-preview" class="message-preview reply-preview hidden"></div>
         <div id="message-preview" class="message-preview hidden"></div>`; })()}
         <form id="message-form" data-conv="${active.conv.id}" class="message-form">
           <input type="file" id="msg-image-input" name="image" accept="image/*" hidden />
+          <input type="file" id="msg-file-input" name="file" hidden />
           <button type="button" class="btn btn-ghost btn-sm" data-act="sticker-toggle" title="${t('stickers')}" aria-label="${t('stickers')}">🎨</button>
+          <label class="btn btn-ghost btn-sm msg-attach" for="msg-file-input" title="${t('attachFile')}" aria-label="${t('attachFile')}">📎</label>
           <button type="button" class="btn btn-ghost btn-sm" data-act="send-location" title="${t('shareLocation')}" aria-label="${t('shareLocation')}">📍</button>
           <button type="button" class="btn btn-ghost btn-sm" data-act="poll-open" data-conv="${active.conv.id}" title="${t('createPoll')}" aria-label="${t('createPoll')}">📊</button>
           <label class="btn btn-ghost btn-sm msg-attach" for="msg-image-input" title="${t('photo')}" aria-label="${t('photo')}">📷</label>
@@ -943,6 +969,19 @@ export function messagesView(d, meUser, activeConvId = '') {
 // Emoji set for the Messenger picker (~24 common ones).
 const CHAT_EMOJIS = ['😀', '😂', '🤣', '😍', '🥰', '😊', '😎', '🤔', '😴', '😢', '😮', '😅', '😭', '👍', '👏', '🙏', '❤️', '🔥', '🎉', '✨', '🌙', '☕', '🍰', '📷'];
 
+// Message body text: escaped first, then the @handles of the users
+// recorded in m.mentions are wrapped in a highlight span.
+function messageTextHtml(m, byId) {
+  let html = escapeHtml(m.text || '');
+  for (const uid of m.mentions || []) {
+    const u = byId[uid];
+    if (!u) continue;
+    if (u.username) html = html.split(`@${u.username}`).join(`<span class="msg-mention">@${escapeHtml(u.username)}</span>`);
+    if (u.name) html = html.split(`@${escapeHtml(u.name)}`).join(`<span class="msg-mention">@${escapeHtml(u.name)}</span>`);
+  }
+  return html;
+}
+
 function messageHtml(m, meUser, byId, isGroup = false, conv = null) {
   const mine = m.senderId === meUser.id;
   // Unsent messages render as a tombstone for everyone (Messenger
@@ -963,19 +1002,20 @@ function messageHtml(m, meUser, byId, isGroup = false, conv = null) {
   return `<div class="msg-row ${mine ? 'mine' : ''}" id="msg-${m.id}">
     ${mine ? '' : avatarHtml(byId[m.senderId], 28)}
     <div class="msg-col">
-    <div class="msg-bubble ${mine ? 'mine' : ''}${bigEmoji || m.sticker ? ' msg-bubble-bare' : ''}">
+    <div class="msg-bubble ${mine ? 'mine' : ''}${bigEmoji || m.sticker ? ' msg-bubble-bare' : ''}${m.vanish ? ' msg-vanish' : ''}">
       ${isGroup && !mine ? `<span class="msg-sender">${escapeHtml(nicknameFor(conv, m.senderId, byId[m.senderId]?.name || ''))}</span>` : ''}
       ${m.forwarded ? `<span class="msg-forwarded">↪️ ${t('forwarded')}</span>` : ''}
       ${m.replyToId ? `<button type="button" class="msg-quote" data-act="jump-message" data-id="${m.replyToId}"><b>${escapeHtml(m.replyToName || '')}</b><span>${escapeHtml(m.replyToText || '')}</span></button>` : ''}
       ${m.image ? `<img class="msg-image" src="${escapeHtml(cldImg(m.image, 800))}" alt="Shared photo" loading="lazy" decoding="async" />` : ''}
       ${m.audio ? `<audio class="msg-audio" controls preload="metadata" src="${escapeHtml(m.audio)}"></audio>` : ''}
+      ${m.file ? `<a class="msg-file" href="${escapeHtml(m.file.url || '#')}" target="_blank" rel="noopener noreferrer" download="${escapeHtml(m.file.name || 'file')}"><span class="msg-file-icon">📄</span><span class="grow"><b>${escapeHtml(m.file.name || t('file'))}</b><small>${formatBytes(m.file.size)} · ${t('download')}</small></span></a>` : ''}
       ${m.sticker ? `<p class="msg-sticker">${escapeHtml(m.sticker)}</p>` : ''}
       ${m.location ? `<a class="msg-location" href="${escapeHtml(mapsUrl(m.location))}" target="_blank" rel="noopener noreferrer"><span class="msg-location-pin">📍</span><span class="grow"><b>${t('sharedLocation')}</b><small>${Number(m.location.lat).toFixed(5)}, ${Number(m.location.lng).toFixed(5)} · ${t('openInMaps')}</small></span></a>` : ''}
       ${m.poll ? (() => { const total = chatPollTotal(m.poll); return `<div class="chat-poll"><b>📊 ${escapeHtml(m.poll.question || '')}</b>${(m.poll.options || []).map((o) => { const pct = total ? Math.round((o.votes || []).length / total * 100) : 0; const voted = (o.votes || []).includes(meUser.id); return `<button type="button" class="chat-poll-option ${voted ? 'voted' : ''}" data-act="vote-poll" data-id="${m.id}" data-option="${o.id}"><span class="chat-poll-fill" style="width:${pct}%"></span><span class="chat-poll-text">${voted ? '✓ ' : ''}${escapeHtml(o.text)}</span><span class="chat-poll-count">${(o.votes || []).length} · ${pct}%</span></button>`; }).join('')}<span class="muted small">${total} ${t('votes')}</span></div>`; })() : ''}
-      ${m.text ? `<p${bigEmoji ? ' class="msg-big-emoji"' : ''}>${escapeHtml(m.text)}</p>` : ''}
+      ${m.text ? `<p${bigEmoji ? ' class="msg-big-emoji"' : ''}>${messageTextHtml(m, byId)}</p>` : ''}
       <div class="msg-picker hidden" id="msg-picker-${m.id}">${MESSAGE_REACTIONS.map((e) => `<button type="button" class="emoji-btn" data-act="msg-react" data-id="${m.id}" data-emoji="${e}" aria-label="${t('reactToMessage')} ${e}">${e}</button>`).join('')}<button type="button" class="emoji-btn" data-act="react-more" data-id="${m.id}" title="${t('moreReactions')}" aria-label="${t('moreReactions')}">➕</button></div>
       <div class="msg-picker msg-picker-more hidden" id="msg-picker-more-${m.id}">${REACTION_EMOJI_SET.map((e) => `<button type="button" class="emoji-btn" data-act="msg-react" data-id="${m.id}" data-emoji="${e}" aria-label="${t('reactToMessage')} ${e}">${e}</button>`).join('')}</div>
-      <span class="msg-foot"><span class="msg-meta">${m.pinned ? '📌 ' : ''}${timeAgo(m.createdAt)}${m.editedAt ? ` · ${t('edited')}` : ''} ${status}</span><span class="msg-actions"><button type="button" class="link-btn msg-act-btn" data-act="reply-message" data-id="${m.id}" title="${t('replyToMessage')}" aria-label="${t('replyToMessage')}">↩️</button><button type="button" class="link-btn msg-act-btn" data-act="msg-react-toggle" data-id="${m.id}" title="${t('reactToMessage')}" aria-label="${t('reactToMessage')}">😊</button><button type="button" class="link-btn msg-act-btn ${m.pinned ? 'active' : ''}" data-act="pin-message" data-id="${m.id}" title="${t(m.pinned ? 'unpinMessage' : 'pinMessage')}" aria-label="${t(m.pinned ? 'unpinMessage' : 'pinMessage')}">📌</button>${editable ? `<button type="button" class="link-btn msg-act-btn" data-act="edit-message" data-id="${m.id}" title="${t('editMessage')}" aria-label="${t('editMessage')}">✏️</button>` : ''}<button type="button" class="link-btn msg-act-btn" data-act="msg-menu" data-id="${m.id}" title="${t('messageOptions')}" aria-label="${t('messageOptions')}">⋯</button>${mine ? '' : `<button class="link-btn msg-report-btn" data-act="report-message" data-id="${m.id}" title="${t('report')}" aria-label="${t('report')}">🚩</button>`}</span></span>
+      <span class="msg-foot"><span class="msg-meta">${m.pinned ? '📌 ' : ''}${timeAgo(m.createdAt)}${m.editedAt ? ` · ${t('edited')}` : ''}${m.vanish ? ' · 🫥' : ''} ${status}</span><span class="msg-actions"><button type="button" class="link-btn msg-act-btn" data-act="reply-message" data-id="${m.id}" title="${t('replyToMessage')}" aria-label="${t('replyToMessage')}">↩️</button><button type="button" class="link-btn msg-act-btn" data-act="msg-react-toggle" data-id="${m.id}" title="${t('reactToMessage')}" aria-label="${t('reactToMessage')}">😊</button><button type="button" class="link-btn msg-act-btn ${m.pinned ? 'active' : ''}" data-act="pin-message" data-id="${m.id}" title="${t(m.pinned ? 'unpinMessage' : 'pinMessage')}" aria-label="${t(m.pinned ? 'unpinMessage' : 'pinMessage')}">📌</button>${editable ? `<button type="button" class="link-btn msg-act-btn" data-act="edit-message" data-id="${m.id}" title="${t('editMessage')}" aria-label="${t('editMessage')}">✏️</button>` : ''}<button type="button" class="link-btn msg-act-btn" data-act="msg-menu" data-id="${m.id}" title="${t('messageOptions')}" aria-label="${t('messageOptions')}">⋯</button>${mine ? '' : `<button class="link-btn msg-report-btn" data-act="report-message" data-id="${m.id}" title="${t('report')}" aria-label="${t('report')}">🚩</button>`}</span></span>
     </div>
     <div class="menu msg-menu ${uiState.msgMenuFor === m.id ? '' : 'hidden'}" id="msg-menu-${m.id}">
       <button data-act="forward-message" data-id="${m.id}">↪️ ${t('forwardMessage')}</button>

@@ -34,6 +34,7 @@ const appEl = document.getElementById('app');
 // form at a user who is actually signed in.
 let authResolved = false;
 let authSessionSeen = false;
+let lastJoinCode = '';
 const BOOT_SPLASH_HTML = `<div class="boot-splash"><div class="boot-logo">M</div><div class="boot-sub">${t('taglineShort')}</div><div class="boot-spinner" aria-hidden="true"></div></div>`;
 
 function parseRoute() {
@@ -183,6 +184,18 @@ export function render() {
     return;
   }
 
+  // Group-chat invite links (#/messages?join=CODE): join once per code,
+  // then land inside the conversation. Failures show the reason and
+  // fall through to the plain inbox.
+  const joinCode = route === 'messages' ? query.get('join') : null;
+  if (joinCode && joinCode !== lastJoinCode) {
+    lastJoinCode = joinCode;
+    api.joinConversationByCode(joinCode)
+      .then((convId) => { toast(t('joinedGroupChat'), 'success'); location.hash = `#/messages/${convId}`; })
+      .catch((err) => { toast(err.message || t('invalidInviteLink'), 'error'); location.hash = '#/messages'; });
+    return;
+  }
+
   // Account-status gate (Pack A): a suspended/banned user sees only
   // the status notice (plus the header, so they can still log out) —
   // never the app itself. Pairs with the writerStatusOk() create-rule
@@ -264,6 +277,12 @@ function setupThread() {
     const user = me();
     const conv = d.conversations.find((c) => c.id === convId);
     row.innerHTML = conv && user ? V.typingIndicatorHtml(conv, user, V.usersById(d)) : '';
+    // Vanish mode: re-render the moment a vanish message in the open
+    // thread passes its expiry, so it disappears on time.
+    if (conv?.vanish && user) {
+      const now = Date.now();
+      if (d.messages.some((m) => m.conversationId === convId && m.vanish && m.expiresAt && m.expiresAt <= now && m.expiresAt > now - 1500)) render();
+    }
   }, 1000);
 }
 
@@ -721,10 +740,54 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'conv-mute': {
-      const conv = d.conversations.find((c) => c.id === actEl.dataset.id);
-      const on = !(conv?.mutedBy || []).includes(user.id);
+      // Useful Pack: timed mute — data-ms is '' (unmute), 'inf'
+      // (forever) or a millisecond duration.
       V.uiState.convMenuFor = '';
-      await handle(api.setConversationFlag(actEl.dataset.id, 'mutedBy', on), on ? t('chatMuted') : t('chatUnmuted'));
+      const ms = actEl.dataset.ms;
+      if (!ms) await handle(api.setConversationMute(actEl.dataset.id, null), t('chatUnmuted'));
+      else await handle(api.setConversationMute(actEl.dataset.id, ms === 'inf' ? Infinity : Number(ms)), t('chatMuted'));
+      break;
+    }
+    case 'conv-pin': {
+      const conv = d.conversations.find((c) => c.id === actEl.dataset.id);
+      const on = !(conv?.pinnedBy || []).includes(user.id);
+      V.uiState.convMenuFor = '';
+      await handle(api.setConversationFlag(actEl.dataset.id, 'pinnedBy', on), on ? t('chatPinned') : t('chatUnpinned'));
+      break;
+    }
+    case 'accept-request': await handle(api.acceptConversationRequest(actEl.dataset.id), t('requestAccepted')); break;
+    case 'vanish-toggle': {
+      const conv = d.conversations.find((c) => c.id === actEl.dataset.conv);
+      const on = !conv?.vanish;
+      await handle(api.setConversationVanish(actEl.dataset.conv, on), on ? t('vanishEnabled') : t('vanishDisabled'));
+      break;
+    }
+    case 'create-invite': await handle(api.createConversationInvite(actEl.dataset.conv), t('inviteLinkReady')); break;
+    case 'copy-invite': {
+      const link = actEl.dataset.link || '';
+      try { await navigator.clipboard.writeText(link); toast(t('linkCopied'), 'success'); }
+      catch { toast(link, 'success'); }
+      break;
+    }
+    case 'mention-pick': {
+      const input = document.querySelector('#message-form input[name="text"]');
+      const menu = document.getElementById('mention-menu');
+      if (input) {
+        const upto = input.value.slice(0, input.selectionStart ?? input.value.length);
+        const match = upto.match(/@([\w.]*)$/);
+        if (match) {
+          input.value = upto.slice(0, upto.length - match[0].length) + `@${actEl.dataset.username} ` + input.value.slice(input.selectionStart ?? input.value.length);
+        }
+        input.focus();
+      }
+      menu?.classList.add('hidden');
+      break;
+    }
+    case 'clear-message-file': {
+      const input = document.getElementById('msg-file-input');
+      if (input) input.value = '';
+      const preview = document.getElementById('message-preview');
+      if (preview) { preview.innerHTML = ''; preview.classList.add('hidden'); }
       break;
     }
     case 'set-conv-emoji': await handle(api.setConversationEmoji(actEl.dataset.conv, actEl.dataset.emoji)); break;
@@ -1301,9 +1364,15 @@ document.addEventListener('submit', async (e) => {
     const convId = form.dataset.conv;
     const file = fileFrom(form, 'image');
     const image = file ? await api.uploadImage(file, `messages/${convId}/${Date.now()}_${file.name}`).catch((err) => { toast(err.message, 'error'); return ''; }) : '';
+    const rawFile = fileFrom(form, 'file');
+    let chatFile = null;
+    if (rawFile) {
+      chatFile = await api.uploadMessageFile(rawFile).catch((err) => { toast(err.message, 'error'); return null; });
+      if (!chatFile) return;
+    }
     const text = String(fd.get('text') || '');
     const replyToId = replyTarget && replyTarget.convId === convId ? replyTarget.id : '';
-    const sent = await handle(api.sendMessage(convId, { text, image, replyToId }));
+    const sent = await handle(api.sendMessage(convId, { text, image, replyToId, file: chatFile }));
     if (sent) {
       if (replyToId) replyTarget = null; // the re-render rebuilds the (hidden) reply preview
       stopTyping();
@@ -1592,6 +1661,15 @@ document.addEventListener('change', async (e) => {
       preview.classList.remove('hidden');
     }
   }
+  if (e.target.id === 'msg-file-input') {
+    // Chat file attach: same preview pattern as photos (name + size).
+    const file = e.target.files?.[0];
+    const preview = document.getElementById('message-preview');
+    if (file && preview) {
+      preview.innerHTML = `<span class="grow small">📎 ${escapeHtml(file.name)} (${Math.max(1, Math.round(file.size / 1024))} KB)</span><button type="button" class="btn btn-ghost btn-sm" data-act="clear-message-file" aria-label="${t('attachFile')}" title="${t('attachFile')}">✕</button>`;
+      preview.classList.remove('hidden');
+    }
+  }
 });
 
 // Mark a conversation read when its thread is opened.
@@ -1606,6 +1684,32 @@ document.addEventListener('input', (e) => {
   document.querySelectorAll('.conv-item[data-search]').forEach((el) => {
     el.style.display = !q || (el.dataset.search || '').includes(q) ? '' : 'none';
   });
+});
+
+// @mention picker (Useful Pack): while typing in a GROUP thread, an
+// @token at the caret opens a member list above the composer; picking
+// a member completes the @username. Pure DOM — no re-render, so the
+// composer's focus and caret survive.
+document.addEventListener('input', (e) => {
+  if (!(e.target instanceof HTMLInputElement) || e.target.name !== 'text' || !e.target.closest('#message-form')) return;
+  const menu = document.getElementById('mention-menu');
+  if (!menu) return;
+  const form = document.getElementById('message-form');
+  const conv = api.data().conversations.find((c) => c.id === form?.dataset.conv);
+  const user = me();
+  if (!conv?.isGroup || !user) { menu.classList.add('hidden'); return; }
+  const upto = e.target.value.slice(0, e.target.selectionStart ?? e.target.value.length);
+  const match = upto.match(/(?:^|\s)@([\w.]*)$/);
+  if (!match) { menu.classList.add('hidden'); return; }
+  const token = match[1].toLowerCase();
+  const byId = V.usersById(api.data());
+  const candidates = conv.participants.filter((id) => id !== user.id)
+    .map((id) => byId[id]).filter(Boolean)
+    .filter((u) => u.username.toLowerCase().startsWith(token) || u.name.toLowerCase().startsWith(token))
+    .slice(0, 6);
+  if (!candidates.length) { menu.classList.add('hidden'); return; }
+  menu.innerHTML = candidates.map((u) => `<button type="button" class="mention-item" data-act="mention-pick" data-username="${escapeHtml(u.username)}">${avatarHtml(u, 26)}<span class="grow"><b>${escapeHtml(u.name)}</b> <span class="muted small">@${escapeHtml(u.username)}</span></span></button>`).join('');
+  menu.classList.remove('hidden');
 });
 
 // In-conversation search (Messenger Complete Pack): pure DOM results
