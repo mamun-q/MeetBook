@@ -697,3 +697,40 @@ a, button, input, select, textarea, label { touch-action: manipulation; }
   .thread-body { max-height: calc(100dvh - 250px); }
   .reaction-btn { min-width: 40px; min-height: 40px; }
 }
+
+/* ------------------------------------------------ Mobile pack 2
+   99% of users are on phones (Limon, 2026-11-20): a full sweep of
+   every view for narrow-screen overflow and squeeze. */
+/* Analytics charts: a 320px minimum track overflowed a 360px phone
+   once card padding was subtracted — the min() cap lets the track
+   shrink to the card instead of pushing the page sideways. */
+.chart-grid { grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); }
+/* Voice messages never stick out of a narrow chat bubble. */
+.msg-audio { max-width: min(230px, 100%); }
+/* Long provider endpoints/URLs wrap inside their admin cards. */
+.provider-card p { overflow-wrap: anywhere; }
+@media (max-width: 820px) {
+  /* Admin filters: search takes its own row, selects share rows
+     two-up instead of one full-width row each. */
+  .admin-filter input { flex: 1 1 100%; }
+  .admin-filter select { flex: 1 1 140px; width: auto; }
+}
+@media (max-width: 720px) {
+  /* People / group / page discovery cards go two-up like Facebook's
+     mobile grid instead of one tall card per row. */
+  .grid-people { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  .stat-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+  /* Bottom nav: seven items share ~360px, so labels stay on one
+     line at a slightly smaller size instead of squeezing/wrapping. */
+  .bottom-nav-item { font-size: 1.22rem; }
+  .bottom-nav-label { font-size: .64rem; white-space: nowrap; letter-spacing: -.01em; }
+  /* Modals get the extra room small screens need. */
+  .modal-backdrop { padding: 8px; }
+  .modal { padding: 16px; border-radius: 16px; }
+  /* Shorter cover, tighter profile header — more content above the fold. */
+  .cover { height: 150px; }
+  .profile-meta { padding: 10px 12px 14px; gap: 10px; }
+  .profile-meta h2 { font-size: 1.3rem; }
+  .post-stats { flex-wrap: wrap; gap: 6px 12px; font-size: .85rem; }
+  .tabs { flex-wrap: wrap; }
+}
