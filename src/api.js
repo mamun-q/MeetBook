@@ -525,9 +525,19 @@ function startRemoteSync() {
       (snap) => patch((r) => { r.notifications = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
     listen(query(collection(db, 'conversations'), where('participants', 'array-contains', remoteUid)),
       (snap) => patch((r) => { r.conversations = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
+    const applyMessages = (snap) => patch((r) => { r.messages = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); });
     listen(query(collection(db, 'messages'), where('participants', 'array-contains', remoteUid), orderBy('createdAt', 'asc'), limit(500)),
-      (snap) => patch((r) => { r.messages = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }),
-      () => { /* listener rejected — leave the mirrored set untouched */ });
+      applyMessages,
+      () => {
+        // The ordered query needs a composite index; if it is missing or
+        // still building, the inbox must NOT silently stay empty (that
+        // failure mode hid every DM while sends/posts/notifications all
+        // worked). Fall back to the single-field query — its index is
+        // automatic — and let the view layer sort by createdAt.
+        listen(query(collection(db, 'messages'), where('participants', 'array-contains', remoteUid), limit(500)),
+          applyMessages,
+          () => { /* both queries rejected — leave the mirrored set untouched */ });
+      });
     listen(query(collection(db, 'blocks'), where('by', '==', remoteUid)),
       (snap) => patch((r) => { r.blocks = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
     listen(query(collection(db, 'groups'), where('members', 'array-contains', remoteUid), limit(200)),
