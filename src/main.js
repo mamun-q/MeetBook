@@ -7,6 +7,7 @@ import { setLocale, t } from './i18n.js';
 import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError, messageSnippet, focusMovesWithinForm, rsvpToastKey } from './utils.js';
 import { toast, clearToasts, openModal, closeModal, confirmModal, adminActionModal, avatarHtml } from './components.js';
 import { providerById } from './aiProviders.js';
+import { cldImg } from './cloudinary.js';
 import * as V from './views.js';
 
 // ------------------------------------------------------------- preferences
@@ -491,7 +492,7 @@ function renderStoryViewer() {
   const posInAuthor = authorStories.indexOf(s);
   const viewers = (s.views || []).map((id) => byId[id]).filter(Boolean);
   const stage = s.image
-    ? `<img class="story-stage-img" src="${escapeHtml(s.image)}" alt="" />${s.text ? `<div class="story-caption">${escapeHtml(s.text)}</div>` : ''}`
+    ? `<img class="story-stage-img" src="${escapeHtml(cldImg(s.image, 1080))}" alt="" decoding="async" />${s.text ? `<div class="story-caption">${escapeHtml(s.text)}</div>` : ''}`
     : `<div class="story-stage-text" style="background:${storyBackgroundCss(s.bg)}"><p>${escapeHtml(s.text)}</p></div>`;
   storyRootEl().innerHTML = `
   <div class="story-viewer" role="dialog" aria-modal="true" aria-label="${t('stories')}">

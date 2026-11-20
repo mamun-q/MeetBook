@@ -3,6 +3,7 @@
 // and binds events centrally.
 import { escapeHtml, timeAgo, canViewPost, canViewGroup, canViewGroupPost, isGroupMember, searchByName, truncate, paginate, groupStoriesByAuthor, canViewStory, storyBackgroundCss, STORY_BACKGROUNDS, memoriesFor, upcomingEvents, canViewEvent, averageRating, FEELINGS, plural, mutualFriendCount, isStaff, canModerate, isAdminRole, accountStatus, canManageUser, canChangeRole, ASSIGNABLE_ROLES, platformStats, analyticsSeries, spamSuspects, reportStatus, reportCategory, reportNeedsAttention, countPostComments, botConversationSummaries, recentClientErrors, collapseDuplicateNotifications, REPORT_CATEGORIES, REPORT_OUTCOMES, typingUserIds, reactionChips, pinnedMessages, messageSnippet, chatTheme, CHAT_THEMES, MESSAGE_REACTIONS, reviewText } from './utils.js';
 import { botModel } from './gemini.js';
+import { cldImg } from './cloudinary.js';
 import { AI_PROVIDERS, providerById, resolveAiConfig, usageTotals } from './aiProviders.js';
 import { t } from './i18n.js';
 import { avatarHtml, userNameHtml, postCardHtml, emptyState } from './components.js';
@@ -252,7 +253,7 @@ export function storiesRailHtml(d, meUser, ctx) {
     const unviewed = !mine && g.stories.some((s) => !(s.views || []).includes(meUser.id));
     const bg = latest.image ? '' : `background:${storyBackgroundCss(latest.bg)};`;
     return `<button class="story-tile ${unviewed ? 'unviewed' : 'viewed'}" style="${bg}" data-act="view-story" data-author="${g.authorId}" aria-label="${escapeHtml(author.name)} — ${t('stories')}">
-      ${latest.image ? `<img class="story-tile-img" src="${escapeHtml(latest.image)}" alt="" loading="lazy" />` : ''}
+      ${latest.image ? `<img class="story-tile-img" src="${escapeHtml(cldImg(latest.image, 480))}" alt="" loading="lazy" decoding="async" />` : ''}
       <span class="story-tile-avatar">${avatarHtml(author, 34)}</span>
       <span class="story-tile-name">${escapeHtml(author.name.split(' ')[0])}</span>
     </button>`;
@@ -392,7 +393,7 @@ export function profileView(d, meUser, userId) {
       const photosStrip = `<div class="card strip-card">
         <h3>${t('photos')}</h3>
         ${photoPosts.length
-          ? `<div class="photos-grid">${photoPosts.map((p) => `<img class="photos-thumb" src="${escapeHtml(p.image)}" alt="${escapeHtml(truncate(p.text || 'Photo', 60))}" loading="lazy" />`).join('')}</div>`
+          ? `<div class="photos-grid">${photoPosts.map((p) => `<img class="photos-thumb" src="${escapeHtml(cldImg(p.image, 480))}" alt="${escapeHtml(truncate(p.text || 'Photo', 60))}" loading="lazy" decoding="async" />`).join('')}</div>`
           : `<p class="muted small">${t('noPhotosYet')}</p>`}
       </div>`;
       // Friends strip: count + up to 9 friend avatars linking to profiles.
@@ -901,7 +902,7 @@ function messageHtml(m, meUser, byId, isGroup = false) {
     <div class="msg-bubble ${mine ? 'mine' : ''}">
       ${isGroup && !mine ? `<span class="msg-sender">${escapeHtml(byId[m.senderId]?.name || '')}</span>` : ''}
       ${m.replyToId ? `<button type="button" class="msg-quote" data-act="jump-message" data-id="${m.replyToId}"><b>${escapeHtml(m.replyToName || '')}</b><span>${escapeHtml(m.replyToText || '')}</span></button>` : ''}
-      ${m.image ? `<img class="msg-image" src="${escapeHtml(m.image)}" alt="Shared photo" loading="lazy" />` : ''}
+      ${m.image ? `<img class="msg-image" src="${escapeHtml(cldImg(m.image, 800))}" alt="Shared photo" loading="lazy" decoding="async" />` : ''}
       ${m.audio ? `<audio class="msg-audio" controls preload="metadata" src="${escapeHtml(m.audio)}"></audio>` : ''}
       ${m.text ? `<p>${escapeHtml(m.text)}</p>` : ''}
       <div class="msg-picker hidden" id="msg-picker-${m.id}">${MESSAGE_REACTIONS.map((e) => `<button type="button" class="emoji-btn" data-act="msg-react" data-id="${m.id}" data-emoji="${e}" aria-label="${t('reactToMessage')} ${e}">${e}</button>`).join('')}</div>

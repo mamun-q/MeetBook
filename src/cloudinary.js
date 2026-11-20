@@ -32,3 +32,19 @@ export async function uploadToCloudinary(file, cfg = CLOUDINARY_CONFIG, fetchImp
   if (!data || !data.secure_url) throw new Error('Cloudinary upload returned no URL');
   return data.secure_url;
 }
+
+// Right-size a Cloudinary delivery URL at render time: f_auto serves
+// WebP/AVIF where the browser supports them, q_auto picks a sane quality,
+// and w_<n>,c_limit caps the width without ever upscaling — so a phone on a
+// slow connection downloads a few hundred KB instead of the full-size
+// original. Non-Cloudinary URLs (data:, Firebase Storage, anything else)
+// and URLs that already carry a transformation pass through untouched.
+export function cldImg(url, width = 1080) {
+  if (!url || typeof url !== 'string') return url;
+  if (!url.includes('res.cloudinary.com') || !url.includes('/image/upload/')) return url;
+  const after = url.split('/image/upload/')[1] || '';
+  const firstSegment = after.split('/')[0] || '';
+  if (/(^|,)(f_auto|q_auto|w_\d+)/.test(firstSegment)) return url;
+  const w = Math.max(16, Math.min(2048, Math.round(Number(width) || 1080)));
+  return url.replace('/image/upload/', `/image/upload/f_auto,q_auto,w_${w},c_limit/`);
+}

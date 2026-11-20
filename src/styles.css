@@ -649,3 +649,20 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* ------------------------------------------------ Mobile comfort & speed pack
+   App-like touch behaviour, no focus auto-zoom on iOS, dynamic viewport
+   units so the chat thread tracks the mobile browser chrome correctly,
+   cheaper sticky-header blur on small screens, and a neutral placeholder
+   behind feed photos while they load. */
+html { overscroll-behavior-y: none; }
+body { -webkit-tap-highlight-color: transparent; }
+a, button, input, select, textarea, label { touch-action: manipulation; }
+.post-image { background: var(--surface-2); }
+@media (max-width: 720px) {
+  /* iOS Safari auto-zooms when a focused field renders below 16px. */
+  input, select, textarea { font-size: 16px; }
+  .topbar { -webkit-backdrop-filter: blur(8px) saturate(1.4); backdrop-filter: blur(8px) saturate(1.4); }
+  .thread-body { max-height: calc(100dvh - 250px); }
+  .reaction-btn { min-width: 40px; min-height: 40px; }
+}

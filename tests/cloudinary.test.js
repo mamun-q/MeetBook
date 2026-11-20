@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { CLOUDINARY_CONFIG, isCloudinaryConfigured, cloudinaryUploadUrl, uploadToCloudinary } from '../src/cloudinary.js';
+import { CLOUDINARY_CONFIG, isCloudinaryConfigured, cloudinaryUploadUrl, uploadToCloudinary, cldImg } from '../src/cloudinary.js';
 
 describe('cloudinary', () => {
   it('is configured only when both cloud name and preset are set', () => {
@@ -34,5 +34,22 @@ describe('cloudinary', () => {
     expect(CLOUDINARY_CONFIG.cloudName).toBe('e3sdmsgs');
     expect(CLOUDINARY_CONFIG.uploadPreset).toBe('meetbook');
     expect(isCloudinaryConfigured()).toBe(true);
+  });
+
+  it('cldImg right-sizes Cloudinary delivery URLs and leaves others untouched', () => {
+    const raw = 'https://res.cloudinary.com/e3sdmsgs/image/upload/v1795154202/zqe7lajyoep9zyoaxsgh.png';
+    expect(cldImg(raw, 1080)).toBe('https://res.cloudinary.com/e3sdmsgs/image/upload/f_auto,q_auto,w_1080,c_limit/v1795154202/zqe7lajyoep9zyoaxsgh.png');
+    expect(cldImg(raw, 96)).toContain('w_96');
+    // Already transformed URLs are not double-transformed.
+    const done = cldImg(raw, 1080);
+    expect(cldImg(done, 400)).toBe(done);
+    // Non-Cloudinary sources pass through.
+    expect(cldImg('data:image/png;base64,AAAA', 400)).toBe('data:image/png;base64,AAAA');
+    expect(cldImg('https://firebasestorage.googleapis.com/v0/b/x/o/y.jpg', 400)).toContain('firebasestorage');
+    expect(cldImg('', 400)).toBe('');
+    expect(cldImg(null, 400)).toBe(null);
+    // Width is clamped to a sane range.
+    expect(cldImg(raw, 99999)).toContain('w_2048');
+    expect(cldImg(raw, 1)).toContain('w_16');
   });
 });

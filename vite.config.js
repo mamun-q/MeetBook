@@ -7,7 +7,17 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: false,
-    chunkSizeWarningLimit: 1200
+    chunkSizeWarningLimit: 1200,
+    rollupOptions: {
+      output: {
+        // Split the Firebase SDK into its own vendor chunk: it changes
+        // rarely, so repeat visits (especially on mobile data) reuse the
+        // cached vendor file and only re-download the app code.
+        manualChunks: {
+          firebase: ['firebase/app', 'firebase/auth', 'firebase/firestore', 'firebase/storage']
+        }
+      }
+    }
   },
   test: {
     include: ['tests/**/*.test.js'],

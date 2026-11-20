@@ -1,5 +1,6 @@
 // Shared UI components: avatars, toasts, modals, post cards.
 import { escapeHtml, initials, avatarColor, timeAgo, pollResults, feelingByKey, shouldClearToast } from './utils.js';
+import { cldImg } from './cloudinary.js';
 import { t } from './i18n.js';
 
 export function toast(message, type = 'info') {
@@ -83,7 +84,7 @@ export function adminActionModal({ title, body = '', confirmLabel = 'Confirm', d
 
 export function avatarHtml(user, size = 40) {
   if (!user) return '';
-  if (user.avatar) return `<img class="avatar" style="width:${size}px;height:${size}px" src="${escapeHtml(user.avatar)}" alt="${escapeHtml(user.name)}" loading="lazy" />`;
+  if (user.avatar) return `<img class="avatar" style="width:${size}px;height:${size}px" src="${escapeHtml(cldImg(user.avatar, Math.min(192, size * 2)))}" alt="${escapeHtml(user.name)}" loading="lazy" decoding="async" />`;
   return `<span class="avatar avatar-fallback" style="width:${size}px;height:${size}px;background:${avatarColor(user.username || user.name)}" aria-hidden="true">${escapeHtml(initials(user.name))}</span>`;
 }
 
@@ -176,7 +177,7 @@ export function postCardHtml(post, ctx) {
       </div>
     </header>
     <p class="post-text">${linkify(post.text)}</p>
-    ${post.image ? `<img class="post-image" src="${escapeHtml(post.image)}" alt="Post photo" loading="lazy" />` : ''}
+    ${post.image ? `<img class="post-image" src="${escapeHtml(cldImg(post.image, 1080))}" alt="Post photo" loading="lazy" decoding="async" />` : ''}
     ${post.poll ? pollBlockHtml(post, me) : ''}
     ${statsHtml}
     <div class="post-actions">

@@ -306,7 +306,7 @@ export function onAuthReady(cb) {
     return onAuthStateChanged(auth, async (user) => {
       remoteUid = user ? user.uid : '';
       if (user) startRemoteSync();
-      else stopBotRunner(); // no session -> no live bot runner, ever
+      else { stopRemoteSync(); stopBotRunner(); } // no session -> no listeners, no live bot runner, ever
       cb(user ? { id: user.uid } : null);
     });
   }
@@ -339,9 +339,34 @@ export function onAuthReady(cb) {
 // unhandled permission errors.
 // -------------------------------------------------------------------------
 let syncStarted = false;
+let syncUid = '';
+let unsubscribers = [];
+// Register a listener under the current sync session so an account switch
+// can tear every listener down (see stopRemoteSync).
+function listen(...args) {
+  const un = onSnapshot(...args);
+  unsubscribers.push(un);
+  return un;
+}
+function stopRemoteSync() {
+  for (const un of unsubscribers) { try { un(); } catch { /* already gone */ } }
+  unsubscribers = [];
+  syncStarted = false;
+  syncUid = '';
+  remote = blankRemote();
+  emitData();
+}
 function startRemoteSync() {
-  if (syncStarted || !firebaseReady) return;
+  if (!firebaseReady) return;
+  // Account-switch guard: the per-user listeners below bake the uid into
+  // their queries, so a sync started for a previous account must be torn
+  // down and restarted — otherwise the new account keeps receiving the
+  // OLD account's conversations/messages (or nothing, once rules deny the
+  // stale listeners), which made sent DMs silently invisible.
+  if (syncStarted && syncUid === remoteUid) return;
+  if (syncStarted) stopRemoteSync();
   syncStarted = true;
+  syncUid = remoteUid;
   remote = blankRemote();
   const patch = (fn) => { fn(remote); document.dispatchEvent(new CustomEvent('meetbook:data')); };
   // TIME NORMALISATION: every mirrored document passes its epoch-ms
@@ -350,7 +375,7 @@ function startRemoteSync() {
   // timeAgo() directly renders a 1970s date. (Stories/events mappers
   // below predate the helper and call tsToMs inline — same effect.)
   const mapUser = (d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt', 'lastSeen']) });
-  onSnapshot(query(collection(db, 'users'), limit(300)), (snap) => { patch((r) => { r.users = snap.docs.map(mapUser); }); void loadBotSecrets(); void loadAdminStats(); syncLiveBotRunner(); });
+  listen(query(collection(db, 'users'), limit(300)), (snap) => { patch((r) => { r.users = snap.docs.map(mapUser); }); void loadBotSecrets(); void loadAdminStats(); syncLiveBotRunner(); });
   // Posts: three provable listeners merged by id (see header note).
   // Comment/reply timestamps are normalised too — they are written as
   // client-side ms today, but a Timestamp shape must never leak through.
@@ -374,7 +399,7 @@ function startRemoteSync() {
     r.posts = mergePostLists(localEchoPosts, publicPosts, audiencePosts, ownPosts);
   });
   remergePosts = mergePosts;
-  onSnapshot(query(collection(db, 'posts'), where('visibility', '==', 'public'), orderBy('createdAt', 'desc'), limit(100)),
+  listen(query(collection(db, 'posts'), where('visibility', '==', 'public'), orderBy('createdAt', 'desc'), limit(100)),
     (snap) => { publicPosts = snap.docs.map(mapPost); mergePosts(); },
     () => { /* listener rejected — leave the mirrored set untouched */ });
   // Stories: same provable three-listener pattern as posts, merged by id.
@@ -392,7 +417,7 @@ function startRemoteSync() {
     for (const s of [...publicStories, ...audienceStories, ...ownStories]) byIdMap.set(s.id, s);
     r.stories = [...byIdMap.values()];
   });
-  onSnapshot(query(collection(db, 'stories'), where('visibility', '==', 'public'), orderBy('createdAt', 'desc'), limit(100)),
+  listen(query(collection(db, 'stories'), where('visibility', '==', 'public'), orderBy('createdAt', 'desc'), limit(100)),
     (snap) => { publicStories = snap.docs.map(mapStory); mergeStories(); },
     () => { /* listener rejected — leave the mirrored set untouched */ });
   // Events: same provable three-listener pattern as posts (public /
@@ -410,15 +435,15 @@ function startRemoteSync() {
     for (const e of [...publicEvents, ...audienceEvents, ...ownEvents]) byIdMap.set(e.id, e);
     r.events = [...byIdMap.values()];
   });
-  onSnapshot(query(collection(db, 'events'), where('visibility', '==', 'public'), orderBy('dateTime', 'asc'), limit(100)),
+  listen(query(collection(db, 'events'), where('visibility', '==', 'public'), orderBy('dateTime', 'asc'), limit(100)),
     (snap) => { publicEvents = snap.docs.map(mapEvent); mergeEvents(); },
     () => { /* listener rejected — leave the mirrored set untouched */ });
   // Reviews: the read rule is signedIn-only (field-independent), so a
   // plain listener is provable — same as users/pages.
-  onSnapshot(query(collection(db, 'reviews'), orderBy('createdAt', 'desc'), limit(500)),
+  listen(query(collection(db, 'reviews'), orderBy('createdAt', 'desc'), limit(500)),
     (snap) => patch((r) => { r.reviews = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }),
     () => { /* listener rejected — leave the mirrored set untouched */ });
-  onSnapshot(query(collection(db, 'pages'), limit(200)), (snap) => patch((r) => { r.pages = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
+  listen(query(collection(db, 'pages'), limit(200)), (snap) => patch((r) => { r.pages = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
   // Groups use two provably-readable queries merged by id (public groups +
   // groups I belong to): a single unfiltered listener would be rejected by
   // the rules because private groups I cannot see exist in the collection.
@@ -430,7 +455,7 @@ function startRemoteSync() {
     r.groups = [...byIdMap.values()];
   });
   const mapGroup = (d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) });
-  onSnapshot(query(collection(db, 'groups'), where('privacy', '==', 'public'), limit(200)), (snap) => { publicGroups = snap.docs.map(mapGroup); mergeGroups(); });
+  listen(query(collection(db, 'groups'), where('privacy', '==', 'public'), limit(200)), (snap) => { publicGroups = snap.docs.map(mapGroup); mergeGroups(); });
   // Friendships: two provable listeners merged by id (from == me, to == me).
   let friendshipsFrom = [];
   let friendshipsTo = [];
@@ -440,37 +465,37 @@ function startRemoteSync() {
     r.friendships = [...byIdMap.values()];
   });
   const mapFriendship = (d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) });
-  onSnapshot(query(collection(db, 'bots'), limit(100)), (snap) => patch((r) => { r.bots = snap.docs.map((d) => normaliseBot({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
-  onSnapshot(query(collection(db, 'botActivities'), orderBy('createdAt', 'desc'), limit(100)),
+  listen(query(collection(db, 'bots'), limit(100)), (snap) => patch((r) => { r.bots = snap.docs.map((d) => normaliseBot({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
+  listen(query(collection(db, 'botActivities'), orderBy('createdAt', 'desc'), limit(100)),
     (snap) => patch((r) => { r.botActivities = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }),
     () => { /* non-admins cannot read bot activities — ignore */ });
-  onSnapshot(query(collection(db, 'botLogs'), orderBy('createdAt', 'desc'), limit(100)),
+  listen(query(collection(db, 'botLogs'), orderBy('createdAt', 'desc'), limit(100)),
     (snap) => patch((r) => { r.botLogs = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }),
     () => { /* non-admins cannot read bot logs — ignore */ });
-  onSnapshot(doc(db, 'botSettings', 'global'), (snap) => patch((r) => { if (snap.exists()) r.botSettings.global = snap.data(); }));
-  onSnapshot(doc(db, 'config', 'app'), (snap) => patch((r) => { if (snap.exists()) r.config = { ...r.config, ...snap.data() }; }));
+  listen(doc(db, 'botSettings', 'global'), (snap) => patch((r) => { if (snap.exists()) r.botSettings.global = snap.data(); }));
+  listen(doc(db, 'config', 'app'), (snap) => patch((r) => { if (snap.exists()) r.config = { ...r.config, ...snap.data() }; }));
   // Announcements (Pack C): the read rule is signedIn-only
   // (field-independent), so a plain ordered listener is provable.
-  onSnapshot(query(collection(db, 'announcements'), orderBy('createdAt', 'desc'), limit(50)),
+  listen(query(collection(db, 'announcements'), orderBy('createdAt', 'desc'), limit(50)),
     (snap) => patch((r) => { r.announcements = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }),
     () => { /* listener rejected — leave the mirrored set untouched */ });
   if (remoteUid) {
-    onSnapshot(query(collection(db, 'posts'), where('authorId', '==', remoteUid)),
+    listen(query(collection(db, 'posts'), where('authorId', '==', remoteUid)),
       (snap) => { ownPosts = snap.docs.map(mapPost); mergePosts(); },
       () => { /* listener rejected — leave the mirrored set untouched */ });
-    onSnapshot(query(collection(db, 'posts'), where('audienceIds', 'array-contains', remoteUid)),
+    listen(query(collection(db, 'posts'), where('audienceIds', 'array-contains', remoteUid)),
       (snap) => { audiencePosts = snap.docs.map(mapPost); mergePosts(); },
       () => { /* listener rejected — leave the mirrored set untouched */ });
-    onSnapshot(query(collection(db, 'stories'), where('authorId', '==', remoteUid)),
+    listen(query(collection(db, 'stories'), where('authorId', '==', remoteUid)),
       (snap) => { ownStories = snap.docs.map(mapStory); mergeStories(); },
       () => { /* listener rejected — leave the mirrored set untouched */ });
-    onSnapshot(query(collection(db, 'stories'), where('audienceIds', 'array-contains', remoteUid)),
+    listen(query(collection(db, 'stories'), where('audienceIds', 'array-contains', remoteUid)),
       (snap) => { audienceStories = snap.docs.map(mapStory); mergeStories(); },
       () => { /* listener rejected — leave the mirrored set untouched */ });
-    onSnapshot(query(collection(db, 'events'), where('createdBy', '==', remoteUid)),
+    listen(query(collection(db, 'events'), where('createdBy', '==', remoteUid)),
       (snap) => { ownEvents = snap.docs.map(mapEvent); mergeEvents(); },
       () => { /* listener rejected — leave the mirrored set untouched */ });
-    onSnapshot(query(collection(db, 'events'), where('audienceIds', 'array-contains', remoteUid)),
+    listen(query(collection(db, 'events'), where('audienceIds', 'array-contains', remoteUid)),
       (snap) => { audienceEvents = snap.docs.map(mapEvent); mergeEvents(); },
       () => { /* listener rejected — leave the mirrored set untouched */ });
     // Group join requests: two provable listeners merged by id — requests
@@ -484,34 +509,34 @@ function startRemoteSync() {
       r.groupRequests = [...byIdMap.values()];
     });
     const mapGroupRequest = (d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) });
-    onSnapshot(query(collection(db, 'groupRequests'), where('userId', '==', remoteUid)),
+    listen(query(collection(db, 'groupRequests'), where('userId', '==', remoteUid)),
       (snap) => { myGroupRequests = snap.docs.map(mapGroupRequest); mergeGroupRequests(); },
       () => { /* listener rejected — leave the mirrored set untouched */ });
-    onSnapshot(query(collection(db, 'groupRequests'), where('groupOwnerId', '==', remoteUid)),
+    listen(query(collection(db, 'groupRequests'), where('groupOwnerId', '==', remoteUid)),
       (snap) => { ownedGroupRequests = snap.docs.map(mapGroupRequest); mergeGroupRequests(); },
       () => { /* listener rejected — leave the mirrored set untouched */ });
-    onSnapshot(query(collection(db, 'friendships'), where('from', '==', remoteUid)),
+    listen(query(collection(db, 'friendships'), where('from', '==', remoteUid)),
       (snap) => { friendshipsFrom = snap.docs.map(mapFriendship); mergeFriendships(); },
       () => { /* listener rejected — leave the mirrored set untouched */ });
-    onSnapshot(query(collection(db, 'friendships'), where('to', '==', remoteUid)),
+    listen(query(collection(db, 'friendships'), where('to', '==', remoteUid)),
       (snap) => { friendshipsTo = snap.docs.map(mapFriendship); mergeFriendships(); },
       () => { /* listener rejected — leave the mirrored set untouched */ });
-    onSnapshot(query(collection(db, 'notifications'), where('userId', '==', remoteUid), orderBy('createdAt', 'desc'), limit(100)),
+    listen(query(collection(db, 'notifications'), where('userId', '==', remoteUid), orderBy('createdAt', 'desc'), limit(100)),
       (snap) => patch((r) => { r.notifications = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
-    onSnapshot(query(collection(db, 'conversations'), where('participants', 'array-contains', remoteUid)),
+    listen(query(collection(db, 'conversations'), where('participants', 'array-contains', remoteUid)),
       (snap) => patch((r) => { r.conversations = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
-    onSnapshot(query(collection(db, 'messages'), where('participants', 'array-contains', remoteUid), orderBy('createdAt', 'asc'), limit(500)),
+    listen(query(collection(db, 'messages'), where('participants', 'array-contains', remoteUid), orderBy('createdAt', 'asc'), limit(500)),
       (snap) => patch((r) => { r.messages = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }),
       () => { /* listener rejected — leave the mirrored set untouched */ });
-    onSnapshot(query(collection(db, 'blocks'), where('by', '==', remoteUid)),
+    listen(query(collection(db, 'blocks'), where('by', '==', remoteUid)),
       (snap) => patch((r) => { r.blocks = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
-    onSnapshot(query(collection(db, 'groups'), where('members', 'array-contains', remoteUid), limit(200)),
+    listen(query(collection(db, 'groups'), where('members', 'array-contains', remoteUid), limit(200)),
       (snap) => { memberGroups = snap.docs.map(mapGroup); mergeGroups(); });
-    onSnapshot(query(collection(db, 'reports'), orderBy('createdAt', 'desc'), limit(100)),
+    listen(query(collection(db, 'reports'), orderBy('createdAt', 'desc'), limit(100)),
       (snap) => patch((r) => { r.reports = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }), () => { /* non-admins cannot read reports — ignore */ });
     // Audit trail: readable by admins/superadmins only (rules), so the
     // listener simply never delivers for anyone else.
-    onSnapshot(query(collection(db, 'adminLogs'), orderBy('createdAt', 'desc'), limit(200)),
+    listen(query(collection(db, 'adminLogs'), orderBy('createdAt', 'desc'), limit(200)),
       (snap) => patch((r) => { r.adminLogs = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }), () => { /* moderators/analysts cannot read the audit log — ignore */ });
   }
 }
@@ -1523,6 +1548,12 @@ export async function sendMessage(conversationId, { text, image, audio = '', rep
   const noteText = msg.audio && !msg.text ? `${user.name} sent you a voice message.` : `${user.name} sent you a message.`;
   if (firebaseReady) {
     const ref = await addDoc(collection(db, 'messages'), msg);
+    // Mirror my own message at once (same id the listener will deliver):
+    // the sender must see it immediately, even before the snapshot lands.
+    if (remote && !remote.messages.some((m) => m.id === ref.id)) {
+      remote.messages = [...remote.messages, { id: ref.id, ...msg }];
+      emitData();
+    }
     for (const other of others) {
       await createNotification({ userId: other, type: 'message', actorId: user.id, text: noteText, postId: '', conversationId, read: false, createdAt: Date.now() });
     }
