@@ -711,6 +711,7 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'emoji-toggle': { const panel = document.getElementById('emoji-panel'); panel?.classList.toggle('hidden'); if (panel && !panel.classList.contains('hidden')) scrollThread(); break; }
+    case 'composer-more': { const tray = document.getElementById('composer-tray'); tray?.classList.toggle('hidden'); if (tray && !tray.classList.contains('hidden')) scrollThread(); break; }
     // ---- Chat Pack: conversation info / themes / reply / reactions / pins
     case 'conv-info': {
       // The open state lives in uiState (keyed by conversation) so a

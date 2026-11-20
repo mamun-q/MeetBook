@@ -936,19 +936,22 @@ export function messagesView(d, meUser, activeConvId = '') {
         <div id="mention-menu" class="mention-menu hidden"></div>
         <div id="reply-preview" class="message-preview reply-preview hidden"></div>
         <div id="message-preview" class="message-preview hidden"></div>`; })()}
+        <div id="composer-tray" class="composer-tray hidden">
+          <button type="button" class="btn btn-ghost" data-act="sticker-toggle" title="${t('stickers')}" aria-label="${t('stickers')}">🎨</button>
+          <label class="btn btn-ghost msg-attach" for="msg-file-input" title="${t('attachFile')}" aria-label="${t('attachFile')}">📎</label>
+          <button type="button" class="btn btn-ghost" data-act="send-location" title="${t('shareLocation')}" aria-label="${t('shareLocation')}">📍</button>
+          <button type="button" class="btn btn-ghost" data-act="poll-open" data-conv="${active.conv.id}" title="${t('createPoll')}" aria-label="${t('createPoll')}">📊</button>
+          <label class="btn btn-ghost msg-attach" for="msg-image-input" title="${t('photo')}" aria-label="${t('photo')}">📷</label>
+        </div>
         <form id="message-form" data-conv="${active.conv.id}" class="message-form">
           <input type="file" id="msg-image-input" name="image" accept="image/*" hidden />
           <input type="file" id="msg-file-input" name="file" hidden />
-          <button type="button" class="btn btn-ghost btn-sm" data-act="sticker-toggle" title="${t('stickers')}" aria-label="${t('stickers')}">🎨</button>
-          <label class="btn btn-ghost btn-sm msg-attach" for="msg-file-input" title="${t('attachFile')}" aria-label="${t('attachFile')}">📎</label>
-          <button type="button" class="btn btn-ghost btn-sm" data-act="send-location" title="${t('shareLocation')}" aria-label="${t('shareLocation')}">📍</button>
-          <button type="button" class="btn btn-ghost btn-sm" data-act="poll-open" data-conv="${active.conv.id}" title="${t('createPoll')}" aria-label="${t('createPoll')}">📊</button>
-          <label class="btn btn-ghost btn-sm msg-attach" for="msg-image-input" title="${t('photo')}" aria-label="${t('photo')}">📷</label>
+          <button type="button" class="btn btn-ghost btn-sm" data-act="composer-more" title="${t('moreOptions')}" aria-label="${t('moreOptions')}">➕</button>
           <button type="button" class="btn btn-ghost btn-sm" data-act="emoji-toggle" title="Emoji" aria-label="Emoji">😊</button>
           <input name="text" placeholder="Type a message…" autocomplete="off" maxlength="2000" />
           <button type="button" class="btn btn-ghost btn-sm" id="voice-btn" data-act="voice-toggle" title="${t('voiceMessage')}" aria-label="${t('voiceMessage')}">🎤</button>
           <button type="button" class="btn btn-ghost thread-emoji-btn" data-act="send-thread-emoji" data-conv="${active.conv.id}" title="${t('chatEmoji')}" aria-label="${t('chatEmoji')}">${escapeHtml(active.conv.emoji || '👍')}</button>
-          <button class="btn btn-primary" type="submit">${t('send')}</button>
+          <button class="btn btn-primary msg-send-btn" type="submit" title="${t('send')}" aria-label="${t('send')}">➤</button>
         </form>
         <div id="emoji-panel" class="emoji-panel hidden">
           ${CHAT_EMOJIS.map((e) => `<button type="button" class="emoji-btn" data-emoji-insert="${e}" aria-label="Insert ${e}">${e}</button>`).join('')}

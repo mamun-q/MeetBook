@@ -298,9 +298,17 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 .msg-bubble p { margin: 0; white-space: pre-wrap; word-break: break-word; }
 .msg-meta { display: block; font-size: .68rem; opacity: .75; margin-top: 3px; text-align: right; }
 .msg-image { border-radius: 12px; max-height: 260px; }
-.message-form { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border); align-items: center; }
+.message-form { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border); align-items: center; flex-wrap: nowrap; }
+.message-form > * { flex: none; }
 .message-form input { border-radius: 999px; }
+.message-form input[name="text"] { flex: 1 1 auto; min-width: 0; width: auto; }
 .message-form input:focus { box-shadow: var(--ring); }
+/* Composer overflow tray (mobile-first): the extra actions — stickers,
+   file, location, poll, photo — live behind the ➕ toggle so the typing
+   box and Send always fit a phone screen. */
+.composer-tray { display: flex; flex-wrap: wrap; gap: 4px; padding: 10px 12px 2px; }
+.composer-tray .btn { min-width: 46px; min-height: 42px; font-size: 1.1rem; display: inline-flex; align-items: center; justify-content: center; }
+.msg-send-btn { border-radius: 999px; min-width: 46px; min-height: 40px; font-size: 1rem; padding-left: 12px; padding-right: 10px; }
 
 /* notifications */
 .notif { display: flex; gap: 10px; align-items: center; width: 100%; text-align: left; cursor: pointer; border: none; font: inherit; color: var(--text); border-radius: 12px; transition: background .15s ease; }
