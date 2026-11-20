@@ -1,0 +1,31 @@
+name: Bot runner
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bot-runner
+  cancel-in-progress: false
+
+jobs:
+  cycle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install
+        run: npm ci || npm install
+      - name: Run one bot cycle
+        env:
+          TZ: Asia/Dhaka
+          RUNNER_EMAIL: ${{ secrets.RUNNER_EMAIL }}
+          RUNNER_PASSWORD: ${{ secrets.RUNNER_PASSWORD }}
+        run: node runner/run-cycle.mjs
