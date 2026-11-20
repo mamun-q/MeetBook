@@ -1,0 +1,49 @@
+name: QA Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 20 * * *'
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: qa-bot
+  cancel-in-progress: false
+
+jobs:
+  qa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install Playwright + Chromium
+        run: |
+          npm install --no-save playwright@1.49.1
+          npx playwright install --with-deps chromium
+      - name: Run QA sweep
+        id: qa
+        env:
+          QA_EMAIL: ${{ secrets.QA_EMAIL }}
+          QA_PASSWORD: ${{ secrets.QA_PASSWORD }}
+          RUNNER_EMAIL: ${{ secrets.RUNNER_EMAIL }}
+          RUNNER_PASSWORD: ${{ secrets.RUNNER_PASSWORD }}
+          TZ: Asia/Dhaka
+        run: node qa/run-qa.mjs
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-report
+          path: qa-out/
+      - name: Open an issue when problems are found
+        if: failure() && steps.qa.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --title "QA Bot found problems" --body-file qa-out/qa-report.md || true
