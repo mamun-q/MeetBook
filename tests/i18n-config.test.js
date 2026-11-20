@@ -28,12 +28,12 @@ describe('i18n', () => {
 describe('firebase-config', () => {
   it('defaults to the live meetbook project config', () => {
     const cfg = resolveFirebaseConfig({});
-    expect(cfg.projectId).toBe('meetbook-d8a44');
-    expect(cfg.authDomain).toBe('meetbook-d8a44.firebaseapp.com');
-    expect(cfg.storageBucket).toBe('meetbook-d8a44.firebasestorage.app');
-    expect(cfg.appId).toContain('952952705672');
+    expect(cfg.projectId).toBe('meetbook-5f491');
+    expect(cfg.authDomain).toBe('meetbook-5f491.firebaseapp.com');
+    expect(cfg.storageBucket).toBe('meetbook-5f491.firebasestorage.app');
+    expect(cfg.appId).toContain('249684575470');
     expect(isConfigComplete(cfg)).toBe(true);
-    expect(DEFAULT_FIREBASE_CONFIG.measurementId).toBe('G-L7PZG79GDQ');
+    expect(DEFAULT_FIREBASE_CONFIG.measurementId).toBe('');
   });
   it('env vars override defaults, blank env values do not', () => {
     const cfg = resolveFirebaseConfig({ VITE_FIREBASE_PROJECT_ID: 'other-proj', VITE_FIREBASE_API_KEY: '  ' });

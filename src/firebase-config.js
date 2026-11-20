@@ -1,5 +1,6 @@
 // Default Firebase web configuration for the MeetBook project
-// (project "meetbook", Project ID: meetbook-d8a44).
+// (project "meetbook", Project ID: meetbook-5f491 — fresh project created
+// 2026-11-20 under the owner's new Google account, replacing meetbook-d8a44).
 //
 // A Firebase *web* config is NOT a secret: it identifies the project to
 // client apps and is designed to be shipped in public web code. Access is
@@ -11,13 +12,16 @@
 // (see .env.example). If this config is removed or broken, the app falls
 // back to its clearly-labelled demo/offline mode.
 export const DEFAULT_FIREBASE_CONFIG = {
-  apiKey: 'AIzaSyCqsu9rHscxS_gxToFRH_p9Lh7if2_Zscc',
-  authDomain: 'meetbook-d8a44.firebaseapp.com',
-  projectId: 'meetbook-d8a44',
-  storageBucket: 'meetbook-d8a44.firebasestorage.app',
-  messagingSenderId: '952952705672',
-  appId: '1:952952705672:web:fcc48ba8a41dc95b5ac53d',
-  measurementId: 'G-L7PZG79GDQ'
+  apiKey: 'AIzaSyBTPMdu6S83dpac74cxgJJSPGcDFHB8FQw',
+  authDomain: 'meetbook-5f491.firebaseapp.com',
+  projectId: 'meetbook-5f491',
+  storageBucket: 'meetbook-5f491.firebasestorage.app',
+  messagingSenderId: '249684575470',
+  appId: '1:249684575470:web:a4d14f14eba08642dddfff',
+  // No measurementId: Analytics is enabled on the project but no web
+  // measurement ID has been provisioned for this app yet. The app does not
+  // initialise Analytics, so this is intentionally left blank.
+  measurementId: ''
 };
 
 export function resolveFirebaseConfig(env = {}) {

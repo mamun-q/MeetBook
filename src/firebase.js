@@ -1,6 +1,6 @@
 // Firebase initialisation.
 // Config resolution: VITE_FIREBASE_* env vars override the committed default
-// web config (src/firebase-config.js) for project meetbook-d8a44, so the app
+// web config (src/firebase-config.js) for project meetbook-5f491, so the app
 // runs in LIVE Firebase mode by default. Demo/offline mode is only a
 // fallback if the config is removed or initialisation fails.
 import { initializeApp } from 'firebase/app';
