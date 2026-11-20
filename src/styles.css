@@ -337,7 +337,7 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
    letter-by-letter (the old overflow-wrap:anywhere on the users
    table). Dates, statuses and usernames never wrap mid-token; long
    emails may break so they stay fully visible. */
-.admin-users-table { min-width: 860px; }
+.admin-users-table { min-width: 720px; }
 .admin-users-table td { overflow-wrap: break-word; }
 .cell-nowrap { white-space: nowrap; }
 .cell-email { overflow-wrap: anywhere; min-width: 150px; }

@@ -227,6 +227,13 @@ export function render() {
     <footer class="footer muted small">${escapeHtml(brand)} · ${t('taglineShort')} · <a href="#/help">${t('help')}</a> · <a href="#/terms">${t('termsOfService')}</a> · <a href="#/privacy">${t('privacyPolicy')}</a> · <a href="#/guidelines">${t('communityGuidelines')}</a></footer>
     ${bottomNavHtml(d, user, route, seg)}`;
 
+  // Keep an open post ••• menu open across the re-render (realtime
+  // updates rebuild the DOM roughly every few seconds).
+  if (openPostMenuId) {
+    const openMenu = document.getElementById(`menu-${openPostMenuId}`);
+    if (openMenu) openMenu.classList.remove('hidden'); else openPostMenuId = '';
+  }
+
   maybeBrowserNotify(d, user);
 }
 
@@ -302,6 +309,7 @@ function maybeBrowserNotify(d, user) {
 // by the ↩️ action on a message, cleared on send / cancel / navigation).
 // The send path snapshots it onto the new message via api.sendMessage.
 let replyTarget = null; // { id, convId, name, text }
+let openPostMenuId = ''; // post id whose ••• menu is open — render() restores it so realtime re-renders don't slam the menu shut mid-click (audit 2026-11-20)
 let typingTicker = null; // 1s interval refreshing #typing-row (setupThread)
 
 function showReplyPreview() {
@@ -589,7 +597,18 @@ document.addEventListener('click', async (e) => {
     const menu = document.getElementById(`menu-${menuBtn.dataset.menu}`);
     document.querySelectorAll('.menu').forEach((m) => { if (m !== menu) m.classList.add('hidden'); });
     menu?.classList.toggle('hidden');
+    openPostMenuId = menu && !menu.classList.contains('hidden') ? menuBtn.dataset.menu : '';
     return;
+  }
+
+  // Post ••• menus: a click on a menu item closes the menu; a click
+  // anywhere outside the menu wrapper closes it too.
+  if (e.target.closest('.post-menu-wrap .menu [data-act]')) {
+    e.target.closest('.menu')?.classList.add('hidden');
+    openPostMenuId = '';
+  } else if (!e.target.closest('.post-menu-wrap')) {
+    document.querySelectorAll('.post-menu-wrap .menu').forEach((m) => m.classList.add('hidden'));
+    openPostMenuId = '';
   }
 
   // Account dropdown: closes on any click outside its wrapper, and when

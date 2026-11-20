@@ -381,6 +381,11 @@ function startRemoteSync() {
   // client-side ms today, but a Timestamp shape must never leak through.
   const mapPost = (d) => {
     const raw = normaliseTimeFields(d.data(), ['createdAt', 'editedAt']);
+    // A pending serverTimestamp() reads back as null → 0 (epoch): the
+    // post would flash at the bottom of the feed dated 1/1/1970 until
+    // the resolved snapshot lands. Estimate it as "now" instead — the
+    // resolved value replaces it a moment later.
+    if (!raw.createdAt) raw.createdAt = Date.now();
     const comments = (raw.comments || []).map((c) => ({
       ...normaliseTimeFields(c, ['createdAt']),
       replies: (c.replies || []).map((rep) => normaliseTimeFields(rep, ['createdAt']))
@@ -407,7 +412,7 @@ function startRemoteSync() {
   // the 24h expiry filter in the view layer compares real numbers.
   const mapStory = (d) => {
     const raw = d.data();
-    return { id: d.id, image: '', text: '', bg: 'sunset', audienceIds: [], views: [], ...raw, createdAt: tsToMs(raw.createdAt) };
+    return { id: d.id, image: '', text: '', bg: 'sunset', audienceIds: [], views: [], ...raw, createdAt: tsToMs(raw.createdAt) || Date.now() };
   };
   let ownStories = [];
   let publicStories = [];
@@ -1687,14 +1692,29 @@ export async function markAllNotificationsRead() {
   const user = me(); if (!user) return;
   if (firebaseReady) {
     const mine = data().notifications.filter((n) => n.userId === user.id && !n.read);
-    for (const n of mine) await updateDoc(doc(db, 'notifications', n.id), { read: true });
+    // Patch the mirror first so the badge clears in ONE click — waiting
+    // for each update's snapshot round-trip left stale unread counts
+    // behind (audit 2026-11-20: badge went 5 → 1 on the first click).
+    // The listener confirms with server truth on its next snapshot.
+    if (remote) {
+      for (const n of remote.notifications) if (n.userId === user.id) n.read = true;
+      emitData();
+    }
+    await Promise.all(mine.map((n) => updateDoc(doc(db, 'notifications', n.id), { read: true })));
     return;
   }
   mutate((s) => { for (const n of s.notifications) if (n.userId === user.id) n.read = true; });
 }
 
 export async function markNotificationRead(id) {
-  if (firebaseReady) { await updateDoc(doc(db, 'notifications', id), { read: true }); return; }
+  if (firebaseReady) {
+    if (remote) {
+      const n = remote.notifications.find((x) => x.id === id);
+      if (n && !n.read) { n.read = true; emitData(); }
+    }
+    await updateDoc(doc(db, 'notifications', id), { read: true });
+    return;
+  }
   mutate((s) => { const n = s.notifications.find((x) => x.id === id); if (n) n.read = true; });
 }
 

@@ -209,7 +209,7 @@ function pollBlockHtml(post, meUser) {
       <span class="poll-option-text">${escapeHtml(o.text)}${myVote === o.id ? ' ✓' : ''}</span>
       <span class="poll-pct">${o.pct}%</span>
     </button>`).join('')}
-    <p class="muted small poll-total">${res.totalVotes} ${t('voters')}</p>
+    <p class="muted small poll-total">${res.totalVotes} ${res.totalVotes === 1 ? t('voter') : t('voters')}</p>
   </div>`;
 }
 
