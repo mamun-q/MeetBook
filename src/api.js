@@ -7,7 +7,7 @@ import {
   getState, mutate, findUser, userByUsername, friendIdsOf, blockedIdsOf, notify, resetDemo
 } from './store.js';
 import { firebaseReady, auth, db, storage, googleProvider } from './firebase.js';
-import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme } from './utils.js';
+import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme, canEditMessage } from './utils.js';
 import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay } from './botLogic.js';
 import { canAccessBotSecrets, botModel } from './gemini.js';
 import { providerById, resolveAiConfig, generateRouted, testProvider as testAiProvider, getLastRoutedFailure, resetLastRoutedFailure, anyProviderConfigured, dhakaDayKey, normaliseUsageMap, usageTotals } from './aiProviders.js';
@@ -1541,7 +1541,7 @@ export async function createGroupConversation({ title, memberIds }) {
   return full;
 }
 
-export async function sendMessage(conversationId, { text, image, audio = '', replyToId = '' }) {
+export async function sendMessage(conversationId, { text, image, audio = '', replyToId = '', forwarded = false }) {
   const user = me(); if (!user) throw new Error('Sign in first.');
   const conv = data().conversations.find((c) => c.id === conversationId);
   // Participants are DENORMALIZED onto the message: the messages read
@@ -1550,6 +1550,7 @@ export async function sendMessage(conversationId, { text, image, audio = '', rep
   // `audio` is a base64 data URL for voice messages (recorded client-side,
   // capped at ~60s / ~700KB by the composer before it gets here).
   const msg = { conversationId, participants: conv ? [...conv.participants] : [], senderId: user.id, text: String(text || '').trim(), image: image || '', audio: audio || '', createdAt: Date.now(), status: 'sent', readBy: [user.id] };
+  if (forwarded) msg.forwarded = true;
   if (!msg.text && !msg.image && !msg.audio) throw new Error('Message cannot be empty.');
   // Reply/quote (Chat Pack): snapshot the quoted message onto the new
   // one — its id, its author's name and a ≤120-char snippet — but only
@@ -1683,6 +1684,180 @@ export async function setConversationTheme(conversationId, themeId) {
   }
   mutate((s) => { const c = s.conversations.find((x) => x.id === conversationId); if (c) c.theme = theme; });
   return theme;
+}
+
+// ------------------------------------------------ Messenger Complete Pack
+// Edit / unsend / hide / forward for messages, per-user conversation
+// flags (archive, mute), the thread quick-emoji, and group management.
+// All follow the Chat Pack pattern: optimistic mirror patch in live
+// mode with rollback, plain mutate() in demo mode.
+
+// Shared live/demo message patch with rollback for the simple cases.
+async function patchMessageFields(messageId, patch, prevKeys) {
+  const msg = data().messages.find((m) => m.id === messageId);
+  if (!msg) throw new Error('Message not found.');
+  if (firebaseReady) {
+    const prev = {};
+    for (const k of prevKeys) prev[k] = msg[k];
+    patchRemoteMessage(messageId, (m) => Object.assign(m, patch));
+    try {
+      await updateDoc(doc(db, 'messages', messageId), patch);
+    } catch (err) {
+      patchRemoteMessage(messageId, (m) => Object.assign(m, prev));
+      throw err;
+    }
+    return;
+  }
+  mutate((s) => { const m = s.messages.find((x) => x.id === messageId); if (m) Object.assign(m, patch); });
+}
+
+// Edit my own text message inside the 15-minute window (utils guard).
+export async function editMessage(messageId, newText) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const msg = data().messages.find((m) => m.id === messageId);
+  if (!canEditMessage(msg, user.id)) throw new Error('This message can no longer be edited.');
+  const text = String(newText || '').trim();
+  if (!text) throw new Error('Message cannot be empty.');
+  if (text === msg.text) return msg;
+  await patchMessageFields(messageId, { text, editedAt: Date.now() }, ['text', 'editedAt']);
+  return data().messages.find((m) => m.id === messageId);
+}
+
+// Unsend: remove the message for EVERYONE. The document stays as a
+// tombstone (text/media cleared) so the thread keeps its shape and the
+// other side sees "unsent" instead of a silent gap.
+export async function unsendMessage(messageId) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const msg = data().messages.find((m) => m.id === messageId);
+  if (!msg) throw new Error('Message not found.');
+  if (msg.senderId !== user.id) throw new Error('You can only unsend your own messages.');
+  if (msg.unsent) return msg;
+  await patchMessageFields(messageId,
+    { unsent: true, text: '', image: '', audio: '', reactions: {}, pinned: false, pinnedBy: '', pinnedAt: 0 },
+    ['unsent', 'text', 'image', 'audio', 'reactions', 'pinned', 'pinnedBy', 'pinnedAt']);
+  return data().messages.find((m) => m.id === messageId);
+}
+
+// Remove for me only: the message disappears from MY view; everyone
+// else still sees it. Rides the hiddenFor uid array on the message.
+export async function hideMessage(messageId) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const msg = data().messages.find((m) => m.id === messageId);
+  if (!msg) throw new Error('Message not found.');
+  const hiddenFor = [...new Set([...(msg.hiddenFor || []), user.id])];
+  await patchMessageFields(messageId, { hiddenFor }, ['hiddenFor']);
+}
+
+// Forward a copy of a message into another conversation I belong to.
+export async function forwardMessage(messageId, targetConversationId) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const src = data().messages.find((m) => m.id === messageId);
+  if (!src || src.unsent) throw new Error('Message not found.');
+  const target = data().conversations.find((c) => c.id === targetConversationId);
+  if (!target || !target.participants?.includes(user.id)) throw new Error('Conversation not found.');
+  if (!src.text && !src.image) throw new Error('Only text and photo messages can be forwarded.');
+  return sendMessage(targetConversationId, { text: src.text || '', image: src.image || '', forwarded: true });
+}
+
+// Archive / mute are per-user: uid arrays on the conversation doc
+// (archivedBy / mutedBy), so they follow the user across devices.
+export async function setConversationFlag(conversationId, flag, on) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  if (!['archivedBy', 'mutedBy'].includes(flag)) throw new Error('Unknown flag.');
+  const conv = data().conversations.find((c) => c.id === conversationId);
+  if (!conv || !conv.participants?.includes(user.id)) throw new Error('Conversation not found.');
+  const next = on
+    ? [...new Set([...(conv[flag] || []), user.id])]
+    : (conv[flag] || []).filter((id) => id !== user.id);
+  if (firebaseReady) {
+    const prev = conv[flag] || [];
+    patchRemoteConversation(conversationId, (c) => { c[flag] = next; });
+    try {
+      await updateDoc(doc(db, 'conversations', conversationId), { [flag]: next });
+    } catch (err) {
+      patchRemoteConversation(conversationId, (c) => { c[flag] = prev; });
+      throw err;
+    }
+    return next;
+  }
+  mutate((s) => { const c = s.conversations.find((x) => x.id === conversationId); if (c) c[flag] = next; });
+  return next;
+}
+
+// The thread's quick-emoji (Facebook's 👍 button, changeable per chat).
+export async function setConversationEmoji(conversationId, emoji) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const conv = data().conversations.find((c) => c.id === conversationId);
+  if (!conv || !conv.participants?.includes(user.id)) throw new Error('Conversation not found.');
+  const value = String(emoji || '👍').slice(0, 8);
+  if (firebaseReady) {
+    patchRemoteConversation(conversationId, (c) => { c.emoji = value; });
+    await updateDoc(doc(db, 'conversations', conversationId), { emoji: value });
+    return value;
+  }
+  mutate((s) => { const c = s.conversations.find((x) => x.id === conversationId); if (c) c.emoji = value; });
+  return value;
+}
+
+// Group management: rename, add members, remove a member, leave.
+// Membership lives on the conversation doc; messages keep their
+// send-time participant snapshot, so a removed member loses the
+// conversation (and future messages) but the rules keep old history
+// readable only through documents they already had — the conversation
+// itself disappears from their list.
+async function patchConversationFields(conversationId, patch, prevKeys) {
+  const conv = data().conversations.find((c) => c.id === conversationId);
+  if (!conv) throw new Error('Conversation not found.');
+  if (firebaseReady) {
+    const prev = {};
+    for (const k of prevKeys) prev[k] = conv[k];
+    patchRemoteConversation(conversationId, (c) => Object.assign(c, patch));
+    try {
+      await updateDoc(doc(db, 'conversations', conversationId), patch);
+    } catch (err) {
+      patchRemoteConversation(conversationId, (c) => Object.assign(c, prev));
+      throw err;
+    }
+    return;
+  }
+  mutate((s) => { const c = s.conversations.find((x) => x.id === conversationId); if (c) Object.assign(c, patch); });
+}
+
+export async function renameGroupConversation(conversationId, title) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const conv = data().conversations.find((c) => c.id === conversationId);
+  if (!conv?.isGroup || !conv.participants?.includes(user.id)) throw new Error('Conversation not found.');
+  const next = String(title || '').trim().slice(0, 60);
+  if (!next) throw new Error('Group name cannot be empty.');
+  await patchConversationFields(conversationId, { title: next }, ['title']);
+  return next;
+}
+
+export async function addGroupMembers(conversationId, memberIds) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const conv = data().conversations.find((c) => c.id === conversationId);
+  if (!conv?.isGroup || !conv.participants?.includes(user.id)) throw new Error('Conversation not found.');
+  const next = [...new Set([...conv.participants, ...(memberIds || [])])];
+  if (next.length === conv.participants.length) return conv.participants;
+  await patchConversationFields(conversationId, { participants: next }, ['participants']);
+  return next;
+}
+
+export async function removeGroupChatMember(conversationId, memberId) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const conv = data().conversations.find((c) => c.id === conversationId);
+  if (!conv?.isGroup || !conv.participants?.includes(user.id)) throw new Error('Conversation not found.');
+  const isSelf = memberId === user.id;
+  const canRemove = isSelf || conv.createdBy === user.id || isAdminRole(user);
+  if (!canRemove) throw new Error('Only the group creator can remove members.');
+  const next = conv.participants.filter((id) => id !== memberId);
+  if (next.length < 2) throw new Error('A group needs at least two members.');
+  await patchConversationFields(conversationId, { participants: next }, ['participants']);
+  return next;
+}
+
+export async function leaveGroupConversation(conversationId) {
+  return removeGroupChatMember(conversationId, me()?.id || '');
 }
 
 // -------------------------------------------------------------------------

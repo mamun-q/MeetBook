@@ -1085,3 +1085,50 @@ export const CHAT_THEMES = [
 export function chatTheme(id) {
   return CHAT_THEMES.find((th) => th.id === id) || CHAT_THEMES[0];
 }
+
+// ------------------------------------------------- Messenger Complete Pack
+// Facebook-style message lifecycle helpers (pure, unit-tested).
+
+// How long after sending the author may still edit a message.
+export const EDIT_WINDOW_MS = 15 * 60 * 1000;
+
+// True when `text` is nothing but emoji (and whitespace) — Facebook
+// renders those big and bubble-less. Grapheme-aware via Intl.Segmenter
+// where available so ZWJ sequences (👨‍👩‍👧) count as ONE emoji.
+export function isEmojiOnlyText(text, maxEmoji = 3) {
+  const s = String(text || '').trim();
+  if (!s) return false;
+  let count = 0;
+  const segmenter = typeof Intl !== 'undefined' && Intl.Segmenter ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+  const parts = segmenter ? [...segmenter.segment(s)].map((x) => x.segment) : [...s];
+  for (const part of parts) {
+    if (!part.trim()) continue;
+    // A grapheme counts as emoji when it carries the Extended_Pictographic
+    // property or is a regional-indicator / keycap / skin-tone sequence.
+    if (!/(\p{Extended_Pictographic}|\p{Regional_Indicator}|️|⃣)/u.test(part)) return false;
+    count += 1;
+    if (count > maxEmoji) return false;
+  }
+  return count > 0;
+}
+
+// The author may edit only their own text message, only inside the
+// edit window, and never once it has been unsent.
+export function canEditMessage(message, userId, now = Date.now()) {
+  if (!message || message.senderId !== userId) return false;
+  if (message.unsent || message.audio || message.image) return false;
+  if (!String(message.text || '').trim()) return false;
+  return now - Number(message.createdAt || 0) <= EDIT_WINDOW_MS;
+}
+
+// A message is visible to `userId` unless they removed it for
+// themselves (hiddenFor) — unsent messages stay visible as tombstones.
+export function isMessageVisibleTo(message, userId) {
+  return !(message?.hiddenFor || []).includes(userId);
+}
+
+// Per-user conversation flags (archive / mute) live as uid arrays on
+// the conversation document so they sync across the user's devices.
+export function isConversationFlagged(conv, flag, userId) {
+  return (conv?.[flag] || []).includes(userId);
+}

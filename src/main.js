@@ -703,6 +703,38 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'set-theme': await handle(api.setConversationTheme(actEl.dataset.conv, actEl.dataset.theme)); break;
+    // ---- Messenger Complete Pack: filters, archive/mute, thread emoji
+    case 'conv-filter': V.uiState.convFilter = actEl.dataset.filter || 'all'; V.uiState.convMenuFor = ''; render(); break;
+    case 'conv-menu': {
+      const id = actEl.dataset.id;
+      const menu = document.getElementById(`conv-menu-${id}`);
+      document.querySelectorAll('.conv-menu').forEach((m) => { if (m !== menu) m.classList.add('hidden'); });
+      V.uiState.convMenuFor = V.uiState.convMenuFor === id ? '' : id;
+      menu?.classList.toggle('hidden');
+      break;
+    }
+    case 'conv-archive': {
+      const conv = d.conversations.find((c) => c.id === actEl.dataset.id);
+      const on = !(conv?.archivedBy || []).includes(user.id);
+      V.uiState.convMenuFor = '';
+      await handle(api.setConversationFlag(actEl.dataset.id, 'archivedBy', on), on ? t('chatArchived') : t('chatUnarchived'));
+      break;
+    }
+    case 'conv-mute': {
+      const conv = d.conversations.find((c) => c.id === actEl.dataset.id);
+      const on = !(conv?.mutedBy || []).includes(user.id);
+      V.uiState.convMenuFor = '';
+      await handle(api.setConversationFlag(actEl.dataset.id, 'mutedBy', on), on ? t('chatMuted') : t('chatUnmuted'));
+      break;
+    }
+    case 'set-conv-emoji': await handle(api.setConversationEmoji(actEl.dataset.conv, actEl.dataset.emoji)); break;
+    case 'send-thread-emoji': {
+      const conv = d.conversations.find((c) => c.id === actEl.dataset.conv);
+      if (conv) { await handle(api.sendMessage(conv.id, { text: conv.emoji || '👍' })); render(); scrollThread(); }
+      break;
+    }
+    case 'group-remove-member': if (await confirmModal(t('removeMember'), t('removeMemberConfirm'))) await handle(api.removeGroupChatMember(actEl.dataset.conv, actEl.dataset.id), t('memberRemoved')); break;
+    case 'group-leave': if (await confirmModal(t('leaveGroup'), t('leaveGroupConfirm'))) { await handle(api.leaveGroupConversation(actEl.dataset.conv), t('leftGroup')); location.hash = '#/messages'; } break;
     case 'reply-message': {
       const msg = d.messages.find((m) => m.id === actEl.dataset.id);
       if (msg) {
@@ -725,6 +757,36 @@ document.addEventListener('click', async (e) => {
     }
     case 'msg-react': await handle(api.toggleMessageReaction(actEl.dataset.id, actEl.dataset.emoji)); break;
     case 'pin-message': { const pinned = await handle(api.togglePinMessage(actEl.dataset.id)); if (pinned !== null) toast(pinned ? t('messagePinned') : t('messageUnpinned'), 'success'); break; }
+    // ---- Messenger Complete Pack: per-message menu, edit, unsend, hide, forward
+    case 'msg-menu': {
+      const id = actEl.dataset.id;
+      const menu = document.getElementById(`msg-menu-${id}`);
+      document.querySelectorAll('.msg-menu').forEach((m) => { if (m !== menu) m.classList.add('hidden'); });
+      V.uiState.msgMenuFor = V.uiState.msgMenuFor === id ? '' : id;
+      menu?.classList.toggle('hidden');
+      break;
+    }
+    case 'edit-message': {
+      const msg = d.messages.find((m) => m.id === actEl.dataset.id);
+      if (msg) openModal(`<h3>${t('editMessage')}</h3><form id="edit-message-form" data-id="${msg.id}" class="stack"><textarea name="text" rows="3" maxlength="2000">${escapeHtml(msg.text || '')}</textarea><div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">Save</button></div></form>`);
+      break;
+    }
+    case 'unsend-message': V.uiState.msgMenuFor = ''; if (await confirmModal(t('unsendMessage'), t('unsendConfirm'))) await handle(api.unsendMessage(actEl.dataset.id), t('messageUnsentDone')); break;
+    case 'hide-message': V.uiState.msgMenuFor = ''; await handle(api.hideMessage(actEl.dataset.id), t('messageRemovedForYou')); break;
+    case 'forward-message': {
+      V.uiState.msgMenuFor = '';
+      const msg = d.messages.find((m) => m.id === actEl.dataset.id);
+      if (msg) {
+        const byId = V.usersById(d);
+        const targets = d.conversations.filter((c) => c.participants.includes(user.id) && c.id !== msg.conversationId);
+        openModal(`<h3>${t('forwardMessage')}</h3><div class="stack">${targets.length ? targets.map((c) => {
+          const title = c.isGroup ? (c.title || t('groupChat')) : (byId[c.participants.find((p) => p !== user.id)]?.name || 'Unknown');
+          return `<button class="conv-item" data-act="forward-to" data-id="${msg.id}" data-conv="${c.id}">${avatarHtml(c.isGroup ? { name: title, username: title, avatar: c.photo || '' } : (byId[c.participants.find((p) => p !== user.id)] || { name: 'Unknown', username: 'unknown' }), 36)}<span>${c.isGroup ? '👥 ' : ''}${escapeHtml(title)}</span></button>`;
+        }).join('') : `<p class="muted">${t('noForwardTargets')}</p>`}</div>`);
+      }
+      break;
+    }
+    case 'forward-to': closeModal(); await handle(api.forwardMessage(actEl.dataset.id, actEl.dataset.conv), t('messageForwarded')); break;
     case 'jump-message': {
       const target = document.getElementById(`msg-${actEl.dataset.id}`);
       if (target) {
@@ -1253,6 +1315,20 @@ document.addEventListener('submit', async (e) => {
     closeModal();
     return;
   }
+  if (form.id === 'edit-message-form') {
+    const r = await handle(api.editMessage(form.dataset.id, String(fd.get('text') || '')), t('messageEdited'));
+    if (r) closeModal();
+    return;
+  }
+  if (form.id === 'group-rename-form') {
+    await handle(api.renameGroupConversation(form.dataset.conv, String(fd.get('title') || '')), t('groupRenamed'));
+    return;
+  }
+  if (form.id === 'group-add-form') {
+    const memberIds = fd.getAll('member').map((v) => String(v));
+    if (memberIds.length) await handle(api.addGroupMembers(form.dataset.conv, memberIds), t('membersAdded'));
+    return;
+  }
   if (form.id === 'edit-profile-form') {
     const patch = {
       name: String(fd.get('name')), username: String(fd.get('username')), bio: String(fd.get('bio')),
@@ -1494,6 +1570,28 @@ document.addEventListener('input', (e) => {
   document.querySelectorAll('.conv-item[data-search]').forEach((el) => {
     el.style.display = !q || (el.dataset.search || '').includes(q) ? '' : 'none';
   });
+});
+
+// In-conversation search (Messenger Complete Pack): pure DOM results
+// under the search box — matching messages of the OPEN thread, newest
+// first, each row jumping to (and flashing) its message via the
+// delegated jump-message action. No re-render, so focus stays put.
+document.addEventListener('input', (e) => {
+  if (e.target.id !== 'conv-msg-search') return;
+  const box = document.getElementById('conv-search-results');
+  if (!box) return;
+  const q = e.target.value.trim().toLowerCase();
+  if (!q) { box.innerHTML = ''; return; }
+  const d = api.data();
+  const user = me();
+  const byId = V.usersById(d);
+  const hits = d.messages
+    .filter((m) => m.conversationId === e.target.dataset.conv && !m.unsent && !(m.hiddenFor || []).includes(user?.id || '') && (m.text || '').toLowerCase().includes(q))
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, 20);
+  box.innerHTML = hits.length
+    ? hits.map((m) => `<button type="button" class="pinned-item" data-act="jump-message" data-id="${m.id}"><b>${escapeHtml((byId[m.senderId]?.name || '').split(' ')[0])}</b><span class="grow">${escapeHtml(messageSnippet(m, 80))}</span><span class="muted small">${timeAgo(m.createdAt)}</span></button>`).join('')
+    : `<p class="muted small">${t('noSearchResults')}</p>`;
 });
 
 // Chat Pack typing heartbeat: keystrokes in the composer refresh my

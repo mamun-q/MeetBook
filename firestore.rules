@@ -312,12 +312,17 @@ service cloud.firestore {
                 && isBotUser(request.resource.data.senderId)
                 && request.resource.data.senderId in request.resource.data.get('participants', [])
                 && request.resource.data.senderId in get(/databases/$(database)/documents/conversations/$(request.resource.data.conversationId)).data.participants));
-      // Only read receipts / status may change after sending; the text,
-      // the sender and the participant set are pinned.
+      // Read receipts, reactions, pins and remove-for-me may change
+      // after sending for any participant (the text stays pinned for
+      // them); the AUTHOR may additionally change the content itself —
+      // editing inside the app's edit window or unsending (which
+      // clears text/image/audio and raises the `unsent` tombstone).
+      // Sender and the participant set are always pinned.
       allow update: if signedIn() && request.auth.uid in resource.data.get('participants', [])
-        && request.resource.data.text == resource.data.text
         && request.resource.data.senderId == resource.data.senderId
-        && request.resource.data.get('participants', []) == resource.data.get('participants', []);
+        && request.resource.data.get('participants', []) == resource.data.get('participants', [])
+        && (request.resource.data.text == resource.data.text
+            || request.auth.uid == resource.data.senderId);
       allow delete: if isAdmin();
     }
 

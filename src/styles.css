@@ -698,6 +698,38 @@ a, button, input, select, textarea, label { touch-action: manipulation; }
   .reaction-btn { min-width: 40px; min-height: 40px; }
 }
 
+/* ------------------------------------------------ Messenger Complete Pack
+   Facebook-parity messaging: unsend tombstones, big emoji, forwarded
+   labels, per-message and per-conversation menus, the active-now rail,
+   shared-media grid and the thread quick-emoji button. */
+.msg-unsent { background: transparent; border: 1px dashed var(--border); color: var(--muted); box-shadow: none; font-size: .9rem; }
+.msg-bubble-bare { background: transparent !important; box-shadow: none !important; color: var(--text); padding: 2px 6px; }
+.msg-big-emoji { font-size: 2.3rem; line-height: 1.15; }
+.msg-forwarded { display: block; font-size: .7rem; opacity: .75; margin-bottom: 2px; }
+/* Menus render in-flow under their anchor (like the reaction picker),
+   so they never clip against the thread edges on a phone. */
+.msg-menu { position: static; margin-top: 6px; box-shadow: var(--shadow-md); min-width: 190px; }
+.msg-row.mine .msg-menu { align-self: flex-end; }
+.conv-item-wrap { display: flex; flex-wrap: wrap; align-items: center; }
+.conv-item-wrap > .conv-item { flex: 1; }
+.conv-menu-btn { flex: none; }
+.conv-menu { position: static; flex-basis: 100%; margin: 2px 0 6px auto; width: fit-content; min-width: 200px; box-shadow: var(--shadow-md); }
+.conv-filters { margin: 2px 0 6px; }
+.muted-badge { background: var(--surface-3); color: var(--muted); }
+.active-rail { display: flex; gap: 10px; overflow-x: auto; padding: 4px 2px 10px; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.active-rail::-webkit-scrollbar { display: none; }
+.active-person { position: relative; flex: none; width: 58px; background: none; border: none; cursor: pointer; color: var(--text); display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 0; font: inherit; }
+.active-dot { position: absolute; top: 31px; right: 8px; width: 12px; height: 12px; border-radius: 50%; background: #31a24c; border: 2px solid var(--surface); }
+.active-name { font-size: .7rem; font-weight: 600; max-width: 58px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.media-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+.media-thumb { padding: 0; border: none; background: none; cursor: pointer; }
+.media-thumb img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; display: block; }
+.thread-emoji-btn { font-size: 1.3rem; padding: .3rem .55rem; line-height: 1; }
+.emoji-swatch { width: 34px; height: 34px; border-radius: 50%; border: 2px solid var(--border); background: var(--surface-2); cursor: pointer; font-size: 1rem; display: grid; place-items: center; padding: 0; transition: transform .12s ease, box-shadow .15s ease, border-color .15s ease; }
+.emoji-swatches { display: flex; gap: 8px; flex-wrap: wrap; }
+.emoji-swatch:hover { transform: scale(1.12); }
+.emoji-swatch.active { border-color: var(--brand); box-shadow: 0 0 0 2px var(--brand); }
+
 /* ------------------------------------------------ Mobile pack 2
    99% of users are on phones (Limon, 2026-11-20): a full sweep of
    every view for narrow-screen overflow and squeeze. */
