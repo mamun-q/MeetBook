@@ -755,7 +755,7 @@ document.addEventListener('click', async (e) => {
       await handle(api.setConversationFlag(actEl.dataset.id, 'pinnedBy', on), on ? t('chatPinned') : t('chatUnpinned'));
       break;
     }
-    case 'accept-request': await handle(api.acceptConversationRequest(actEl.dataset.id), t('requestAccepted')); break;
+    case 'accept-msg-request': await handle(api.acceptConversationRequest(actEl.dataset.id), t('requestAccepted')); break;
     case 'vanish-toggle': {
       const conv = d.conversations.find((c) => c.id === actEl.dataset.conv);
       const on = !conv?.vanish;

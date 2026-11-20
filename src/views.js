@@ -930,7 +930,7 @@ export function messagesView(d, meUser, activeConvId = '') {
         ${active.msgs.map((m) => messageHtml(m, meUser, byId, active.isGroup, active.conv)).join('') || '<p class="muted center">No messages yet. Say hello 👋</p>'}
       </div>
       <div class="typing-row" id="typing-row">${typingIndicatorHtml(active.conv, meUser, byId)}</div>
-      ${active.request ? `<div class="request-banner">📩 <span class="grow"><b>${escapeHtml(active.other?.name || '')}</b> ${t('requestHint')}</span><button class="btn btn-primary btn-sm" data-act="accept-request" data-id="${active.conv.id}">${t('acceptRequest')}</button></div>` : ''}
+      ${active.request ? `<div class="request-banner">📩 <span class="grow"><b>${escapeHtml(active.other?.name || '')}</b> ${t('requestHint')}</span><button class="btn btn-primary btn-sm" data-act="accept-msg-request" data-id="${active.conv.id}">${t('acceptRequest')}</button></div>` : ''}
       ${active.conv.vanish ? `<div class="vanish-banner">🫥 ${t('vanishBanner')}</div>` : ''}
       <div class="composer-wrap">
         <div id="mention-menu" class="mention-menu hidden"></div>

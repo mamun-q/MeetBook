@@ -162,4 +162,15 @@ describe('messagesView — useful pack rendering', () => {
     expect(html).toContain('msg-mention');
     expect(html).toContain('id="mention-menu"');
   });
+  it('the request banner uses its own action name (never the friend-request one)', async () => {
+    // Regression guard: data-act="accept-request" belongs to FRIEND
+    // requests (respondFriendRequest). The message-request banner must
+    // not reuse it — doing so once broke every friend-request Accept.
+    const meUser = api.data().users.find((u) => u.id === 'u_ayesha');
+    const stranger = api.data().users.find((u) => u.id !== 'u_ayesha' && !u.isBot && !V.friendIdsOfData(api.data(), 'u_ayesha').has(u.id));
+    const conv = await api.openConversation(stranger.id);
+    const html = V.messagesView(api.data(), meUser, conv.id);
+    expect(html).toContain('data-act="accept-msg-request"');
+    expect(html).not.toContain('data-act="accept-request"');
+  });
 });
