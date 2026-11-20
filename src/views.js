@@ -55,6 +55,7 @@ export function authView(mode = 'login') {
   return `
   <div class="auth-wrap">
     <div class="auth-hero">
+      <img class="auth-logo" src="./icons/icon-192.png" alt="MeetBook logo" />
       <div class="logo-big">MeetBook</div>
       <p>${t('authTagline')}</p>
       <ul class="auth-feats">

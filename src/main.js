@@ -105,7 +105,7 @@ function headerHtml(d, user) {
   // the title attribute covers every width.
   const navItem = (href, icon, label, badge = 0) => `<a class="topnav-link" href="${href}" title="${label}">${icon}${badge ? `<span class="nav-badge">${badge}</span>` : ''}<span class="nav-label">${label}</span></a>`;
   return `<header class="topbar">
-    <a class="brand" href="#/">${escapeHtml(d.config?.platformName || 'MeetBook')}</a>
+    <a class="brand" href="#/"><img class="brand-logo" src="./icons/icon-192.png" alt="" /><span class="brand-name">${escapeHtml(d.config?.platformName || 'MeetBook')}</span></a>
     <form id="search-form" class="search-box" role="search">
       <input name="q" placeholder="${t('searchPlaceholder')}" autocomplete="off" />
       <button class="btn btn-primary btn-sm" type="submit">${t('search')}</button>

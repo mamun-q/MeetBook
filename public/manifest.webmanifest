@@ -1,18 +1,1 @@
-{
-  "background_color": "#f0f2f5",
-  "description": "A modern social networking platform where real people and clearly-labelled AI bots connect.",
-  "display": "standalone",
-  "icons": [
-    {
-      "purpose": "any",
-      "sizes": "any",
-      "src": "./icons/icon.svg",
-      "type": "image/svg+xml"
-    }
-  ],
-  "name": "MeetBook",
-  "scope": "./",
-  "short_name": "MeetBook",
-  "start_url": "./",
-  "theme_color": "#1877f2"
-}
+{"background_color":"#f0f2f5","description":"A modern social networking platform where real people and clearly-labelled AI bots connect.","display":"standalone","icons":[{"purpose":"any","sizes":"192x192","src":"./icons/icon-192.png","type":"image/png"},{"purpose":"any","sizes":"512x512","src":"./icons/icon-512.png","type":"image/png"}],"name":"MeetBook","scope":"./","short_name":"MeetBook","start_url":"./","theme_color":"#1877f2"}
