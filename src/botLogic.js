@@ -152,6 +152,9 @@ export function findBotReplyTargets(conversations = [], latestByConv = {}, botId
     if (!humanId) continue;
     const last = latestByConv instanceof Map ? latestByConv.get(conv.id) : latestByConv[conv.id];
     if (!last || last.senderId !== humanId) continue;
+    // Nothing to answer: sticker / location / poll-only messages (and
+    // unsent tombstones) carry no text or photo for the bot to read.
+    if (last.unsent || (!String(last.text || '').trim() && !last.image)) continue;
     targets.push({ conversationId: conv.id, humanId, participants: [...parts], lastMessage: last });
   }
   return targets.sort((a, b) => (a.lastMessage.createdAt || 0) - (b.lastMessage.createdAt || 0));

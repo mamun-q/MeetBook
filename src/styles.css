@@ -727,6 +727,26 @@ a, button, input, select, textarea, label { touch-action: manipulation; }
 .thread-emoji-btn { font-size: 1.3rem; padding: .3rem .55rem; line-height: 1; }
 .emoji-swatch { width: 34px; height: 34px; border-radius: 50%; border: 2px solid var(--border); background: var(--surface-2); cursor: pointer; font-size: 1rem; display: grid; place-items: center; padding: 0; transition: transform .12s ease, box-shadow .15s ease, border-color .15s ease; }
 .emoji-swatches { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ---------------------------------------------------------- Fun Pack
+   Stickers, location cards, chat polls and the extended reaction grid. */
+.msg-sticker { font-size: 3.4rem; line-height: 1.1; animation: sticker-pop .3s ease; }
+@keyframes sticker-pop { from { transform: scale(.4); opacity: 0; } }
+.sticker-panel { border-top: 1px solid var(--border); padding: 10px 12px; max-height: 250px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.sticker-pack h5 { margin: 0 0 4px; font-size: .78rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.sticker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(46px, 1fr)); gap: 2px; }
+.sticker-btn { font-size: 1.9rem; background: none; border: none; cursor: pointer; padding: 5px; border-radius: 10px; transition: transform .12s ease, background .12s ease; }
+.sticker-btn:hover { transform: scale(1.18); background: var(--surface-2); }
+.msg-location { display: flex; gap: 10px; align-items: center; text-decoration: none; background: linear-gradient(135deg, #34a853, #1877f2); color: #fff; border-radius: 12px; padding: 10px 12px; min-width: min(230px, 60vw); }
+.msg-location small { display: block; opacity: .88; font-size: .75rem; }
+.msg-location-pin { font-size: 1.5rem; }
+.chat-poll { display: flex; flex-direction: column; gap: 6px; min-width: min(240px, 62vw); }
+.chat-poll-option { position: relative; overflow: hidden; text-align: left; border: 1px solid var(--border); background: var(--surface-2); color: inherit; border-radius: 10px; padding: 7px 10px; cursor: pointer; display: flex; gap: 8px; align-items: center; font: inherit; }
+.chat-poll-fill { position: absolute; top: 0; bottom: 0; left: 0; background: rgba(24, 119, 242, .18); }
+.chat-poll-option.voted { border-color: var(--brand); font-weight: 600; }
+.chat-poll-text { flex: 1; position: relative; overflow-wrap: anywhere; }
+.chat-poll-count { position: relative; font-size: .78rem; color: var(--muted); white-space: nowrap; }
+.msg-picker-more { flex-wrap: wrap; max-width: 248px; }
 .emoji-swatch:hover { transform: scale(1.12); }
 .emoji-swatch.active { border-color: var(--brand); box-shadow: 0 0 0 2px var(--brand); }
 

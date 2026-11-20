@@ -7,7 +7,7 @@ import {
   getState, mutate, findUser, userByUsername, friendIdsOf, blockedIdsOf, notify, resetDemo
 } from './store.js';
 import { firebaseReady, auth, db, storage, googleProvider } from './firebase.js';
-import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme, canEditMessage } from './utils.js';
+import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme, canEditMessage, chatPollVote } from './utils.js';
 import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay } from './botLogic.js';
 import { canAccessBotSecrets, botModel } from './gemini.js';
 import { providerById, resolveAiConfig, generateRouted, testProvider as testAiProvider, getLastRoutedFailure, resetLastRoutedFailure, anyProviderConfigured, dhakaDayKey, normaliseUsageMap, usageTotals } from './aiProviders.js';
@@ -1541,7 +1541,7 @@ export async function createGroupConversation({ title, memberIds }) {
   return full;
 }
 
-export async function sendMessage(conversationId, { text, image, audio = '', replyToId = '', forwarded = false }) {
+export async function sendMessage(conversationId, { text, image, audio = '', replyToId = '', forwarded = false, sticker = '', location = null, poll = null }) {
   const user = me(); if (!user) throw new Error('Sign in first.');
   const conv = data().conversations.find((c) => c.id === conversationId);
   // Participants are DENORMALIZED onto the message: the messages read
@@ -1551,7 +1551,12 @@ export async function sendMessage(conversationId, { text, image, audio = '', rep
   // capped at ~60s / ~700KB by the composer before it gets here).
   const msg = { conversationId, participants: conv ? [...conv.participants] : [], senderId: user.id, text: String(text || '').trim(), image: image || '', audio: audio || '', createdAt: Date.now(), status: 'sent', readBy: [user.id] };
   if (forwarded) msg.forwarded = true;
-  if (!msg.text && !msg.image && !msg.audio) throw new Error('Message cannot be empty.');
+  // Fun Pack payloads: a sticker (one big emoji), a shared location
+  // pin, or a chat poll. Each is a complete message on its own.
+  if (sticker) msg.sticker = String(sticker);
+  if (location) msg.location = { lat: Number(location.lat), lng: Number(location.lng) };
+  if (poll) msg.poll = poll;
+  if (!msg.text && !msg.image && !msg.audio && !msg.sticker && !msg.location && !msg.poll) throw new Error('Message cannot be empty.');
   // Reply/quote (Chat Pack): snapshot the quoted message onto the new
   // one — its id, its author's name and a ≤120-char snippet — but only
   // when the original really belongs to this conversation.
@@ -1561,7 +1566,10 @@ export async function sendMessage(conversationId, { text, image, audio = '', rep
     if (snap) Object.assign(msg, snap);
   }
   const others = (conv?.participants || []).filter((p) => p !== user.id);
-  const noteText = msg.audio && !msg.text ? `${user.name} sent you a voice message.` : `${user.name} sent you a message.`;
+  const noteText = msg.sticker ? `${user.name} sent you a sticker.`
+    : msg.location ? `${user.name} shared their location with you.`
+    : msg.poll ? `${user.name} created a poll in your chat.`
+    : msg.audio && !msg.text ? `${user.name} sent you a voice message.` : `${user.name} sent you a message.`;
   if (firebaseReady) {
     const ref = await addDoc(collection(db, 'messages'), msg);
     // Mirror my own message at once (same id the listener will deliver):
@@ -1755,8 +1763,8 @@ export async function forwardMessage(messageId, targetConversationId) {
   if (!src || src.unsent) throw new Error('Message not found.');
   const target = data().conversations.find((c) => c.id === targetConversationId);
   if (!target || !target.participants?.includes(user.id)) throw new Error('Conversation not found.');
-  if (!src.text && !src.image) throw new Error('Only text and photo messages can be forwarded.');
-  return sendMessage(targetConversationId, { text: src.text || '', image: src.image || '', forwarded: true });
+  if (!src.text && !src.image && !src.sticker) throw new Error('Only text, photo and sticker messages can be forwarded.');
+  return sendMessage(targetConversationId, { text: src.text || '', image: src.image || '', sticker: src.sticker || '', forwarded: true });
 }
 
 // Archive / mute are per-user: uid arrays on the conversation doc
@@ -1821,6 +1829,28 @@ async function patchConversationFields(conversationId, patch, prevKeys) {
     return;
   }
   mutate((s) => { const c = s.conversations.find((x) => x.id === conversationId); if (c) Object.assign(c, patch); });
+}
+
+export async function voteChatPoll(messageId, optionId) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const msg = data().messages.find((m) => m.id === messageId);
+  if (!msg?.poll || msg.unsent) throw new Error('Poll not found.');
+  const next = chatPollVote(msg.poll, optionId, user.id);
+  await patchMessageFields(messageId, { poll: next }, ['poll']);
+  return next;
+}
+
+// Nicknames live on the conversation doc (nicknames: { uid: name });
+// any participant may set one for anyone in the chat, Messenger-style.
+export async function setNickname(conversationId, userId, nickname) {
+  const user = me(); if (!user) throw new Error('Sign in first.');
+  const conv = data().conversations.find((c) => c.id === conversationId);
+  if (!conv?.participants?.includes(user.id) || !conv.participants?.includes(userId)) throw new Error('Conversation not found.');
+  const next = { ...(conv.nicknames || {}) };
+  const clean = String(nickname || '').trim().slice(0, 40);
+  if (clean) next[userId] = clean; else delete next[userId];
+  await patchConversationFields(conversationId, { nicknames: next }, ['nicknames']);
+  return next;
 }
 
 export async function renameGroupConversation(conversationId, title) {

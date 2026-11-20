@@ -1132,3 +1132,47 @@ export function isMessageVisibleTo(message, userId) {
 export function isConversationFlagged(conv, flag, userId) {
   return (conv?.[flag] || []).includes(userId);
 }
+
+// ------------------------------------------------------------ Fun Pack
+// Sticker packs: curated emoji sets sent as sticker messages and
+// rendered large, Messenger-style. Emoji glyphs need no image assets,
+// so packs work offline and cost nothing to host.
+export const STICKER_PACKS = [
+  { id: 'faces', label: 'Faces', stickers: ['😀', '😂', '🤣', '😍', '🥳', '😎', '🤯', '🥺'] },
+  { id: 'love', label: 'Love', stickers: ['❤️', '💖', '💘', '😘', '🥰', '💌', '🌹', '💍'] },
+  { id: 'animals', label: 'Animals', stickers: ['🐶', '🐱', '🦊', '🐼', '🦁', '🐸', '🦄', '🐙'] },
+  { id: 'food', label: 'Food', stickers: ['🍕', '🍔', '🍰', '🍩', '☕', '🧋', '🍓', '🍉'] },
+  { id: 'party', label: 'Party', stickers: ['🎉', '🎂', '🎁', '🎈', '🥂', '🎶', '🏆', '🚀'] }
+];
+
+// Extended reaction set behind the picker's "more" grid — any of these
+// can be a reaction, not just the six quick ones in MESSAGE_REACTIONS.
+export const REACTION_EMOJI_SET = ['❤️', '😂', '😮', '😢', '😡', '👍', '👎', '🔥', '🎉', '😍', '🥰', '😎', '🤔', '😴', '🙏', '👏', '💯', '😱'];
+
+// Chat polls ride on a message: poll = { question, options: [{ id,
+// text, votes: [uid] }] }. Voting is one-per-person: picking another
+// option moves the vote, picking the same option again withdraws it.
+export function chatPollVote(poll, optionId, userId) {
+  if (!poll || !Array.isArray(poll.options)) return poll;
+  const options = poll.options.map((o) => ({ ...o, votes: (o.votes || []).filter((v) => v !== userId) }));
+  const target = options.find((o) => o.id === optionId);
+  const hadVoted = (poll.options.find((o) => o.id === optionId)?.votes || []).includes(userId);
+  if (target && !hadVoted) target.votes = [...target.votes, userId];
+  return { ...poll, options };
+}
+
+export function chatPollTotal(poll) {
+  return (poll?.options || []).reduce((sum, o) => sum + (o.votes || []).length, 0);
+}
+
+// Per-conversation nicknames: conv.nicknames = { userId: nickname },
+// set by any participant and visible to everyone in the chat.
+export function nicknameFor(conv, userId, fallback = '') {
+  const nick = conv?.nicknames?.[userId];
+  return (typeof nick === 'string' && nick.trim()) ? nick : fallback;
+}
+
+export function mapsUrl(location) {
+  if (!location) return '#';
+  return `https://www.google.com/maps?q=${location.lat},${location.lng}`;
+}

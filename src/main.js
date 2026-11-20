@@ -756,6 +756,27 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'msg-react': await handle(api.toggleMessageReaction(actEl.dataset.id, actEl.dataset.emoji)); break;
+    // ---- Fun Pack: stickers, location, chat polls, any-emoji reactions, nicknames
+    case 'react-more': { document.querySelectorAll('.msg-picker-more').forEach((p) => { if (p.id !== `msg-picker-more-${actEl.dataset.id}`) p.classList.add('hidden'); }); document.getElementById(`msg-picker-more-${actEl.dataset.id}`)?.classList.toggle('hidden'); break; }
+    case 'sticker-toggle': { const panel = document.getElementById('sticker-panel'); panel?.classList.toggle('hidden'); if (panel && !panel.classList.contains('hidden')) scrollThread(); break; }
+    case 'send-sticker': { const convId = document.getElementById('message-form')?.dataset.conv; if (convId) { await handle(api.sendMessage(convId, { sticker: actEl.dataset.emoji })); render(); scrollThread(); } break; }
+    case 'send-location': {
+      const convId = document.getElementById('message-form')?.dataset.conv;
+      if (!convId) break;
+      if (!navigator.geolocation) { toast(t('locationUnavailable'), 'error'); break; }
+      navigator.geolocation.getCurrentPosition(async (pos) => {
+        await handle(api.sendMessage(convId, { location: { lat: pos.coords.latitude, lng: pos.coords.longitude } }), t('locationShared'));
+        render(); scrollThread();
+      }, () => toast(t('locationUnavailable'), 'error'), { timeout: 10000, maximumAge: 60000 });
+      break;
+    }
+    case 'poll-open': openModal(`<h3>📊 ${t('createPoll')}</h3><form id="chat-poll-form" data-conv="${actEl.dataset.conv}" class="stack"><input name="question" placeholder="${t('pollQuestion')}" maxlength="120" required /><input name="option1" placeholder="${t('pollOption')} 1" maxlength="60" required /><input name="option2" placeholder="${t('pollOption')} 2" maxlength="60" required /><input name="option3" placeholder="${t('pollOption')} 3 (${t('optional')})" maxlength="60" /><input name="option4" placeholder="${t('pollOption')} 4 (${t('optional')})" maxlength="60" /><div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">${t('createPoll')}</button></div></form>`); break;
+    case 'vote-poll': await handle(api.voteChatPoll(actEl.dataset.id, actEl.dataset.option)); break;
+    case 'set-nickname': {
+      const d = api.data(); const conv = d.conversations.find((c) => c.id === actEl.dataset.conv); const target = d.users.find((u) => u.id === actEl.dataset.id);
+      openModal(`<h3>🏷️ ${t('setNickname')}</h3><form id="nickname-form" data-conv="${actEl.dataset.conv}" data-user="${actEl.dataset.id}" class="stack"><label>${escapeHtml(target?.name || '')}<input name="nickname" value="${escapeHtml(conv?.nicknames?.[actEl.dataset.id] || '')}" placeholder="${escapeHtml(target?.name || '')}" maxlength="40" /></label><p class="muted small">${t('nicknameHint')}</p><div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">Save</button></div></form>`);
+      break;
+    }
     case 'pin-message': { const pinned = await handle(api.togglePinMessage(actEl.dataset.id)); if (pinned !== null) toast(pinned ? t('messagePinned') : t('messageUnpinned'), 'success'); break; }
     // ---- Messenger Complete Pack: per-message menu, edit, unsend, hide, forward
     case 'msg-menu': {
@@ -1317,6 +1338,21 @@ document.addEventListener('submit', async (e) => {
   }
   if (form.id === 'edit-message-form') {
     const r = await handle(api.editMessage(form.dataset.id, String(fd.get('text') || '')), t('messageEdited'));
+    if (r) closeModal();
+    return;
+  }
+  if (form.id === 'chat-poll-form') {
+    const question = String(fd.get('question') || '').trim();
+    const options = ['option1', 'option2', 'option3', 'option4'].map((k) => String(fd.get(k) || '').trim()).filter(Boolean)
+      .map((text, i) => ({ id: `o${i + 1}`, text, votes: [] }));
+    if (question && options.length >= 2) {
+      const r = await handle(api.sendMessage(form.dataset.conv, { poll: { question, options } }), t('pollCreated'));
+      if (r) { closeModal(); scrollThread(); }
+    }
+    return;
+  }
+  if (form.id === 'nickname-form') {
+    const r = await handle(api.setNickname(form.dataset.conv, form.dataset.user, String(fd.get('nickname') || '')), t('nicknameSet'));
     if (r) closeModal();
     return;
   }

@@ -1,7 +1,7 @@
 // HTML generators for every route. Pure string builders: they read the shared
 // dataset (api.data()) and never touch the DOM directly — main.js renders
 // and binds events centrally.
-import { escapeHtml, timeAgo, canViewPost, canViewGroup, canViewGroupPost, isGroupMember, searchByName, truncate, paginate, groupStoriesByAuthor, canViewStory, storyBackgroundCss, STORY_BACKGROUNDS, memoriesFor, upcomingEvents, canViewEvent, averageRating, FEELINGS, plural, mutualFriendCount, isStaff, canModerate, isAdminRole, accountStatus, canManageUser, canChangeRole, ASSIGNABLE_ROLES, platformStats, analyticsSeries, spamSuspects, reportStatus, reportCategory, reportNeedsAttention, countPostComments, botConversationSummaries, recentClientErrors, collapseDuplicateNotifications, REPORT_CATEGORIES, REPORT_OUTCOMES, typingUserIds, reactionChips, pinnedMessages, messageSnippet, chatTheme, CHAT_THEMES, MESSAGE_REACTIONS, reviewText, isEmojiOnlyText, canEditMessage, isMessageVisibleTo, isConversationFlagged } from './utils.js';
+import { escapeHtml, timeAgo, canViewPost, canViewGroup, canViewGroupPost, isGroupMember, searchByName, truncate, paginate, groupStoriesByAuthor, canViewStory, storyBackgroundCss, STORY_BACKGROUNDS, memoriesFor, upcomingEvents, canViewEvent, averageRating, FEELINGS, plural, mutualFriendCount, isStaff, canModerate, isAdminRole, accountStatus, canManageUser, canChangeRole, ASSIGNABLE_ROLES, platformStats, analyticsSeries, spamSuspects, reportStatus, reportCategory, reportNeedsAttention, countPostComments, botConversationSummaries, recentClientErrors, collapseDuplicateNotifications, REPORT_CATEGORIES, REPORT_OUTCOMES, typingUserIds, reactionChips, pinnedMessages, messageSnippet, chatTheme, CHAT_THEMES, MESSAGE_REACTIONS, reviewText, isEmojiOnlyText, canEditMessage, isMessageVisibleTo, isConversationFlagged, STICKER_PACKS, REACTION_EMOJI_SET, chatPollTotal, nicknameFor, mapsUrl } from './utils.js';
 import { botModel } from './gemini.js';
 import { cldImg } from './cloudinary.js';
 import { AI_PROVIDERS, providerById, resolveAiConfig, usageTotals } from './aiProviders.js';
@@ -824,12 +824,12 @@ export function messagesView(d, meUser, activeConvId = '') {
       const msgs = d.messages.filter((m) => m.conversationId === c.id && isMessageVisibleTo(m, meUser.id)).sort((a, b) => a.createdAt - b.createdAt);
       const last = msgs[msgs.length - 1];
       const unread = msgs.filter((m) => m.senderId !== meUser.id && !(m.readBy || []).includes(meUser.id)).length;
-      const title = isGroup ? (c.title || t('groupChat')) : (byId[otherId]?.name || 'Unknown');
+      const title = isGroup ? (c.title || t('groupChat')) : nicknameFor(c, otherId, byId[otherId]?.name || 'Unknown');
       const avatarUser = isGroup ? { name: title, username: title, avatar: c.photo || '' } : byId[otherId];
       let preview = 'Say hello';
       if (last?.unsent) preview = `🚫 ${t('messageUnsent')}`;
-      else if (last) preview = last.audio && !last.text ? `🎤 ${t('voiceMessage')}` : (last.text || (last.image ? '📷 Photo' : 'Say hello'));
-      if (isGroup && last && last.senderId !== meUser.id && !last.unsent) preview = `${(byId[last.senderId]?.name || '').split(' ')[0]}: ${preview}`;
+      else if (last) preview = last.audio && !last.text ? `🎤 ${t('voiceMessage')}` : last.sticker ? `🎨 ${t('sticker')}` : last.location ? `📍 ${t('sharedLocation')}` : last.poll ? `📊 ${t('poll')}: ${last.poll.question}` : (last.text || (last.image ? '📷 Photo' : 'Say hello'));
+      if (isGroup && last && last.senderId !== meUser.id && !last.unsent) preview = `${nicknameFor(c, last.senderId, (byId[last.senderId]?.name || '').split(' ')[0])}: ${preview}`;
       const archived = isConversationFlagged(c, 'archivedBy', meUser.id);
       const muted = isConversationFlagged(c, 'mutedBy', meUser.id);
       return { conv: c, isGroup, other: byId[otherId], title, avatarUser, searchText: title.toLowerCase(), last, unread, msgs, preview, archived, muted };
@@ -886,6 +886,10 @@ export function messagesView(d, meUser, activeConvId = '') {
           <div class="emoji-swatches">${['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '🎉', '😍', '👏', '💯', '🌙'].map((e) => `<button type="button" class="emoji-swatch ${(active.conv.emoji || '👍') === e ? 'active' : ''}" data-act="set-conv-emoji" data-conv="${active.conv.id}" data-emoji="${e}" aria-label="${t('chatEmoji')} ${e}">${e}</button>`).join('')}</div>
           <p class="muted small">${t('chatEmojiHint')}</p>
         </div>
+        <div class="conv-info-section"><h4>🏷️ ${t('nicknames')}</h4>
+          ${active.conv.participants.map((id) => `<div class="row gap-sm"><span class="grow row gap-sm">${avatarHtml(byId[id], 28)}<span>${escapeHtml(nicknameFor(active.conv, id, byId[id]?.name || ''))}${active.conv.nicknames?.[id] ? ` <span class="muted small">(${escapeHtml(byId[id]?.name || '')})</span>` : ''}</span></span><button class="btn btn-ghost btn-sm" data-act="set-nickname" data-conv="${active.conv.id}" data-id="${id}">${t('setNickname')}</button></div>`).join('')}
+          <p class="muted small">${t('nicknameHint')}</p>
+        </div>
         <div class="conv-info-section"><h4>🔍 ${t('searchInConversation')}</h4>
           <input id="conv-msg-search" class="conv-search" type="search" placeholder="${t('searchInConversation')}" autocomplete="off" data-conv="${active.conv.id}" aria-label="${t('searchInConversation')}" />
           <div id="conv-search-results"></div>
@@ -902,7 +906,7 @@ export function messagesView(d, meUser, activeConvId = '') {
         </div>`; })() : ''}
       </div>
       <div class="thread-body" id="thread-body" style="${theme.tint ? `background:${theme.tint};` : ''}${theme.bubble ? `--bubble-mine:${theme.bubble};` : ''}">
-        ${active.msgs.map((m) => messageHtml(m, meUser, byId, active.isGroup)).join('') || '<p class="muted center">No messages yet. Say hello 👋</p>'}
+        ${active.msgs.map((m) => messageHtml(m, meUser, byId, active.isGroup, active.conv)).join('') || '<p class="muted center">No messages yet. Say hello 👋</p>'}
       </div>
       <div class="typing-row" id="typing-row">${typingIndicatorHtml(active.conv, meUser, byId)}</div>
       <div class="composer-wrap">
@@ -910,6 +914,9 @@ export function messagesView(d, meUser, activeConvId = '') {
         <div id="message-preview" class="message-preview hidden"></div>`; })()}
         <form id="message-form" data-conv="${active.conv.id}" class="message-form">
           <input type="file" id="msg-image-input" name="image" accept="image/*" hidden />
+          <button type="button" class="btn btn-ghost btn-sm" data-act="sticker-toggle" title="${t('stickers')}" aria-label="${t('stickers')}">🎨</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-act="send-location" title="${t('shareLocation')}" aria-label="${t('shareLocation')}">📍</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-act="poll-open" data-conv="${active.conv.id}" title="${t('createPoll')}" aria-label="${t('createPoll')}">📊</button>
           <label class="btn btn-ghost btn-sm msg-attach" for="msg-image-input" title="${t('photo')}" aria-label="${t('photo')}">📷</label>
           <button type="button" class="btn btn-ghost btn-sm" data-act="emoji-toggle" title="Emoji" aria-label="Emoji">😊</button>
           <input name="text" placeholder="Type a message…" autocomplete="off" maxlength="2000" />
@@ -919,6 +926,9 @@ export function messagesView(d, meUser, activeConvId = '') {
         </form>
         <div id="emoji-panel" class="emoji-panel hidden">
           ${CHAT_EMOJIS.map((e) => `<button type="button" class="emoji-btn" data-emoji-insert="${e}" aria-label="Insert ${e}">${e}</button>`).join('')}
+        </div>
+        <div id="sticker-panel" class="sticker-panel hidden">
+          ${STICKER_PACKS.map((p) => `<div class="sticker-pack"><h5>${escapeHtml(p.label)}</h5><div class="sticker-grid">${p.stickers.map((e) => `<button type="button" class="sticker-btn" data-act="send-sticker" data-emoji="${e}" aria-label="${t('stickers')} ${e}">${e}</button>`).join('')}</div></div>`).join('')}
         </div>
         <div id="voice-ui" class="voice-ui hidden">
           <span class="voice-dot"></span><span id="voice-time" class="mono">0:00</span><span class="grow small">${t('recording')}…</span>
@@ -933,7 +943,7 @@ export function messagesView(d, meUser, activeConvId = '') {
 // Emoji set for the Messenger picker (~24 common ones).
 const CHAT_EMOJIS = ['😀', '😂', '🤣', '😍', '🥰', '😊', '😎', '🤔', '😴', '😢', '😮', '😅', '😭', '👍', '👏', '🙏', '❤️', '🔥', '🎉', '✨', '🌙', '☕', '🍰', '📷'];
 
-function messageHtml(m, meUser, byId, isGroup = false) {
+function messageHtml(m, meUser, byId, isGroup = false, conv = null) {
   const mine = m.senderId === meUser.id;
   // Unsent messages render as a tombstone for everyone (Messenger
   // Complete Pack): the content is gone, the thread keeps its shape.
@@ -953,14 +963,18 @@ function messageHtml(m, meUser, byId, isGroup = false) {
   return `<div class="msg-row ${mine ? 'mine' : ''}" id="msg-${m.id}">
     ${mine ? '' : avatarHtml(byId[m.senderId], 28)}
     <div class="msg-col">
-    <div class="msg-bubble ${mine ? 'mine' : ''}${bigEmoji ? ' msg-bubble-bare' : ''}">
-      ${isGroup && !mine ? `<span class="msg-sender">${escapeHtml(byId[m.senderId]?.name || '')}</span>` : ''}
+    <div class="msg-bubble ${mine ? 'mine' : ''}${bigEmoji || m.sticker ? ' msg-bubble-bare' : ''}">
+      ${isGroup && !mine ? `<span class="msg-sender">${escapeHtml(nicknameFor(conv, m.senderId, byId[m.senderId]?.name || ''))}</span>` : ''}
       ${m.forwarded ? `<span class="msg-forwarded">↪️ ${t('forwarded')}</span>` : ''}
       ${m.replyToId ? `<button type="button" class="msg-quote" data-act="jump-message" data-id="${m.replyToId}"><b>${escapeHtml(m.replyToName || '')}</b><span>${escapeHtml(m.replyToText || '')}</span></button>` : ''}
       ${m.image ? `<img class="msg-image" src="${escapeHtml(cldImg(m.image, 800))}" alt="Shared photo" loading="lazy" decoding="async" />` : ''}
       ${m.audio ? `<audio class="msg-audio" controls preload="metadata" src="${escapeHtml(m.audio)}"></audio>` : ''}
+      ${m.sticker ? `<p class="msg-sticker">${escapeHtml(m.sticker)}</p>` : ''}
+      ${m.location ? `<a class="msg-location" href="${escapeHtml(mapsUrl(m.location))}" target="_blank" rel="noopener noreferrer"><span class="msg-location-pin">📍</span><span class="grow"><b>${t('sharedLocation')}</b><small>${Number(m.location.lat).toFixed(5)}, ${Number(m.location.lng).toFixed(5)} · ${t('openInMaps')}</small></span></a>` : ''}
+      ${m.poll ? (() => { const total = chatPollTotal(m.poll); return `<div class="chat-poll"><b>📊 ${escapeHtml(m.poll.question || '')}</b>${(m.poll.options || []).map((o) => { const pct = total ? Math.round((o.votes || []).length / total * 100) : 0; const voted = (o.votes || []).includes(meUser.id); return `<button type="button" class="chat-poll-option ${voted ? 'voted' : ''}" data-act="vote-poll" data-id="${m.id}" data-option="${o.id}"><span class="chat-poll-fill" style="width:${pct}%"></span><span class="chat-poll-text">${voted ? '✓ ' : ''}${escapeHtml(o.text)}</span><span class="chat-poll-count">${(o.votes || []).length} · ${pct}%</span></button>`; }).join('')}<span class="muted small">${total} ${t('votes')}</span></div>`; })() : ''}
       ${m.text ? `<p${bigEmoji ? ' class="msg-big-emoji"' : ''}>${escapeHtml(m.text)}</p>` : ''}
-      <div class="msg-picker hidden" id="msg-picker-${m.id}">${MESSAGE_REACTIONS.map((e) => `<button type="button" class="emoji-btn" data-act="msg-react" data-id="${m.id}" data-emoji="${e}" aria-label="${t('reactToMessage')} ${e}">${e}</button>`).join('')}</div>
+      <div class="msg-picker hidden" id="msg-picker-${m.id}">${MESSAGE_REACTIONS.map((e) => `<button type="button" class="emoji-btn" data-act="msg-react" data-id="${m.id}" data-emoji="${e}" aria-label="${t('reactToMessage')} ${e}">${e}</button>`).join('')}<button type="button" class="emoji-btn" data-act="react-more" data-id="${m.id}" title="${t('moreReactions')}" aria-label="${t('moreReactions')}">➕</button></div>
+      <div class="msg-picker msg-picker-more hidden" id="msg-picker-more-${m.id}">${REACTION_EMOJI_SET.map((e) => `<button type="button" class="emoji-btn" data-act="msg-react" data-id="${m.id}" data-emoji="${e}" aria-label="${t('reactToMessage')} ${e}">${e}</button>`).join('')}</div>
       <span class="msg-foot"><span class="msg-meta">${m.pinned ? '📌 ' : ''}${timeAgo(m.createdAt)}${m.editedAt ? ` · ${t('edited')}` : ''} ${status}</span><span class="msg-actions"><button type="button" class="link-btn msg-act-btn" data-act="reply-message" data-id="${m.id}" title="${t('replyToMessage')}" aria-label="${t('replyToMessage')}">↩️</button><button type="button" class="link-btn msg-act-btn" data-act="msg-react-toggle" data-id="${m.id}" title="${t('reactToMessage')}" aria-label="${t('reactToMessage')}">😊</button><button type="button" class="link-btn msg-act-btn ${m.pinned ? 'active' : ''}" data-act="pin-message" data-id="${m.id}" title="${t(m.pinned ? 'unpinMessage' : 'pinMessage')}" aria-label="${t(m.pinned ? 'unpinMessage' : 'pinMessage')}">📌</button>${editable ? `<button type="button" class="link-btn msg-act-btn" data-act="edit-message" data-id="${m.id}" title="${t('editMessage')}" aria-label="${t('editMessage')}">✏️</button>` : ''}<button type="button" class="link-btn msg-act-btn" data-act="msg-menu" data-id="${m.id}" title="${t('messageOptions')}" aria-label="${t('messageOptions')}">⋯</button>${mine ? '' : `<button class="link-btn msg-report-btn" data-act="report-message" data-id="${m.id}" title="${t('report')}" aria-label="${t('report')}">🚩</button>`}</span></span>
     </div>
     <div class="menu msg-menu ${uiState.msgMenuFor === m.id ? '' : 'hidden'}" id="msg-menu-${m.id}">
