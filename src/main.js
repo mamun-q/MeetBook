@@ -131,6 +131,7 @@ function headerHtml(d, user) {
           <a href="#/events">📅 ${t('events')}</a>
           <a href="#/memories">🕰️ ${t('memories')}</a>
           <a href="#/settings">⚙️ ${t('settings')}</a>
+          ${isStaff(user) ? `<a href="#/admin">🛡️ ${t('adminPanel')}</a>` : ''}
           <a href="#/help">❓ ${t('help')}</a>
           <button data-act="logout">🚪 ${t('logout')}</button>
         </div>
