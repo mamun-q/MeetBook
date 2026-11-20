@@ -11,6 +11,7 @@ import { uid as genId, validateUsername, extractMentions, normaliseGroup, normal
 import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay } from './botLogic.js';
 import { canAccessBotSecrets, botModel } from './gemini.js';
 import { providerById, resolveAiConfig, generateRouted, testProvider as testAiProvider, getLastRoutedFailure, resetLastRoutedFailure, anyProviderConfigured, dhakaDayKey, normaliseUsageMap, usageTotals } from './aiProviders.js';
+import { isCloudinaryConfigured, uploadToCloudinary } from './cloudinary.js';
 
 // --- Firebase imports are dynamic-free static imports of the SDK ---------
 import {
@@ -567,7 +568,17 @@ export async function compressImageToDataUrl(file, maxBytes = 200 * 1024, maxDim
 export async function uploadImage(file, path) {
   if (!file) return '';
   if (!String(file.type || '').startsWith('image/')) throw new Error('Please choose an image file.');
-  // 1) Try Firebase Storage first (works once the project is on Blaze).
+  // 1) Cloudinary first when configured (free tier): the Firebase project is
+  //    on Spark, where Firebase Storage is unavailable, so Cloudinary is the
+  //    working hosted storage and Firestore then stores only the image URL.
+  if (isCloudinaryConfigured()) {
+    try {
+      return await uploadToCloudinary(file);
+    } catch (err) {
+      console.warn('Cloudinary upload failed, falling back:', err?.message || err);
+    }
+  }
+  // 2) Firebase Storage (works once the project is on Blaze).
   if (firebaseReady && storage) {
     try {
       const r = storageRef(storage, path);
@@ -583,8 +594,8 @@ export async function uploadImage(file, path) {
       console.warn('Firebase Storage unavailable, using compressed data-URL fallback:', err?.code || err);
     }
   }
-  // 2) Demo mode / Storage unavailable: compressed data URL stored locally
-  //    (demo store) or in the Firestore document (live mode).
+  // 3) Demo mode / all hosted storage unavailable: compressed data URL
+  //    stored locally (demo store) or in the Firestore document (live mode).
   return compressImageToDataUrl(file);
 }
 
