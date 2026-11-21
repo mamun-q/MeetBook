@@ -184,6 +184,15 @@ describe('live bot runner (Spark)', () => {
     expect(fake.get('botBrains', 'bot_nova').provider).toBe('template-fallback');
   });
 
+  it('Phase 3: cycle decisions are persisted to the per-bot history doc', async () => {
+    const doc = fake.get('botRunners', 'decisions_bot_nova');
+    expect(doc).toBeTruthy();
+    const actions = (doc.items || []).map((x) => x.action);
+    expect(actions).toContain('post');
+    expect(actions).toContain('message');
+    expect((doc.items || []).every((x) => typeof x.at === 'number' && x.at > 0)).toBe(true);
+  });
+
   it('Phase 2: the bot replies to a human comment on its own post', async () => {
     fake.remove('botSettings', 'counters'); // fresh counters
     stubFetchOk();

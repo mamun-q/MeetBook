@@ -2045,9 +2045,25 @@ function botTabPersonality(d, b) {
 
 function botTabMemory(d, b) {
   const memories = d.botMemories?.[b.id] || [];
+  // Phase 3: memories grouped by category (conversation / interest /
+  // experience / fact / everything else under General).
+  const cats = [
+    ['conversation', '💬 From conversations'],
+    ['interest', '⭐ Interests'],
+    ['experience', '🧭 Experiences'],
+    ['fact', '📌 Facts'],
+    ['general', '🗂 General']
+  ];
+  const known = new Set(cats.map(([k]) => k));
+  const catOf = (m) => (known.has(m.category) ? m.category : 'general');
+  const row = (m) => `<div class="row gap-sm"><span class="grow small">${m.pinned ? '📌 ' : ''}${escapeHtml(m.text)}</span><span class="muted small">${timeAgo(m.updatedAt || m.createdAt)}</span><button class="btn btn-ghost btn-sm" data-act="bot-memory-delete" data-bot="${b.id}" data-id="${m.id}">✕</button></div>`;
+  const sections = cats.map(([key, label]) => {
+    const items = memories.filter((m) => catOf(m) === key);
+    return items.length ? `<h4>${label} (${items.length})</h4>${items.map(row).join('')}` : '';
+  }).join('');
   return `<div class="card stack">
     <h3>🧾 ${t('tabMemory')} (${memories.length})</h3>
-    ${memories.map((m) => `<div class="row gap-sm"><span class="grow small">${m.pinned ? '📌 ' : ''}${escapeHtml(m.text)}</span><span class="muted small">${timeAgo(m.updatedAt || m.createdAt)}</span><button class="btn btn-ghost btn-sm" data-act="bot-memory-delete" data-bot="${b.id}" data-id="${m.id}">✕</button></div>`).join('') || '<p class="muted small">No memories yet.</p>'}
+    ${sections || '<p class="muted small">No memories yet.</p>'}
     <form class="row gap-sm" data-bot-memory-form="${b.id}"><input name="text" class="grow" placeholder="Add a memory for this bot…" maxlength="300" /><button class="btn btn-primary btn-sm" type="submit">Add</button></form>
   </div>`;
 }
@@ -2065,14 +2081,16 @@ function botTabActivity(d, b) {
   comments.sort((a, z) => (z.comment.createdAt || 0) - (a.comment.createdAt || 0));
   const replies = (d.messages || []).filter((m) => m.senderId === b.id).length;
   const acts = (d.botActivities || []).filter((a) => a.botId === b.id);
-  const empty = !posts.length && !comments.length && !acts.length && !replies;
+  const decisions = (d.botDecisions?.[b.id] || []).slice(-15).reverse();
+  const empty = !posts.length && !comments.length && !acts.length && !replies && !decisions.length;
   return `<div class="card stack">
     <h3>📜 ${t('tabActivity')}</h3>
     ${empty ? `<p class="muted">${t('noBotActivity')}</p>` : `
     <p class="small">${t('botRepliesLabel')}: <b>${replies}</b></p>
     ${posts.length ? `<h4>${t('recentBotPosts')}</h4>${posts.slice(0, 10).map((p) => `<p class="small">📝 ${escapeHtml(truncate(p.text || '', 140))} <span class="muted">${timeAgo(p.createdAt)}</span></p>`).join('')}` : ''}
     ${comments.length ? `<h4>${t('botCommentsLabel')}</h4>${comments.slice(0, 10).map(({ post, comment }) => `<p class="small">💬 ${escapeHtml(truncate(comment.text || '', 140))} <span class="muted">on ${escapeHtml(byId[post.authorId]?.name || '')}'s post · ${timeAgo(comment.createdAt)}</span></p>`).join('')}` : ''}
-    ${acts.length ? `<h4>Recent bot activity</h4>${acts.slice(0, 15).map((a) => `<p class="small">• ${escapeHtml(a.action)} — ${escapeHtml(a.detail || '')} <span class="muted">${timeAgo(a.createdAt)} · ${escapeHtml(a.status || '')}</span></p>`).join('')}` : ''}`}
+    ${acts.length ? `<h4>Recent bot activity</h4>${acts.slice(0, 15).map((a) => `<p class="small">• ${escapeHtml(a.action)} — ${escapeHtml(a.detail || '')} <span class="muted">${timeAgo(a.createdAt)} · ${escapeHtml(a.status || '')}</span></p>`).join('')}` : ''}
+    ${decisions.length ? `<h4>🧭 Decision history</h4>${decisions.map((x) => `<p class="small">• <b>${escapeHtml(x.action)}</b>${x.reason ? ` — ${escapeHtml(x.reason)}` : ''} <span class="muted">${timeAgo(x.at)}</span></p>`).join('')}` : ''}`}
   </div>`;
 }
 

@@ -25,7 +25,7 @@ import {
   normaliseBot, findBotReplyTargets, decideBotAction,
   templateBotMessageReply, generateTemplatePost, generateTemplateComment,
   emptyBotCounters, counterDayKey, botCountersForDay, memoryFromConversation,
-  pickBotCommentTarget, pickBotReplyTarget, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost
+  pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost
 } from '../src/botLogic.js';
 import {
   resolveAiConfig, generateRouted, normaliseUsageMap, usageTotals,
@@ -177,12 +177,14 @@ async function main() {
 
   resetLastRoutedFailure();
   const results = [];
+  const decisions = [];
+  const note = (bot, action, reason = '') => decisions.push({ botId: bot.id, action, reason });
   for (const bot of bots) {
     const c = { ...emptyBotCounters(), ...(counters[bot.id] || {}) };
     let targets = [];
-    try { targets = await findReplyTargets(bot); } catch (err) { results.push(`${bot.name} → DM scan error: ${err.message}`); }
+    try { targets = await findReplyTargets(bot); } catch (err) { results.push(`${bot.name} → DM scan error: ${err.message}`); note(bot, 'error', err.message); }
     if (!bot.active) {
-      if (targets.length) results.push(`${bot.name} → deactivated, ${targets.length} unanswered DM(s) waiting`);
+      if (targets.length) { results.push(`${bot.name} → deactivated, ${targets.length} unanswered DM(s) waiting`); note(bot, 'none', `deactivated — ${targets.length} unanswered DM(s) waiting`); }
       continue;
     }
     counters[bot.id] = c;
@@ -195,6 +197,7 @@ async function main() {
       // --- chat reply (one per cycle, messages/day cap is the gate) ---
       if (targets.length && c.messagesToday >= bot.limits.messagesPerDay) {
         results.push(`${bot.name} → ${targets.length} unanswered DM(s), daily message limit reached (${c.messagesToday}/${bot.limits.messagesPerDay})`);
+        note(bot, 'none', `daily message limit reached (${c.messagesToday}/${bot.limits.messagesPerDay}) — ${targets.length} unanswered DM(s)`);
       } else if (targets.length) {
         const target = targets[0];
         const fresh = await latestMessage(target.conversationId);
@@ -224,6 +227,7 @@ async function main() {
           await recordBotBrain(bot, gen.provider, gen.model);
           acted = true;
           results.push(`${bot.name} → message (via ${gen.provider})`);
+          note(bot, 'message', `via ${gen.provider}`);
         }
       }
 
@@ -242,7 +246,7 @@ async function main() {
           // Repeated a recent post — swap in a fresh template once;
           // if every variant repeats, skip the post entirely.
           const fresh = freshTemplatePost(bot, recentTexts);
-          if (!fresh) { results.push(`${bot.name} → skipped post (would repeat a recent post)`); gen = null; }
+          if (!fresh) { results.push(`${bot.name} → skipped post (would repeat a recent post)`); note(bot, 'none', 'skipped post (would repeat a recent post)'); gen = null; }
           else gen = { ...gen, text: fresh, provider: 'template', model: '' };
         }
         if (gen) {
@@ -259,6 +263,7 @@ async function main() {
         c.lastActionAt = Date.now();
         acted = true;
         results.push(`${bot.name} → post (via ${gen.provider})`);
+          note(bot, 'post', `via ${gen.provider}`);
         }
       } else if (decision.action === 'comment') {
         const postsSnap = await getDocs(query(collection(db, 'posts'), orderBy('createdAt', 'desc'), limit(30)));
@@ -291,6 +296,7 @@ async function main() {
               await recordBotBrain(bot, gen.provider, gen.model);
               acted = true;
               results.push(`${bot.name} → comment reply (via ${gen.provider})`);
+              note(bot, 'comment-reply', `via ${gen.provider}`);
             }
           }
         } else {
@@ -324,6 +330,7 @@ async function main() {
             await recordBotBrain(bot, gen.provider, gen.model);
             acted = true;
             results.push(`${bot.name} → comment (via ${gen.provider})`);
+            note(bot, 'comment', `via ${gen.provider}`);
           }
         }
         }
@@ -342,17 +349,37 @@ async function main() {
           c.lastActionAt = Date.now();
           acted = true;
           results.push(`${bot.name} → like`);
+          note(bot, 'like');
         }
       }
-      if (!acted && !targets.length) results.push(`${bot.name} → none (${decision.reason})`);
+      if (!acted && !targets.length) { results.push(`${bot.name} → none (${decision.reason})`); note(bot, 'none', decision.reason); }
     } catch (err) {
       results.push(`${bot.name} → error: ${err.message}`);
+      note(bot, 'error', err.message);
     }
   }
 
   // merge: true — deep-merges the counters map per bot instead of
   // overwriting the whole doc (last-writer-wins lost increments).
   await setDoc(doc(db, 'botSettings', 'counters'), { day, counters, updatedAt: Date.now() }, { merge: true });
+  // Phase 3: persist decision history (botRunners/decisions_<botId>,
+  // admin read/write; capped at 50 per bot). Best-effort per bot.
+  {
+    const byBot = new Map();
+    for (const dcn of decisions) {
+      if (!byBot.has(dcn.botId)) byBot.set(dcn.botId, []);
+      byBot.get(dcn.botId).push(dcn);
+    }
+    for (const [botId, entries] of byBot) {
+      try {
+        const ref = doc(db, 'botRunners', `decisions_${botId}`);
+        const snap = await getDoc(ref);
+        let items = snap.exists() ? (snap.data().items || []) : [];
+        for (const e of entries) items = appendBotDecision(items, { ...e, at: Date.now() });
+        await setDoc(ref, { botId, items, updatedAt: Date.now() }, { merge: true });
+      } catch { /* best-effort */ }
+    }
+  }
   if (aiUsage) {
     await setDoc(doc(db, 'botSecrets', 'config'), { aiUsage: { day: aiUsage.day, providers: aiUsage.providers }, updatedAt: Date.now() }, { merge: true });
   }

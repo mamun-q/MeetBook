@@ -217,6 +217,19 @@ export function flattenThread(post) {
   return out;
 }
 
+// --- Master Vision Phase 3: persisted decision history ----------------
+// One decision record per bot per cycle outcome (action + reason),
+// stored capped in a per-bot doc the Admin can inspect. Pure append
+// helper so every runner caps + shapes records identically.
+export function appendBotDecision(items = [], decision = {}, cap = 50) {
+  const entry = {
+    action: String(decision.action || 'none'),
+    reason: String(decision.reason || '').slice(0, 200),
+    at: Number(decision.at) || Date.now()
+  };
+  return [...(items || []), entry].slice(-cap);
+}
+
 export function pickBotReplyTarget(posts = [], bot = {}, botIds = new Set()) {
   const b = normaliseBot(bot || {});
   if (!b.id) return null;

@@ -8,7 +8,7 @@ import {
 } from './store.js';
 import { firebaseReady, auth, db, storage, googleProvider } from './firebase.js';
 import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme, canEditMessage, chatPollVote, VANISH_TTL_MS } from './utils.js';
-import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, pickBotReplyTarget, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost } from './botLogic.js';
+import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost } from './botLogic.js';
 import { canAccessBotSecrets, botModel } from './gemini.js';
 import { providerById, resolveAiConfig, generateRouted, testProvider as testAiProvider, getLastRoutedFailure, resetLastRoutedFailure, anyProviderConfigured, dhakaDayKey, normaliseUsageMap, usageTotals } from './aiProviders.js';
 import { isCloudinaryConfigured, uploadToCloudinary, uploadFileToCloudinary } from './cloudinary.js';
@@ -139,7 +139,7 @@ function blankRemote() {
   return {
     users: [], sessionUid: '', posts: [], stories: [], groups: [], pages: [], friendships: [], blocks: [],
     conversations: [], messages: [], notifications: [], reports: [], adminLogs: [], events: [], reviews: [], groupRequests: [],
-    bots: [], botBrains: {}, botMemories: {}, botActivities: [], botLogs: [],
+    bots: [], botBrains: {}, botMemories: {}, botActivities: [], botLogs: [], botDecisions: {},
     announcements: [], // Pack C: platform announcements (admin-written, all read)
     botConvMeta: {}, // Pack C: per-bot conversation metadata (loadBotAdminData)
     healthProbe: null, // Pack C: last Firestore connectivity probe (probeFirestoreHealth)
@@ -2665,14 +2665,16 @@ export async function loadBotAdminData(botId) {
   if (botAdminDataLoadedFor === botId) return;
   botAdminDataLoadedFor = botId;
   const settle = async (p) => { try { return await p; } catch { return null; } };
-  const [brainSnap, memSnap, countersSnap, convSnap, msgSnap] = await Promise.all([
+  const [brainSnap, memSnap, countersSnap, convSnap, msgSnap, decSnap] = await Promise.all([
     settle(getDoc(doc(db, 'botBrains', botId))),
     settle(getDoc(doc(db, 'botMemories', botId))),
     settle(getDoc(doc(db, 'botSettings', 'counters'))),
     settle(getDocs(query(collection(db, 'conversations'), where('participants', 'array-contains', botId), limit(50)))),
-    settle(getDocs(query(collection(db, 'messages'), where('participants', 'array-contains', botId), orderBy('createdAt', 'asc'), limit(500))))
+    settle(getDocs(query(collection(db, 'messages'), where('participants', 'array-contains', botId), orderBy('createdAt', 'asc'), limit(500)))),
+    settle(getDoc(doc(db, 'botRunners', `decisions_${botId}`)))
   ]);
   if (!remote) return;
+  if (decSnap?.exists()) remote.botDecisions[botId] = decSnap.data().items || [];
   if (brainSnap?.exists()) remote.botBrains[botId] = { botId, ...normaliseTimeFields(brainSnap.data(), ['updatedAt']) };
   if (memSnap?.exists()) remote.botMemories[botId] = memSnap.data().items || [];
   if (countersSnap?.exists()) remote.botSettings.counters = botCountersForDay(countersSnap.data(), counterDayKey());
@@ -3226,6 +3228,14 @@ export async function runDemoBotCycle() {
     // aiUsage is owned by recordAiUsage now (real per-provider
     // counters, bumped on every routed attempt during the plan phase).
   });
+  // Phase 3: decision history (demo parity with the live store).
+  mutate((st) => {
+    st.botDecisions = st.botDecisions || {};
+    for (const r of results) {
+      const b = s.bots.find((x) => x.name === r.bot);
+      if (b) st.botDecisions[b.id] = appendBotDecision(st.botDecisions[b.id] || [], { action: r.action, reason: r.reason || '', at: Date.now() });
+    }
+  });
   return { ran: true, results };
 }
 
@@ -3334,6 +3344,29 @@ async function loadLiveBotCounters() {
   return { day, counters: {} };
 }
 
+// Phase 3: per-bot decision history lives in botRunners/decisions_<botId>
+// (admin read/write per the rules — botActivities is Functions-only, so
+// it cannot hold live records on Spark). Capped at 50 entries per bot;
+// best-effort: a failed write never fails the cycle.
+async function persistBotDecisions(list) {
+  if (!firebaseReady || !list?.length) return;
+  const byBot = new Map();
+  for (const dcn of list) {
+    if (!byBot.has(dcn.botId)) byBot.set(dcn.botId, []);
+    byBot.get(dcn.botId).push(dcn);
+  }
+  for (const [botId, entries] of byBot) {
+    try {
+      const ref = doc(db, 'botRunners', `decisions_${botId}`);
+      const snap = await getDoc(ref);
+      let items = snap.exists() ? (snap.data().items || []) : [];
+      for (const e of entries) items = appendBotDecision(items, e);
+      await setDoc(ref, { botId, items, updatedAt: Date.now() }, { merge: true });
+      if (remote) remote.botDecisions[botId] = items;
+    } catch { /* best-effort */ }
+  }
+}
+
 async function saveLiveBotCounters(day, counters) {
   // merge: true — the counters map deep-merges per bot, so a cycle
   // never wipes another writer's increments for OTHER bots (the whole
@@ -3388,6 +3421,7 @@ export async function runLiveBotCycle() {
   }
   botCycleInFlight = true;
   const results = [];
+  const cycleDecisions = [];
   try {
     resetLastRoutedFailure(); // the summary reports only THIS cycle's AI outcome
     await loadBotSecrets(); // make sure the provider keys are in memory
@@ -3396,6 +3430,7 @@ export async function runLiveBotCycle() {
     const details = [];
     for (const bot of data().bots) {
       const c = { ...emptyBotCounters(), ...(counters[bot.id] || {}) };
+      const rBefore = results.length;
       // Reply-target discovery runs for EVERY bot, BEFORE the active
       // and daily-cap gates (Audit fix #1): those gates used to skip
       // discovery entirely, so a bot sitting on unanswered DMs still
@@ -3597,8 +3632,13 @@ export async function runLiveBotCycle() {
       } catch (err) {
         results.push({ bot: bot.name, action: 'error', reason: String(err?.message || err) });
       }
+      // Phase 3: collect this bot's decision(s) for the Admin history.
+      for (const r of results.slice(rBefore)) {
+        cycleDecisions.push({ botId: bot.id, action: r.action, reason: r.reason || '', at: Date.now() });
+      }
     }
     await saveLiveBotCounters(day, counters);
+    await persistBotDecisions(cycleDecisions);
     const aiFailure = getLastRoutedFailure();
     // Blocked-DM notes (pendingDMs > 0) are part of the summary even
     // though they are 'none' results: "no actions" must never hide
