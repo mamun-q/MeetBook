@@ -3,11 +3,13 @@
 -- Phase 1b deliverable. Apply AFTER schema.sql (which creates the
 -- tables, the SECURITY DEFINER helper functions and enables RLS on
 -- every table — RLS is deliberately NOT re-enabled here).
--- (Fix 2026-11-22, from the first live run: three membership tests
--- — posts_insert group check, messages_insert conversation checks —
+-- (Fix 2026-11-22, from the first two live runs: five membership
+-- tests — posts_insert group check, messages_insert conversation
+-- checks, and groups_update_self_membership's old-members checks —
 -- compared text against the text[] ROWS of a subquery, which Postgres
--- rejects ("operator does not exist: text = text[]"); they are now
--- EXISTS(...) tests against the array's elements.)
+-- rejects ("operator does not exist: text = text[]"; ANY over a
+-- subquery is always the row form, extra parentheses or not). They
+-- are now EXISTS(...) tests against the array's elements.)
 --
 -- Spec: RLS_NOTES.md. Ground truth: firestore.rules. Every policy
 -- block is header-commented with the one-line Firestore guarantee it
@@ -412,16 +414,20 @@ create policy groups_update_self_membership on public.groups
           = cardinality((select o.members from public.groups o where o.id = groups.id)) + 1
         and members @> (select o.members from public.groups o where o.id = groups.id)
         and (select auth.uid())::text = any (members)
-        and not ((select auth.uid())::text
-                 = any ((select o.members from public.groups o where o.id = groups.id)))
+        and not exists (
+              select 1 from public.groups o
+              where o.id = groups.id
+                and (select auth.uid())::text = any (o.members))
       )
       or
       ( -- leave: remove exactly the caller's uid
         cardinality(members)
           = cardinality((select o.members from public.groups o where o.id = groups.id)) - 1
         and (select o.members from public.groups o where o.id = groups.id) @> members
-        and (select auth.uid())::text
-              = any ((select o.members from public.groups o where o.id = groups.id))
+        and exists (
+              select 1 from public.groups o
+              where o.id = groups.id
+                and (select auth.uid())::text = any (o.members))
         and not ((select auth.uid())::text = any (members))
       )
     )
