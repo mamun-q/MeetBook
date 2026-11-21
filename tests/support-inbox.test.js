@@ -105,6 +105,92 @@ describe('supportInboxView', () => {
   });
 });
 
+// ------------------------------------------------------- target labels
+// Regression (2026-11-21 fix pack): the target line used the admin
+// stats label ("Total posts") as its prefix and, once the decision
+// hard-deleted the post, fell back to the raw doc id. The report now
+// carries a targetLabel snapshot from creation; legacy reports fall
+// back to the author name — never "Total posts", never a doc id.
+describe('report target labels', () => {
+  const staff = { id: 'boss', name: 'Boss', username: 'boss', role: 'admin', isBot: false };
+  const withSnapshot = { id: 'r10', reporterId: 'u_rep', targetType: 'post', targetId: 'gone1', targetAuthorId: 'u_auth', targetLabel: 'Buy my miracle coins now', reason: 'Scam', category: 'spam', status: 'resolved', createdAt: NOW - 800, decision: decided('content-removed'), appeal: { status: 'none' } };
+  const legacy = { id: 'r11', reporterId: 'u_rep', targetType: 'post', targetId: 'gone2', targetAuthorId: 'u_auth', reason: 'Spam', category: 'spam', status: 'resolved', createdAt: NOW - 700, decision: decided('content-removed'), appeal: { status: 'none' } };
+
+  it('inbox notice shows the stamped snapshot after the post is deleted', () => {
+    const html = V.supportInboxView(mkData([withSnapshot]), USERS[1]); // Adam Author
+    expect(html).toContain('Buy my miracle coins now');
+    expect(html).not.toContain('Total posts');
+    expect(html).not.toContain('gone1');
+  });
+
+  it('legacy report without a snapshot falls back to the author name, never the doc id', () => {
+    const html = V.supportInboxView(mkData([legacy]), USERS[1]);
+    expect(html).toContain('Adam Author');
+    expect(html).not.toContain('Total posts');
+    expect(html).not.toContain('gone2');
+  });
+
+  it('admin card keeps the snapshot after resolution and never shows the raw id', () => {
+    const html = V.reportsView(mkData([withSnapshot, legacy]), staff, {});
+    expect(html).toContain('Buy my miracle coins now');
+    expect(html).toContain('Adam Author');
+    expect(html).not.toContain('Total posts');
+    expect(html).not.toContain('gone1');
+    expect(html).not.toContain('gone2');
+  });
+
+  it('a photo-only post renders the Photo post label', () => {
+    const photo = { ...withSnapshot, id: 'r12', targetId: 'gone3', targetLabel: '', targetPhoto: true };
+    const html = V.supportInboxView(mkData([photo]), USERS[1]);
+    expect(html).toContain('Photo post');
+    expect(html).not.toContain('gone3');
+  });
+});
+
+// ---------------------------------------------------- appeal isolation
+// Regression (2026-11-21 fix pack): a live E2E appeared to show one
+// report's accepted appeal on ANOTHER report's admin card. The card
+// renders strictly from its own report doc — pin that isolation.
+describe('reportsView appeal isolation', () => {
+  const staff = { id: 'boss', name: 'Boss', username: 'boss', role: 'admin', isBot: false };
+  const accepted = { id: 'r20', reporterId: 'u_rep', targetType: 'post', targetId: 'p1', targetAuthorId: 'u_auth', reason: 'Spam', category: 'spam', status: 'resolved', createdAt: NOW - 600, decision: decided('content-removed'), appeal: { status: 'accepted', text: 'It was satire', byId: 'u_auth', reason: 'Overturned' } };
+  const noAppeal = { id: 'r21', reporterId: 'u_rep', targetType: 'post', targetId: 'p2', targetAuthorId: 'u_rep', reason: 'Other', category: 'other', status: 'resolved', createdAt: NOW - 500, decision: decided('none'), appeal: { status: 'none' } };
+
+  it('an accepted appeal on one report never leaks onto another report\'s card', () => {
+    const html = V.reportsView(mkData([accepted, noAppeal]), staff, {});
+    expect(html.split('Appeal accepted').length - 1).toBe(1);
+    expect(html.split('does not automatically restore').length - 1).toBe(1);
+    expect(html).toContain('No appeal');
+  });
+
+  it('a report with no appeal renders No appeal and no appeal-decision text', () => {
+    const html = V.reportsView(mkData([noAppeal]), staff, {});
+    expect(html).toContain('No appeal');
+    expect(html).not.toContain('Appeal accepted');
+    expect(html).not.toContain('does not automatically restore');
+  });
+});
+
+// ---------------------------------------------------- decided appeals
+// Regression (2026-11-21 fix pack): the inbox notice dropped the
+// user's own appeal text once staff decided the appeal.
+describe('supportInboxView decided appeals', () => {
+  const mk = (appeal) => ({ id: 'r30', reporterId: 'u_other', targetType: 'post', targetId: 'p2', targetAuthorId: 'u_rep', reason: 'Edgy', category: 'spam', status: 'resolved', createdAt: NOW - 400, decision: decided('content-removed'), appeal });
+
+  it('keeps the user\'s appeal text visible after the appeal is accepted', () => {
+    const html = V.supportInboxView(mkData([mk({ status: 'accepted', text: 'It was satire', byId: 'u_rep', reason: 'Overturned on review' })]), USERS[0]);
+    expect(html).toContain('Appeal accepted');
+    expect(html).toContain('It was satire');
+    expect(html).toContain('Overturned on review');
+  });
+
+  it('keeps the user\'s appeal text visible after the appeal is declined', () => {
+    const html = V.supportInboxView(mkData([mk({ status: 'declined', text: 'It was satire', byId: 'u_rep', reason: 'Still spam' })]), USERS[0]);
+    expect(html).toContain('Appeal declined');
+    expect(html).toContain('It was satire');
+  });
+});
+
 // ------------------------------------------------------------- demo flow
 describe('Support Inbox flow (demo path)', () => {
   let authorId;
@@ -166,5 +252,43 @@ describe('Support Inbox flow (demo path)', () => {
     expect(s.notifications.filter((n) => n.userId === authorId && n.type === 'moderation_notice').length).toBe(noticesBefore);
     await api.login('inbox.author@example.com', 'demo1234');
     await expect(api.appealReport(rep.id, 'But why')).rejects.toThrow();
+  });
+});
+
+// --------------------------------------------- target snapshot (demo)
+// reportContent stamps a human-readable targetLabel at creation; the
+// inbox and the Reports Center keep showing it after the decision
+// hard-deletes the post (previously: "Total posts" + the raw doc id).
+describe('report target snapshot (demo path)', () => {
+  it('stamps targetLabel; inbox + admin keep it after the hard delete', async () => {
+    const author = await api.register({ name: 'Snap Author', username: 'snap.author', email: 'snap.author@example.com', password: 'demo1234' });
+    const post = await api.createPost({ text: 'Limited offer: crypto gems for everyone', visibility: 'public' });
+    await api.register({ name: 'Snap Reporter', username: 'snap.reporter', email: 'snap.reporter@example.com', password: 'demo1234' });
+    const rep = await api.reportContent('post', post.id, 'Scam', { category: 'spam' });
+    expect(rep.targetLabel).toBe('Limited offer: crypto gems for everyone');
+
+    await api.login('admin@meetbook.app', 'admin123');
+    await api.adminDecideReport(rep.id, 'resolve', { outcome: 'content-removed', reason: 'Scam' });
+
+    const d = api.data();
+    const inbox = V.supportInboxView(d, d.users.find((u) => u.id === author.id));
+    expect(inbox).toContain('Limited offer: crypto gems for everyone');
+    expect(inbox).not.toContain('Total posts');
+    expect(inbox).not.toContain(post.id);
+
+    const staffUser = d.users.find((u) => u.role === 'admin' || u.role === 'superadmin');
+    const admin = V.reportsView(d, staffUser, {});
+    expect(admin).toContain('Limited offer: crypto gems for everyone');
+    expect(admin).not.toContain('Total posts');
+    expect(admin).not.toContain(post.id);
+  });
+
+  it('a photo-only post stamps targetPhoto instead of a text label', async () => {
+    await api.login('snap.author@example.com', 'demo1234');
+    const post = await api.createPost({ text: '', image: 'https://example.com/gems.png', visibility: 'public' });
+    await api.login('snap.reporter@example.com', 'demo1234');
+    const rep = await api.reportContent('post', post.id, 'Scam pic', { category: 'spam' });
+    expect(rep.targetLabel).toBe('');
+    expect(rep.targetPhoto).toBe(true);
   });
 });

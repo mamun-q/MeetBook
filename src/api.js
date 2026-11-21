@@ -1103,6 +1103,34 @@ export async function deleteComment(postId, commentId) {
   });
 }
 
+// Human-readable snapshot of WHAT was reported, stamped onto the
+// report at creation: after a 'content-removed' decision the target
+// doc is hard-deleted, so neither the Reports Center nor the Support
+// Inbox could otherwise say what the report was about (they used to
+// degrade to the stats label "Total posts" and the raw doc id).
+// Text-bearing targets stamp a ≤120-char snippet; a photo-only post
+// stamps targetPhoto instead and the views render the localised
+// "Photo post" label.
+function reportTargetLabel(rep) {
+  const d = data();
+  if (rep.targetType === 'post') {
+    const p = (d.posts || []).find((x) => x.id === rep.targetId);
+    return p ? truncate(String(p.text || '').trim(), 120) : '';
+  }
+  if (rep.targetType === 'comment') {
+    for (const p of d.posts || []) {
+      for (const c of p.comments || []) {
+        if (c.id === rep.targetId) return truncate(String(c.text || '').trim(), 120);
+        for (const r of c.replies || []) if (r.id === rep.targetId) return truncate(String(r.text || '').trim(), 120);
+      }
+    }
+    return '';
+  }
+  if (rep.targetType === 'user') return (d.users || []).find((u) => u.id === rep.targetId)?.name || '';
+  if (rep.targetType === 'message') return truncate(String(rep.evidence?.text || '').trim(), 120);
+  return '';
+}
+
 export async function reportContent(targetType, targetId, reason, opts = {}) {
   const user = me(); if (!user) throw new Error('Sign in to report content.');
   const category = REPORT_CATEGORIES.includes(opts.category) ? opts.category : 'other';
@@ -1130,6 +1158,14 @@ export async function reportContent(targetType, targetId, reason, opts = {}) {
   // time a decision lands the post/message doc no longer exists to
   // derive the author from.
   report.targetAuthorId = reportTargetUserId(report) || '';
+  // Same "stamp it NOW" reasoning for the readable target snapshot
+  // (see reportTargetLabel): a photo-only post has no text to stamp,
+  // so it flags targetPhoto and the views localise the label.
+  report.targetLabel = reportTargetLabel(report);
+  if (targetType === 'post' && !report.targetLabel) {
+    const p = data().posts.find((x) => x.id === targetId);
+    if (p?.image) report.targetPhoto = true;
+  }
   if (firebaseReady) { await addDoc(collection(db, 'reports'), report); return report; }
   let saved = null;
   mutate((s) => { saved = { id: genId('rep'), ...report }; s.reports.unshift(saved); });

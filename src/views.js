@@ -1545,20 +1545,26 @@ export function reportsView(d, meUser, filters = {}) {
   const tabLink = (key, label) => `<a class="btn ${statusF === key ? 'btn-primary' : 'btn-ghost'} btn-sm" href="#/admin/reports?status=${key}">${label} (${key === 'all' ? counts.all : counts[key] || 0})</a>`;
   const statusBadge = (st) => `<span class="badge ${st === 'pending' || st === 'escalated' ? 'badge-warn' : st === 'resolved' ? 'badge-ok' : st === 'rejected' ? 'badge-danger' : ''}">${escapeHtml(reportStatusLabel(st))}</span>`;
   const targetHtml = (r) => {
-    if (r.targetType === 'post') {
-      const p = (d.posts || []).find((x) => x.id === r.targetId);
-      const a = p ? byId[p.authorId] : null;
-      return `${t('statPosts')}: ${p ? `<a href="#/profile/${p.authorId}">${escapeHtml(truncate(p.text || '', 80))}</a> <span class="muted small">· ${escapeHtml(a?.name || '')}</span>` : `<span class="muted">${escapeHtml(r.targetId)}</span>`}`;
+    // Snapshot-first (reportTargetSnapshot): the decision may have
+    // hard-deleted the target, so the live doc is only a fallback —
+    // never the stats label ("Total posts"), never the raw doc id.
+    const snap = reportTargetSnapshot(d, r, byId);
+    const snapBit = snap ? (snap === t('targetPhotoPost') ? ` ${escapeHtml(snap)}` : ` “${escapeHtml(snap)}”`) : '';
+    if (r.targetType === 'post' || r.targetType === 'comment') {
+      const p = r.targetType === 'post' ? (d.posts || []).find((x) => x.id === r.targetId) : null;
+      const authorId = p?.authorId || r.targetAuthorId || '';
+      const a = byId[authorId];
+      return `${t(r.targetType === 'post' ? 'targetPost' : 'targetComment')}:${snapBit}${a ? ` <span class="muted small">· <a href="#/profile/${authorId}">${escapeHtml(a.name)}</a></span>` : ''}`;
     }
     if (r.targetType === 'user') {
       const u = byId[r.targetId];
-      return `${t('roleUser')}: ${u ? `<a href="#/profile/${u.id}">${escapeHtml(u.name)}</a> <span class="muted small">@${escapeHtml(u.username)}</span>` : `<span class="muted">${escapeHtml(r.targetId)}</span>`}`;
+      return `${t('targetProfile')}: ${u ? `<a href="#/profile/${u.id}">${escapeHtml(u.name)}</a> <span class="muted small">@${escapeHtml(u.username)}</span>` : (r.targetLabel ? escapeHtml(r.targetLabel) : '<span class="muted">—</span>')}`;
     }
     if (r.targetType === 'message') {
       const sender = byId[r.evidence?.senderId];
-      return `${t('messages')}: ${sender ? `<a href="#/profile/${sender.id}">${escapeHtml(sender.name)}</a>` : `<span class="muted">${escapeHtml(r.evidence?.senderId || '')}</span>`}`;
+      return `${t('targetMessage')}: ${sender ? `<a href="#/profile/${sender.id}">${escapeHtml(sender.name)}</a>` : (snap ? `“${escapeHtml(snap)}”` : '<span class="muted">—</span>')}`;
     }
-    return `${escapeHtml(r.targetType)} · ${escapeHtml(r.targetId)}`;
+    return `${escapeHtml(r.targetType)}${snapBit}`;
   };
   const card = (r) => {
     const st = reportStatus(r);
@@ -1623,21 +1629,39 @@ export function supportTargetAuthorId(d, r) {
   return '';
 }
 
+// What a report was about, as a short human-readable snippet: the
+// snapshot stamped at creation (report.targetLabel) wins — the
+// decision may have hard-deleted the target doc — otherwise derive
+// from the still-live target; '' when nothing identifiable remains.
+// Shared by the Reports Center card and the Support Inbox so both
+// degrade identically (author name / "Photo post", never a doc id).
+export function reportTargetSnapshot(d, r, byId = usersById(d)) {
+  if (r.targetLabel) return String(r.targetLabel);
+  if (r.targetType === 'post') {
+    const p = (d.posts || []).find((x) => x.id === r.targetId);
+    if (p?.text) return truncate(p.text, 80);
+    if (r.targetPhoto || p?.image) return t('targetPhotoPost');
+    return '';
+  }
+  if (r.targetType === 'message') return r.evidence?.text ? truncate(r.evidence.text, 80) : '';
+  if (r.targetType === 'user') return byId[r.targetId]?.name || '';
+  return '';
+}
+
 function supportTargetHtml(d, r, byId) {
   const author = byId[supportTargetAuthorId(d, r)];
   const authorBit = author ? ` · ${escapeHtml(author.name)}` : '';
-  if (r.targetType === 'post') {
-    const p = (d.posts || []).find((x) => x.id === r.targetId);
-    return `${t('statPosts')}${authorBit}${p?.text ? ` — “${escapeHtml(truncate(p.text, 80))}”` : ''}`;
-  }
-  if (r.targetType === 'message') {
-    return `${t('messages')}${authorBit}${r.evidence?.text ? ` — “${escapeHtml(truncate(r.evidence.text, 80))}”` : ''}`;
-  }
+  const snap = reportTargetSnapshot(d, r, byId);
+  const snapBit = snap ? (snap === t('targetPhotoPost') ? ` — ${escapeHtml(snap)}` : ` — “${escapeHtml(snap)}”`) : '';
+  if (r.targetType === 'post') return `${t('targetPost')}${authorBit}${snapBit}`;
+  if (r.targetType === 'comment') return `${t('targetComment')}${authorBit}${snapBit}`;
+  if (r.targetType === 'message') return `${t('targetMessage')}${authorBit}${snapBit}`;
   if (r.targetType === 'user') {
     const u = byId[r.targetId];
-    return `${t('roleUser')} · ${u ? escapeHtml(u.name) : escapeHtml(r.targetId || '')}`;
+    const name = u?.name || r.targetLabel || '';
+    return `${t('targetProfile')}${name ? ` · ${escapeHtml(name)}` : ''}`;
   }
-  return `${escapeHtml(r.targetType)}${authorBit}`;
+  return `${escapeHtml(r.targetType)}${authorBit}${snapBit}`;
 }
 
 // The one-line verdict a reporter sees: interim states stay "awaiting"
@@ -1685,8 +1709,8 @@ export function supportInboxView(d, meUser) {
   const appealBlock = (r) => {
     const a = r.appeal || { status: 'none' };
     if (a.status === 'requested') return `<p class="small">✉️ <b>${t('appealRequested')}</b>${a.text ? `<br/><span class="muted">“${escapeHtml(a.text)}”</span>` : ''}<br/><span class="muted">${t('supportAppealPendingNote')}</span></p>`;
-    if (a.status === 'accepted') return `<p class="small">✅ <b>${t('appealAccepted')}</b>${a.reason ? ` · “${escapeHtml(a.reason)}”` : ''}<br/><span class="muted">${t('appealNoRestore')}</span></p>`;
-    if (a.status === 'declined') return `<p class="small">✖ <b>${t('appealDeclined')}</b>${a.reason ? ` · “${escapeHtml(a.reason)}”` : ''}</p>`;
+    if (a.status === 'accepted') return `<p class="small">✅ <b>${t('appealAccepted')}</b>${a.reason ? ` · “${escapeHtml(a.reason)}”` : ''}${a.text ? `<br/><span class="muted">“${escapeHtml(a.text)}”</span>` : ''}<br/><span class="muted">${t('appealNoRestore')}</span></p>`;
+    if (a.status === 'declined') return `<p class="small">✖ <b>${t('appealDeclined')}</b>${a.reason ? ` · “${escapeHtml(a.reason)}”` : ''}${a.text ? `<br/><span class="muted">“${escapeHtml(a.text)}”</span>` : ''}</p>`;
     return `<div class="row gap-sm wrap"><button class="btn btn-primary btn-sm" data-act="support-appeal-open" data-id="${r.id}">✉️ ${t('supportAppealButton')}</button><span class="muted small">${t('supportAppealOnce')}</span></div>`;
   };
   const noticeCard = (r) => {

@@ -95,4 +95,33 @@ describe('Support Inbox flow (live)', () => {
     expect(notes.length).toBe(1);
     expect(notes[0].userId).toBe('author1');
   });
+
+  // Isolation regression (2026-11-21 fix pack): deciding a SECOND
+  // report must never write appeal fields onto it from the first
+  // report's decided appeal, nor disturb the first report — and the
+  // second report carries its own targetLabel snapshot from creation.
+  it('a second report stays appeal-free when the first report\'s appeal is decided', async () => {
+    fake.seed('posts', 'post2', {
+      authorId: 'author1', text: 'Second post about miracle gems', image: '', visibility: 'public', audienceIds: [],
+      createdAt: Date.now() - 30_000, editedAt: 0, likes: [], reactions: {}, comments: [], shares: 0,
+      sharedFrom: '', savedBy: [], groupId: '', pageId: '', pageName: '', pageAvatar: ''
+    });
+    await settle();
+    await api.login('rita@example.com', 'whatever');
+    await settle();
+    await api.reportContent('post', 'post2', 'More scams', { category: 'spam' });
+    await settle();
+    const rep2 = fake.all('reports').find((r) => r.targetId === 'post2');
+    expect(rep2).toBeTruthy();
+    expect(rep2.targetLabel).toBe('Second post about miracle gems');
+    expect(rep2.appeal).toMatchObject({ status: 'none' });
+
+    await api.login('boss@example.com', 'whatever');
+    await settle();
+    await api.adminDecideReport(rep2.id, 'resolve', { outcome: 'none', reason: 'Looks fine' });
+    await settle();
+    expect(fake.get('reports', rep2.id).decision).toMatchObject({ outcome: 'none' });
+    expect(fake.get('reports', rep2.id).appeal).toMatchObject({ status: 'none' });
+    expect(fake.get('reports', repId).appeal).toMatchObject({ status: 'accepted', text: 'Please reconsider — it was satire' });
+  });
 });
