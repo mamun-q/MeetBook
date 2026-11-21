@@ -8,7 +8,7 @@ import {
 } from './store.js';
 import { firebaseReady, auth, db, storage, googleProvider } from './firebase.js';
 import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme, canEditMessage, chatPollVote, VANISH_TTL_MS } from './utils.js';
-import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost } from './botLogic.js';
+import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost } from './botLogic.js';
 import { canAccessBotSecrets, botModel } from './gemini.js';
 import { providerById, resolveAiConfig, generateRouted, testProvider as testAiProvider, getLastRoutedFailure, resetLastRoutedFailure, anyProviderConfigured, dhakaDayKey, normaliseUsageMap, usageTotals } from './aiProviders.js';
 import { isCloudinaryConfigured, uploadToCloudinary, uploadFileToCloudinary } from './cloudinary.js';
@@ -3191,6 +3191,7 @@ export async function runDemoBotCycle() {
         const text = entry.gen.text;
         st.posts.unshift({ id: genId('p'), authorId: bot.id, text: `AI Bot post · ${text}`, image: '', visibility: 'public', audienceIds: [], createdAt: Date.now(), editedAt: 0, likes: [], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [], groupId: '', pageId: '', pageName: '', pageAvatar: '', generatedBy: entry.gen.provider });
         counters.postsToday += 1;
+        st.botMemories[bot.id] = memoryFromActivity(st.botMemories[bot.id] || [], bot, { kind: 'post', text });
         st.botActivities.unshift({ id: genId('act'), botId: bot.id, action: 'post', detail: text.slice(0, 90), createdAt: Date.now(), status: 'ok' });
       } else if (entry.action === 'comment' && entry.gen) {
         const text = entry.gen.text;
@@ -3200,6 +3201,7 @@ export async function runDemoBotCycle() {
           if (host) {
             host.replies = [...(host.replies || []), { id: genId('c'), authorId: bot.id, text, createdAt: Date.now() }];
             counters.commentsToday += 1;
+            st.botMemories[bot.id] = memoryFromActivity(st.botMemories[bot.id] || [], bot, { kind: 'comment', text: hostPost.text });
             st.botActivities.unshift({ id: genId('act'), botId: bot.id, action: 'comment', detail: text.slice(0, 90), createdAt: Date.now(), status: 'ok' });
             const author = st.users.find((u) => u.id === entry.replyTo.authorId);
             if (author && !author.isBot) {
@@ -3211,6 +3213,7 @@ export async function runDemoBotCycle() {
           if (target) {
             target.comments.push({ id: genId('c'), authorId: bot.id, text, createdAt: Date.now(), replies: [] });
             counters.commentsToday += 1;
+            st.botMemories[bot.id] = memoryFromActivity(st.botMemories[bot.id] || [], bot, { kind: 'comment', text: target.text });
             st.botActivities.unshift({ id: genId('act'), botId: bot.id, action: 'comment', detail: text.slice(0, 90), createdAt: Date.now(), status: 'ok' });
             const author = st.users.find((u) => u.id === target.authorId);
             if (author && !author.isBot) {
@@ -3459,7 +3462,7 @@ export async function runLiveBotCycle() {
       counters[bot.id] = c;
       try {
         try { await ensureBotUserDoc(bot); } catch { /* rules may lag a deploy — actions below will surface real errors */ }
-        const memories = await loadLiveBotMemories(bot.id);
+        let memories = await loadLiveBotMemories(bot.id);
         let acted = false;
         let dmNote = targetError ? `could not scan DMs: ${targetError}` : '';
 
@@ -3493,7 +3496,7 @@ export async function runLiveBotCycle() {
               read: false, createdAt: Date.now()
             });
             const updatedMemories = memoryFromConversation(memories, fresh.text, gen.text);
-            try { await setDoc(doc(db, 'botMemories', bot.id), { botId: bot.id, items: updatedMemories }); } catch { /* memory is best-effort */ }
+            try { await setDoc(doc(db, 'botMemories', bot.id), { botId: bot.id, items: updatedMemories }); memories = updatedMemories; } catch { /* memory is best-effort */ }
             actions += 1;
             acted = true;
             results.push({ bot: bot.name, action: 'message' });
@@ -3541,6 +3544,8 @@ export async function runLiveBotCycle() {
           });
           c.postsToday += 1;
           c.lastActionAt = Date.now();
+          const actMem = memoryFromActivity(memories, bot, { kind: 'post', text: gen.text });
+          if (actMem !== memories) { try { await setDoc(doc(db, 'botMemories', bot.id), { botId: bot.id, items: actMem }); memories = actMem; } catch { /* best-effort */ } }
           actions += 1;
           acted = true;
           results.push({ bot: bot.name, action: 'post' });
@@ -3571,7 +3576,9 @@ export async function runLiveBotCycle() {
                 await updateDoc(doc(db, 'posts', hostPost.id), { comments: freshComments });
                 c.commentsToday += 1;
                 c.lastActionAt = Date.now();
-                if (!botIds.has(hostComment.authorId)) {
+                const actMem = memoryFromActivity(memories, bot, { kind: 'comment', text: hostPost.text });
+          if (actMem !== memories) { try { await setDoc(doc(db, 'botMemories', bot.id), { botId: bot.id, items: actMem }); memories = actMem; } catch { /* best-effort */ } }
+          if (!botIds.has(hostComment.authorId)) {
                   await createNotification({
                     userId: hostComment.authorId, type: 'comment', actorId: bot.id,
                     text: `${bot.name} (AI Bot) replied to your comment.`, postId: hostPost.id, conversationId: '',
@@ -3602,7 +3609,9 @@ export async function runLiveBotCycle() {
               await updateDoc(doc(db, 'posts', target.id), { comments: [...freshComments, comment] });
               c.commentsToday += 1;
               c.lastActionAt = Date.now();
-              await createNotification({
+              const actMem = memoryFromActivity(memories, bot, { kind: 'comment', text: target.text });
+          if (actMem !== memories) { try { await setDoc(doc(db, 'botMemories', bot.id), { botId: bot.id, items: actMem }); memories = actMem; } catch { /* best-effort */ } }
+          await createNotification({
                 userId: target.authorId, type: 'comment', actorId: bot.id,
                 text: `${bot.name} (AI Bot) commented on your post.`, postId: target.id, conversationId: '',
                 read: false, createdAt: Date.now()

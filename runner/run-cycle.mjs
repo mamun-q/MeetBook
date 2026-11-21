@@ -25,7 +25,7 @@ import {
   normaliseBot, findBotReplyTargets, decideBotAction,
   templateBotMessageReply, generateTemplatePost, generateTemplateComment,
   emptyBotCounters, counterDayKey, botCountersForDay, memoryFromConversation,
-  pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost
+  pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost
 } from '../src/botLogic.js';
 import {
   resolveAiConfig, generateRouted, normaliseUsageMap, usageTotals,
@@ -191,7 +191,7 @@ async function main() {
     try {
       try { await ensureBotUserDoc(bot); } catch { /* actions below surface real errors */ }
       const memSnap = await getDoc(doc(db, 'botMemories', bot.id));
-      const memories = memSnap.exists() ? (memSnap.data().items || []) : [];
+      let memories = memSnap.exists() ? (memSnap.data().items || []) : [];
       let acted = false;
 
       // --- chat reply (one per cycle, messages/day cap is the gate) ---
@@ -223,7 +223,7 @@ async function main() {
             });
           }
           const updatedMemories = memoryFromConversation(memories, fresh.text, gen.text);
-          try { await setDoc(doc(db, 'botMemories', bot.id), { botId: bot.id, items: updatedMemories }); } catch { /* best-effort */ }
+          try { await setDoc(doc(db, 'botMemories', bot.id), { botId: bot.id, items: updatedMemories }); memories = updatedMemories; } catch { /* best-effort */ }
           await recordBotBrain(bot, gen.provider, gen.model);
           acted = true;
           results.push(`${bot.name} → message (via ${gen.provider})`);
@@ -261,6 +261,8 @@ async function main() {
         await recordBotBrain(bot, gen.provider, gen.model);
         c.postsToday += 1;
         c.lastActionAt = Date.now();
+        const actMem = memoryFromActivity(memories, bot, { kind: 'post', text: gen.text });
+        if (actMem !== memories) { try { await setDoc(doc(db, 'botMemories', bot.id), { botId: bot.id, items: actMem }); memories = actMem; } catch { /* best-effort */ } }
         acted = true;
         results.push(`${bot.name} → post (via ${gen.provider})`);
           note(bot, 'post', `via ${gen.provider}`);
@@ -286,6 +288,8 @@ async function main() {
               await updateDoc(doc(db, 'posts', hostPost.id), { comments: freshComments });
               c.commentsToday += 1;
               c.lastActionAt = Date.now();
+              const actMem = memoryFromActivity(memories, bot, { kind: 'comment', text: hostPost.text });
+              if (actMem !== memories) { try { await setDoc(doc(db, 'botMemories', bot.id), { botId: bot.id, items: actMem }); memories = actMem; } catch { /* best-effort */ } }
               if (!botIds.has(hostComment.authorId)) {
                 await addDoc(collection(db, 'notifications'), {
                   userId: hostComment.authorId, type: 'comment', actorId: bot.id,
@@ -320,6 +324,8 @@ async function main() {
             await updateDoc(doc(db, 'posts', target.id), { comments: [...freshComments, comment] });
             c.commentsToday += 1;
             c.lastActionAt = Date.now();
+            const actMem = memoryFromActivity(memories, bot, { kind: 'comment', text: target.text });
+            if (actMem !== memories) { try { await setDoc(doc(db, 'botMemories', bot.id), { botId: bot.id, items: actMem }); memories = actMem; } catch { /* best-effort */ } }
             if (target.authorId !== bot.id) {
               await addDoc(collection(db, 'notifications'), {
                 userId: target.authorId, type: 'comment', actorId: bot.id,

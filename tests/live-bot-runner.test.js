@@ -210,6 +210,10 @@ describe('live bot runner (Spark)', () => {
     expect(replies).toHaveLength(1);
     expect(replies[0].authorId).toBe('bot_nova');
     expect(r.results.find((x) => x.bot === 'Nova' && x.action === 'comment-reply')).toBeTruthy();
+    // Activity memory: replying on a post about space (her interest)
+    // records an interest-category memory.
+    const memItems = fake.get('botMemories', 'bot_nova')?.items || [];
+    expect(memItems.some((m) => m.category === 'interest' && /space/i.test(m.text))).toBe(true);
   });
 
   it('a non-admin session never starts the runner and cannot run a cycle', async () => {

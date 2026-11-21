@@ -401,20 +401,55 @@ export function botCountersForDay(stored, dayKey) {
 
 export function memoryFromConversation(existing = [], userText, botText, now = Date.now(), category = 'conversation') {
   const text = `Conversation note: user talked about "${String(userText || '').slice(0, 80)}"; I replied about "${String(botText || '').slice(0, 80)}".`;
-  // Memory deduplication (Master Vision: retention with dedup, not
-  // indiscriminate storage): a near-identical note REFRESHES the old
-  // one instead of piling up a copy.
-  const dupe = (existing || []).find((m) => m && textSimilarity(m.text, text) >= 0.65);
-  if (dupe) {
-    return (existing || []).map((m) => (m === dupe ? { ...m, text, updatedAt: now } : m)).slice(-100);
-  }
-  const entry = {
+  return upsertMemory(existing, {
     id: `mem_${now.toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
     text,
     category,
     createdAt: now,
     updatedAt: now,
     pinned: false
-  };
-  return [...(existing || []), entry].slice(-100); // cap per-bot memory store
+  });
+}
+
+// Shared memory upsert (Master Vision: retention with dedup, not
+// indiscriminate storage): a near-identical note REFRESHES the old one
+// instead of piling up a copy. Cap 100 per bot.
+function upsertMemory(existing = [], entry) {
+  const dupe = (existing || []).find((m) => m && textSimilarity(m.text, entry.text) >= 0.65);
+  if (dupe) {
+    return (existing || []).map((m) => (m === dupe ? { ...m, text: entry.text, updatedAt: entry.updatedAt } : m)).slice(-100);
+  }
+  return [...(existing || []), entry].slice(-100);
+}
+
+// The bot's interests that a text actually mentions. Interests are
+// short phrases ("science fiction"), so phrase matching is right here.
+export function matchedInterests(bot = {}, text = '') {
+  const b = normaliseBot(bot || {});
+  const hay = String(text || '').toLowerCase();
+  return (b.personality.interests || []).filter((i) => i && hay.includes(String(i).toLowerCase()));
+}
+
+// Activity → memory (Master Vision: experience + interest memory are
+// LEARNED from what the bot does, not only from chats). POSTING about
+// one of its interests records an EXPERIENCE; COMMENTING or REPLYING on
+// a post about one of its interests records an INTEREST memory. No
+// interest match → no memory, and the SAME array reference comes back
+// so callers can skip the persistence write entirely.
+export function memoryFromActivity(existing = [], bot = {}, activity = {}, now = Date.now()) {
+  const isPost = activity.kind === 'post';
+  const matched = matchedInterests(bot, activity.text);
+  if (!matched.length) return existing;
+  const snippet = String(activity.text || '').replace(/\s+/g, ' ').slice(0, 80);
+  const text = isPost
+    ? `Experience: I posted about ${matched[0]} — "${snippet}".`
+    : `Interest: I joined a conversation about ${matched[0]} — "${snippet}".`;
+  return upsertMemory(existing, {
+    id: `mem_${now.toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+    text,
+    category: isPost ? 'experience' : 'interest',
+    createdAt: now,
+    updatedAt: now,
+    pinned: false
+  });
 }

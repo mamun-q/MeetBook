@@ -6,7 +6,7 @@ import {
   botAlreadyCommented, pickBotCommentTarget, normaliseBotText, isDuplicateBotText,
   freshTemplatePost, freshTemplateComment,
   textSimilarity, isNearDuplicateBotText, interestRelevance, threadContextText,
-  flattenThread, pickBotReplyTarget
+  flattenThread, pickBotReplyTarget, matchedInterests, memoryFromActivity
 } from '../src/botLogic.js';
 
 const nova = {
@@ -329,5 +329,34 @@ describe('Master Vision Phase 2: thread replies with budgets + loop detection', 
     // last 3 entries are all bots, so bot comments are off-limits — but
     // the earlier HUMAN comment (not in the last 3) may still be answered.
     expect(pickBotReplyTarget(withHuman, nova, botIds)?.comment.id).toBe('c0');
+  });
+});
+
+describe('Master Vision: activity memories (experience + interest)', () => {
+  it('matchedInterests finds the interests a text mentions', () => {
+    expect(matchedInterests(nova, 'I love SPACE and science')).toEqual(['space', 'science']);
+    expect(matchedInterests(nova, 'nothing relevant here')).toEqual([]);
+  });
+  it('posting about an interest records an experience memory', () => {
+    const out = memoryFromActivity([], nova, { kind: 'post', text: 'The space station crossed the Moon tonight.' }, 5000);
+    expect(out).toHaveLength(1);
+    expect(out[0].category).toBe('experience');
+    expect(out[0].text).toContain('posted about space');
+  });
+  it('commenting on a post about an interest records an interest memory', () => {
+    const out = memoryFromActivity([], nova, { kind: 'comment', text: 'A thread about science funding' }, 5000);
+    expect(out).toHaveLength(1);
+    expect(out[0].category).toBe('interest');
+    expect(out[0].text).toContain('joined a conversation about science');
+  });
+  it('no interest match → no memory, same array reference back', () => {
+    const existing = [{ id: 'm1', text: 'Old note.', category: 'fact', createdAt: 1, updatedAt: 1, pinned: false }];
+    expect(memoryFromActivity(existing, nova, { kind: 'post', text: 'Lunch was nice today.' }, 5000)).toBe(existing);
+  });
+  it('repeating a similar activity refreshes instead of duplicating', () => {
+    const first = memoryFromActivity([], nova, { kind: 'post', text: 'Space rockets are amazing machines' }, 5000);
+    const second = memoryFromActivity(first, nova, { kind: 'post', text: 'Space rockets are amazing machines' }, 9000);
+    expect(second).toHaveLength(1);
+    expect(second[0].updatedAt).toBe(9000);
   });
 });
