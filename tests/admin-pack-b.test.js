@@ -372,6 +372,10 @@ describe('Reports Center decisions (demo path)', () => {
   it('appeal management updates the report and audits', async () => {
     const s0 = store.getState();
     const rep = s0.reports.find((r) => r.status === 'rejected');
+    // Appeal guard (2026-11-21): accept/decline only land on a FILED
+    // appeal, so staff first mark it requested (an appeal received
+    // outside the app), then accept it.
+    await api.adminSetReportAppeal(rep.id, 'requested');
     await api.adminSetReportAppeal(rep.id, 'accepted', 'New evidence provided');
     const s = store.getState();
     expect(s.reports.find((r) => r.id === rep.id).appeal).toMatchObject({ status: 'accepted', byId: 'u_admin', reason: 'New evidence provided' });

@@ -292,3 +292,80 @@ describe('report target snapshot (demo path)', () => {
     expect(rep.targetPhoto).toBe(true);
   });
 });
+
+// ------------------------------------------------------- appeal guard
+// Regression (2026-11-21): staff appeal controls could accept/decline
+// an appeal that was never filed — a stray tap set 'accepted' on a
+// live no-action report. The view now renders Accept/Decline ONLY for
+// a 'requested' appeal, and adminSetReportAppeal no-ops (null, no
+// write, no audit, no doorbell) on accept/decline from any other
+// state. Marking 'requested' by hand stays allowed (off-app appeals).
+describe('reportsView appeal controls (guard)', () => {
+  const staff = { id: 'boss', name: 'Boss', username: 'boss', role: 'admin', isBot: false };
+  const mk = (appeal) => ({ id: 'r40', reporterId: 'u_rep', targetType: 'post', targetId: 'p1', targetAuthorId: 'u_auth', reason: 'Spam', category: 'spam', status: 'resolved', createdAt: NOW - 300, decision: decided('none'), appeal });
+  const buttons = (html) => ({
+    requested: html.includes('data-appeal="requested"'),
+    accepted: html.includes('data-appeal="accepted"'),
+    declined: html.includes('data-appeal="declined"')
+  });
+
+  it('a report with NO appeal offers only Mark-requested — no Accept/Decline', () => {
+    const html = V.reportsView(mkData([mk({ status: 'none' })]), staff, {});
+    expect(buttons(html)).toEqual({ requested: true, accepted: false, declined: false });
+  });
+
+  it('a report with a FILED appeal offers Accept + Decline', () => {
+    const html = V.reportsView(mkData([mk({ status: 'requested', text: 'Please recheck', byId: 'u_auth' })]), staff, {});
+    expect(buttons(html)).toEqual({ requested: false, accepted: true, declined: true });
+  });
+
+  it('a decided appeal shows its state line and no appeal buttons', () => {
+    const acc = V.reportsView(mkData([mk({ status: 'accepted', text: 'Please recheck', byId: 'u_auth', reason: 'Overturned' })]), staff, {});
+    expect(acc).toContain('Appeal accepted');
+    expect(buttons(acc)).toEqual({ requested: false, accepted: false, declined: false });
+    const dec = V.reportsView(mkData([mk({ status: 'declined', text: 'Please recheck', byId: 'u_auth', reason: 'Still spam' })]), staff, {});
+    expect(dec).toContain('Appeal declined');
+    expect(buttons(dec)).toEqual({ requested: false, accepted: false, declined: false });
+  });
+});
+
+describe('appeal guard (demo path)', () => {
+  let repId;
+  let authorId;
+
+  it('accept/decline on a report with no filed appeal are null no-ops', async () => {
+    const author = await api.register({ name: 'Guard Author', username: 'guard.author', email: 'guard.author@example.com', password: 'demo1234' });
+    authorId = author.id;
+    const post = await api.createPost({ text: 'Totally legitimate crypto gems', visibility: 'public' });
+    await api.register({ name: 'Guard Reporter', username: 'guard.reporter', email: 'guard.reporter@example.com', password: 'demo1234' });
+    const rep = await api.reportContent('post', post.id, 'Looks like a scam', { category: 'spam' });
+    repId = rep.id;
+    await api.login('admin@meetbook.app', 'admin123');
+    // The live incident shape: a decided, no-action report.
+    await api.adminDecideReport(repId, 'resolve', { outcome: 'none', reason: 'Looks fine' });
+
+    const logsBefore = store.getState().adminLogs.filter((l) => l.action === 'report-appeal').length;
+    const doorbellsBefore = store.getState().notifications.filter((n) => n.type === 'appeal_decision').length;
+    expect(await api.adminSetReportAppeal(repId, 'accepted', 'Stray tap')).toBeNull();
+    expect(await api.adminSetReportAppeal(repId, 'declined', 'Stray tap')).toBeNull();
+    const s = store.getState();
+    expect(s.reports.find((r) => r.id === repId).appeal).toMatchObject({ status: 'none' });
+    expect(s.adminLogs.filter((l) => l.action === 'report-appeal').length).toBe(logsBefore); // no audit for a non-action
+    expect(s.notifications.filter((n) => n.type === 'appeal_decision').length).toBe(doorbellsBefore); // no doorbell
+  });
+
+  it('mark-requested still works from none, and then accept lands', async () => {
+    await api.login('admin@meetbook.app', 'admin123');
+    const marked = await api.adminSetReportAppeal(repId, 'requested');
+    expect(marked).toMatchObject({ status: 'requested' });
+    const accepted = await api.adminSetReportAppeal(repId, 'accepted', 'Off-app appeal upheld');
+    expect(accepted).toMatchObject({ status: 'accepted', reason: 'Off-app appeal upheld' });
+    const s = store.getState();
+    expect(s.reports.find((r) => r.id === repId).appeal).toMatchObject({ status: 'accepted' });
+    // Staff-filed appeal (byId == the deciding admin) rings no doorbell:
+    expect(s.notifications.some((n) => n.type === 'appeal_decision' && n.userId === authorId)).toBe(false);
+    // A decided appeal cannot be re-decided:
+    expect(await api.adminSetReportAppeal(repId, 'declined', 'Changed my mind')).toBeNull();
+    expect(store.getState().reports.find((r) => r.id === repId).appeal).toMatchObject({ status: 'accepted' });
+  });
+});

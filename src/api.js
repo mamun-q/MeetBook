@@ -2622,12 +2622,23 @@ export async function adminDecideReport(reportId, decision, { reason = '', outco
 // appeal text (filed from the Support Inbox) is preserved across the
 // staff decision, and a user-filed appeal that gets decided rings the
 // author's Support Inbox doorbell.
+// GUARD (2026-11-21): an accept/decline is only meaningful against an
+// appeal that was actually FILED (current status 'requested'). From
+// any other state it is a safe no-op returning null — the
+// guard-failure convention used across this module (cf. loadAdmin-
+// Stats) — and writes NOTHING: no patch, no audit entry, no doorbell.
+// A stray staff tap once set 'accepted' on a live no-action report
+// with no appeal behind it. Marking 'requested' by hand stays allowed
+// from 'none' (appeals received outside the app). This one function
+// serves both modes — writeReportPatch branches live/demo — so the
+// guard holds identically in demo mode.
 export async function adminSetReportAppeal(reportId, appealStatus, reason = '') {
   const actor = me();
   if (!actor || !canModerate(actor)) throw new Error('Moderators only.');
   const rep = findReport(reportId);
   if (!rep) throw new Error('Report not found.');
   if (!['requested', 'accepted', 'declined', 'none'].includes(appealStatus)) throw new Error('Unknown appeal status.');
+  if ((appealStatus === 'accepted' || appealStatus === 'declined') && rep.appeal?.status !== 'requested') return null;
   const wasUserAppeal = rep.appeal?.status === 'requested' && rep.appeal?.byId && rep.appeal.byId !== actor.id;
   const appeal = { status: appealStatus, byId: actor.id, byName: actor.name || '', at: Date.now(), reason: String(reason || ''), text: rep.appeal?.text || '' };
   await writeReportPatch(reportId, { appeal });

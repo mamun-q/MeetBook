@@ -1570,6 +1570,10 @@ export function reportsView(d, meUser, filters = {}) {
     const st = reportStatus(r);
     const reporter = byId[r.reporterId];
     const dec = r.decision || null;
+    // Appeal controls mirror the api guard (adminSetReportAppeal):
+    // Accept/Decline render ONLY against a filed ('requested')
+    // appeal; 'none' offers just Mark-requested; a decided appeal
+    // shows its state line only.
     const appeal = r.appeal?.status || 'none';
     const actionable = ['pending', 'review', 'escalated'].includes(st);
     return `<div class="card stack report-card">
@@ -1587,9 +1591,9 @@ export function reportsView(d, meUser, filters = {}) {
         <span class="small"><b>${t('appealLabel')}:</b> ${escapeHtml(appealStatusLabel(appeal))}</span>
         ${appeal === 'accepted' ? `<span class="muted small">${t('appealNoRestore')}</span>` : ''}
         <span class="spacer"></span>
-        ${appeal !== 'requested' ? `<button class="btn btn-ghost btn-sm" data-act="report-appeal" data-id="${r.id}" data-appeal="requested">${t('appealMarkRequested')}</button>` : ''}
-        ${appeal !== 'accepted' ? `<button class="btn btn-ghost btn-sm" data-act="report-appeal" data-id="${r.id}" data-appeal="accepted">${t('appealAccept')}</button>` : ''}
-        ${appeal !== 'declined' ? `<button class="btn btn-ghost btn-sm" data-act="report-appeal" data-id="${r.id}" data-appeal="declined">${t('appealDecline')}</button>` : ''}
+        ${appeal === 'none' ? `<button class="btn btn-ghost btn-sm" data-act="report-appeal" data-id="${r.id}" data-appeal="requested">${t('appealMarkRequested')}</button>` : ''}
+        ${appeal === 'requested' ? `<button class="btn btn-ghost btn-sm" data-act="report-appeal" data-id="${r.id}" data-appeal="accepted">${t('appealAccept')}</button>` : ''}
+        ${appeal === 'requested' ? `<button class="btn btn-ghost btn-sm" data-act="report-appeal" data-id="${r.id}" data-appeal="declined">${t('appealDecline')}</button>` : ''}
       </div>
       ${actionable ? `<div class="row gap-sm wrap">
         ${st !== 'review' ? `<button class="btn btn-ghost btn-sm" data-act="report-review" data-id="${r.id}">🔍 ${t('markUnderReview')}</button>` : ''}

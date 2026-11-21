@@ -125,3 +125,63 @@ describe('Support Inbox flow (live)', () => {
     expect(fake.get('reports', repId).appeal).toMatchObject({ status: 'accepted', text: 'Please reconsider — it was satire' });
   });
 });
+
+// ------------------------------------------------------- appeal guard
+// Regression (2026-11-21): a staff accept/decline landed on a report
+// whose appeal was never filed (a stray tap set 'accepted' on a live
+// no-action report). adminSetReportAppeal must no-op — return null,
+// write nothing, ring no doorbell — unless the current appeal status
+// is 'requested'. Marking 'requested' by hand stays allowed.
+describe('Appeal guard (live)', () => {
+  let rep3Id;
+  const doorbells = () => fake.all('notifications').filter((n) => n.type === 'appeal_decision').length;
+
+  it('setup: a third report with no appeal behind it', async () => {
+    fake.seed('posts', 'post3', {
+      authorId: 'author1', text: 'A perfectly ordinary third post', image: '', visibility: 'public', audienceIds: [],
+      createdAt: Date.now() - 10_000, editedAt: 0, likes: [], reactions: {}, comments: [], shares: 0,
+      sharedFrom: '', savedBy: [], groupId: '', pageId: '', pageName: '', pageAvatar: ''
+    });
+    await api.login('rita@example.com', 'whatever');
+    await settle();
+    await api.reportContent('post', 'post3', 'Testing the guard', { category: 'other' });
+    await settle();
+    const rep3 = fake.all('reports').find((r) => r.targetId === 'post3');
+    expect(rep3).toBeTruthy();
+    rep3Id = rep3.id;
+    expect(rep3.appeal).toMatchObject({ status: 'none' });
+  });
+
+  it('accept and decline from appeal-none are null no-ops — no write, no doorbell', async () => {
+    await api.login('boss@example.com', 'whatever');
+    await settle();
+    const before = doorbells();
+    expect(await api.adminSetReportAppeal(rep3Id, 'accepted', 'Stray tap')).toBeNull();
+    await settle();
+    expect(fake.get('reports', rep3Id).appeal).toMatchObject({ status: 'none' });
+    expect(await api.adminSetReportAppeal(rep3Id, 'declined', 'Stray tap')).toBeNull();
+    await settle();
+    expect(fake.get('reports', rep3Id).appeal).toMatchObject({ status: 'none' });
+    expect(doorbells()).toBe(before);
+  });
+
+  it('mark-requested from none still works, and the filed appeal can then be accepted', async () => {
+    await api.login('boss@example.com', 'whatever');
+    await settle();
+    const marked = await api.adminSetReportAppeal(rep3Id, 'requested');
+    await settle();
+    expect(marked).toMatchObject({ status: 'requested' });
+    expect(fake.get('reports', rep3Id).appeal).toMatchObject({ status: 'requested', byId: 'boss1' });
+    const before = doorbells();
+    const accepted = await api.adminSetReportAppeal(rep3Id, 'accepted', 'Off-app appeal upheld');
+    await settle();
+    expect(accepted).toMatchObject({ status: 'accepted', reason: 'Off-app appeal upheld' });
+    expect(fake.get('reports', rep3Id).appeal).toMatchObject({ status: 'accepted', reason: 'Off-app appeal upheld' });
+    // Staff-filed appeal (byId == the deciding admin) rings no doorbell:
+    expect(doorbells()).toBe(before);
+    // A decided appeal cannot be re-decided either:
+    expect(await api.adminSetReportAppeal(rep3Id, 'declined', 'Changed my mind')).toBeNull();
+    await settle();
+    expect(fake.get('reports', rep3Id).appeal).toMatchObject({ status: 'accepted' });
+  });
+});
