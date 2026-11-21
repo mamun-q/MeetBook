@@ -1104,7 +1104,7 @@ export function notificationsView(d, meUser) {
   const icons = { friend_request: '👥', friend_accept: '✅', like: '❤️', comment: '💬', reply: '↩️', message: '✉️', mention: '@', share: '🔁', follow: '➕', group_join: '🏘️', page_follow: '📄', group_request: '📥', group_request_result: '🏘️', event_rsvp: '📅' };
   return `<div class="page narrow">
     <div class="row"><h2 class="grow">🔔 ${t('notifications')}</h2><button class="btn btn-ghost btn-sm" data-act="notif-read-all">${t('markAllRead')}</button></div>
-    ${mine.map((n) => `<button class="card notif ${n.read ? '' : 'unread'}" data-act="notif-open" data-id="${n.id}" data-post="${n.postId || ''}" data-conv="${n.conversationId || ''}">
+    ${mine.map((n) => `<button class="card notif ${n.read ? '' : 'unread'}" data-act="notif-open" data-id="${n.id}" data-post="${n.postId || ''}" data-conv="${n.conversationId || ''}" data-actor="${n.actorId || ''}" data-group="${n.groupId || ''}" data-page="${n.pageId || ''}" data-event="${n.eventId || ''}">
       ${avatarHtml(byId[n.actorId], 40)}<span class="grow left">${icons[n.type] || '🔔'} ${escapeHtml(notificationText(n, byId))}<br/><span class="muted small">${timeAgo(n.createdAt)}</span></span>
     </button>`).join('') || emptyState('🔔', t('noNotifications'))}
   </div>`;

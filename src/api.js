@@ -8,7 +8,7 @@ import {
 } from './store.js';
 import { firebaseReady, auth, db, storage, googleProvider } from './firebase.js';
 import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme, canEditMessage, chatPollVote, VANISH_TTL_MS } from './utils.js';
-import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay } from './botLogic.js';
+import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, isDuplicateBotText, freshTemplatePost } from './botLogic.js';
 import { canAccessBotSecrets, botModel } from './gemini.js';
 import { providerById, resolveAiConfig, generateRouted, testProvider as testAiProvider, getLastRoutedFailure, resetLastRoutedFailure, anyProviderConfigured, dhakaDayKey, normaliseUsageMap, usageTotals } from './aiProviders.js';
 import { isCloudinaryConfigured, uploadToCloudinary, uploadFileToCloudinary } from './cloudinary.js';
@@ -1233,7 +1233,7 @@ export async function toggleGroupMembership(groupId) {
     const request = { groupId, groupOwnerId: group.createdBy, userId: user.id, status: 'pending', createdAt: Date.now() };
     if (firebaseReady) {
       await setDoc(doc(db, 'groupRequests', requestId), request);
-      await createNotification({ userId: group.createdBy, type: 'group_request', actorId: user.id, text: `${user.name} asked to join your private group "${group.name}".`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
+      await createNotification({ userId: group.createdBy, type: 'group_request', actorId: user.id, text: `${user.name} asked to join your private group "${group.name}".`, postId: '', conversationId: '', groupId: group.id, read: false, createdAt: Date.now() });
       return 'requested';
     }
     mutate((s) => {
@@ -1245,7 +1245,7 @@ export async function toggleGroupMembership(groupId) {
   }
   if (firebaseReady) {
     await updateDoc(doc(db, 'groups', groupId), { members: isMember ? arrayRemove(user.id) : arrayUnion(user.id) });
-    if (!isMember) await createNotification({ userId: group.createdBy, type: 'group_join', actorId: user.id, text: `${user.name} joined your group "${group.name}".`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
+    if (!isMember) await createNotification({ userId: group.createdBy, type: 'group_join', actorId: user.id, text: `${user.name} joined your group "${group.name}".`, postId: '', conversationId: '', groupId: group.id, read: false, createdAt: Date.now() });
     return isMember ? 'left' : 'joined';
   }
   let result = 'left';
@@ -1274,7 +1274,7 @@ export async function respondGroupRequest(requestId, approve) {
   if (firebaseReady) {
     if (approve) await updateDoc(doc(db, 'groups', group.id), { members: arrayUnion(request.userId) });
     await updateDoc(doc(db, 'groupRequests', requestId), { status });
-    await createNotification({ userId: request.userId, type: 'group_request_result', actorId: user.id, text: approve ? `Your request to join "${group.name}" was approved.` : `Your request to join "${group.name}" was declined.`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
+    await createNotification({ userId: request.userId, type: 'group_request_result', actorId: user.id, text: approve ? `Your request to join "${group.name}" was approved.` : `Your request to join "${group.name}" was declined.`, postId: '', conversationId: '', groupId: group.id, read: false, createdAt: Date.now() });
     return status;
   }
   mutate((s) => {
@@ -1351,7 +1351,7 @@ export async function toggleFollowPage(pageId) {
   const following = (page.followers || []).includes(user.id);
   if (firebaseReady) {
     await updateDoc(doc(db, 'pages', pageId), { followers: following ? arrayRemove(user.id) : arrayUnion(user.id) });
-    if (!following) await createNotification({ userId: page.ownerId, type: 'page_follow', actorId: user.id, text: `${user.name} started following your page "${page.name}".`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
+    if (!following) await createNotification({ userId: page.ownerId, type: 'page_follow', actorId: user.id, text: `${user.name} started following your page "${page.name}".`, postId: '', conversationId: '', pageId: page.id, read: false, createdAt: Date.now() });
     return !following;
   }
   let nowFollowing = false;
@@ -1427,7 +1427,7 @@ export async function toggleEventRsvp(eventId, kind) {
   if (firebaseReady) {
     await updateDoc(doc(db, 'events', eventId), next);
     if (!active && event.createdBy !== user.id) {
-      await createNotification({ userId: event.createdBy, type: 'event_rsvp', actorId: user.id, text: `${user.name} is ${kind === 'going' ? 'going to' : 'interested in'} your event "${event.title}".`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
+      await createNotification({ userId: event.createdBy, type: 'event_rsvp', actorId: user.id, text: `${user.name} is ${kind === 'going' ? 'going to' : 'interested in'} your event "${event.title}".`, postId: '', conversationId: '', eventId: event.id, read: false, createdAt: Date.now() });
     }
     return !active;
   }
@@ -1524,7 +1524,15 @@ export async function respondFriendRequest(friendshipId, accept) {
     throw new Error('Only the person who received this request can accept it.');
   }
   if (firebaseReady) {
-    if (accept) await updateDoc(doc(db, 'friendships', friendshipId), { status: 'accepted' });
+    if (accept) {
+      await updateDoc(doc(db, 'friendships', friendshipId), { status: 'accepted' });
+      // The sender deserves to hear it — live mode never sent this
+      // notification (only the demo branch did), so accepted requests
+      // used to vanish silently for the person who sent them.
+      if (rel && rel.from && rel.from !== user.id) {
+        try { await createNotification({ userId: rel.from, type: 'friend_accept', actorId: user.id, text: `${user.name} accepted your friend request.`, postId: '', conversationId: '', read: false, createdAt: Date.now() }); } catch { /* the accept itself already succeeded */ }
+      }
+    }
     else await deleteDoc(doc(db, 'friendships', friendshipId));
     return;
   }
@@ -3143,8 +3151,13 @@ export async function runDemoBotCycle() {
     const entry = { bot, counters, action: decision.action, gen: null, targetId: '' };
     if (decision.action === 'post') {
       entry.gen = await generateBotText(bot, s.botMemories[bot.id] || [], { kind: 'post' }, generateTemplatePost(bot));
+      const recentTexts = s.posts.filter((p) => p.authorId === bot.id).slice(0, 10).map((p) => p.text);
+      if (entry.gen && isDuplicateBotText(entry.gen.text, recentTexts)) {
+        const fresh = freshTemplatePost(bot, recentTexts);
+        entry.gen = fresh ? { ...entry.gen, text: fresh, provider: 'template' } : null;
+      }
     } else if (decision.action === 'comment') {
-      const target = s.posts.find((p) => p.authorId !== bot.id);
+      const target = pickBotCommentTarget(s.posts, bot.id);
       if (target) {
         entry.targetId = target.id;
         entry.gen = await generateBotText(bot, s.botMemories[bot.id] || [], { kind: 'comment', text: target.text }, generateTemplateComment(bot));
@@ -3164,7 +3177,7 @@ export async function runDemoBotCycle() {
         counters.postsToday += 1;
         st.botActivities.unshift({ id: genId('act'), botId: bot.id, action: 'post', detail: text.slice(0, 90), createdAt: Date.now(), status: 'ok' });
       } else if (entry.action === 'comment' && entry.gen) {
-        const target = st.posts.find((p) => p.id === entry.targetId) || st.posts.find((p) => p.authorId !== bot.id);
+        const target = st.posts.find((p) => p.id === entry.targetId);
         if (target) {
           const text = entry.gen.text;
           target.comments.push({ id: genId('c'), authorId: bot.id, text, createdAt: Date.now(), replies: [] });
@@ -3427,7 +3440,17 @@ export async function runLiveBotCycle() {
         // --- autonomous action (post / comment / like) ---
         const decision = decideBotAction(bot, c, true);
         if (decision.action === 'post') {
-          const gen = await generateBotText(bot, memories, { kind: 'post' }, generateTemplatePost(bot));
+          const recentTexts = (data().posts || []).filter((p) => p.authorId === bot.id).slice(0, 10).map((p) => p.text);
+          let gen = await generateBotText(bot, memories, { kind: 'post' }, generateTemplatePost(bot));
+          if (isDuplicateBotText(gen.text, recentTexts)) {
+            // The provider (or the random template) repeated one of
+            // the bot's recent posts — swap in a fresh template once;
+            // if every variant repeats, skip the post entirely.
+            const fresh = freshTemplatePost(bot, recentTexts);
+            if (!fresh) { results.push({ bot: bot.name, action: 'none', reason: 'post would repeat a recent post' }); gen = null; }
+            else gen = { ...gen, text: fresh, provider: 'template' };
+          }
+          if (gen) {
           // Same stored shape createPost writes: the audience pair is
           // denormalized via postAudience (public -> audienceIds []),
           // so the provable feed listeners pick the post up.
@@ -3445,9 +3468,14 @@ export async function runLiveBotCycle() {
           actions += 1;
           acted = true;
           results.push({ bot: bot.name, action: 'post' });
+          }
         } else if (decision.action === 'comment') {
           const candidates = (data().posts || []).filter((p) => p.visibility === 'public' && !p.groupId && !p.pageId && p.authorId !== bot.id);
-          const target = candidates.find((p) => !(p.comments || []).some((cm) => cm.authorId === bot.id)) || candidates[0];
+          // One comment per post, ever: no fallback to a post the bot
+          // already commented on (that fallback is what stacked
+          // repeat comments onto the same post).
+          const target = pickBotCommentTarget(candidates, bot.id);
+          if (!target) results.push({ bot: bot.name, action: 'none', reason: 'no fresh post to comment on' });
           if (target) {
             const blockSnap = await getDoc(doc(db, 'blocks', `${target.authorId}_${bot.id}`));
             if (blockSnap.exists()) {

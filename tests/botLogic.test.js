@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest';
 import {
   normaliseBot, selectMemories, buildBotPrompt, generateTemplatePost,
   generateTemplateComment, decideBotAction, memoryFromConversation, DEFAULT_BOT_LIMITS,
-  templateBotMessageReply, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay
+  templateBotMessageReply, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay,
+  botAlreadyCommented, pickBotCommentTarget, normaliseBotText, isDuplicateBotText,
+  freshTemplatePost, freshTemplateComment
 } from '../src/botLogic.js';
 
 const nova = {
@@ -139,5 +141,60 @@ describe('live runner counters', () => {
     expect(botCountersForDay(stored, '2026-01-06')).toEqual({});
     expect(botCountersForDay(null, '2026-01-05')).toEqual({});
     expect(emptyBotCounters()).toEqual({ postsToday: 0, commentsToday: 0, likesToday: 0, messagesToday: 0, lastActionAt: 0 });
+  });
+});
+
+describe('anti-repetition guards (Audit #3)', () => {
+  const post = (id, authorId, comments = []) => ({ id, authorId, comments });
+
+  it('botAlreadyCommented sees only the bot\'s own top-level comments', () => {
+    expect(botAlreadyCommented(post('p1', 'u1', [{ authorId: 'bot_sage' }]), 'bot_sage')).toBe(true);
+    expect(botAlreadyCommented(post('p1', 'u1', [{ authorId: 'u2' }]), 'bot_sage')).toBe(false);
+    expect(botAlreadyCommented(post('p1', 'u1'), 'bot_sage')).toBe(false);
+    expect(botAlreadyCommented(null, 'bot_sage')).toBe(false);
+  });
+
+  it('pickBotCommentTarget skips own + already-commented posts, else null (NO fallback)', () => {
+    const posts = [
+      post('own', 'bot_sage'),
+      post('done', 'u1', [{ authorId: 'bot_sage', text: 'Great point, I had not thought of it that way.' }]),
+      post('fresh', 'u2'),
+    ];
+    expect(pickBotCommentTarget(posts, 'bot_sage')?.id).toBe('fresh');
+    // Every candidate exhausted -> null, never a second comment on 'done'.
+    expect(pickBotCommentTarget(posts.slice(0, 2), 'bot_sage')).toBeNull();
+    expect(pickBotCommentTarget([], 'bot_sage')).toBeNull();
+  });
+
+  it('normaliseBotText strips the stored prefix and folds case/space', () => {
+    expect(normaliseBotText('AI Bot post · Hello   Brave   World')).toBe('hello brave world');
+    expect(normaliseBotText('  Plain text ')).toBe('plain text');
+    expect(normaliseBotText('')).toBe('');
+  });
+
+  it('isDuplicateBotText matches a stored post against generated text', () => {
+    const stored = ['AI Bot post · Thinking about books today. What has everyone else been up to?'];
+    expect(isDuplicateBotText('Thinking about books today. What has everyone else been up to?', stored)).toBe(true);
+    expect(isDuplicateBotText('Something entirely new', stored)).toBe(false);
+    expect(isDuplicateBotText('', stored)).toBe(false);
+  });
+
+  it('freshTemplatePost returns a non-repeating template, or null when all repeat', () => {
+    const all = [0.01, 0.21, 0.41, 0.61, 0.81].map((s) => generateTemplatePost(sage, s));
+    expect(new Set(all).size).toBe(5);
+    expect(freshTemplatePost(sage, [])).toBeTruthy();
+    const fresh = freshTemplatePost(sage, [all[0]]);
+    expect(fresh).toBeTruthy();
+    expect(isDuplicateBotText(fresh, [all[0]])).toBe(false);
+    expect(freshTemplatePost(sage, all)).toBeNull();
+    // Stored shape (with prefix) must also count as repetition.
+    expect(freshTemplatePost(sage, all.map((t) => `AI Bot post · ${t}`))).toBeNull();
+  });
+
+  it('freshTemplateComment avoids texts the bot already used', () => {
+    const all = [0.01, 0.26, 0.51, 0.76].map((s) => generateTemplateComment(sage, s));
+    expect(new Set(all).size).toBe(4);
+    expect(freshTemplateComment(sage, all)).toBeNull();
+    expect(freshTemplateComment(sage, [])).toBeTruthy();
   });
 });

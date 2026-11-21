@@ -108,6 +108,59 @@ export function generateTemplateComment(bot, seed = Math.random()) {
   return COMMENT_TEMPLATES[idx](b);
 }
 
+// --- Anti-repetition guards (Audit #3) --------------------------------
+// Nova was caught commenting several times on the SAME post and
+// posting near-identical posts again and again. These pure helpers
+// keep every runner (browser, GitHub, demo) honest.
+
+// Has this bot already left a top-level comment on the post?
+export function botAlreadyCommented(post, botId) {
+  return (post?.comments || []).some((cm) => cm.authorId === botId);
+}
+
+// The first post the bot has NOT commented on yet — or null. There is
+// deliberately NO fallback to an already-commented post: running out
+// of fresh posts means skipping the comment, not stacking another one
+// on the same post.
+export function pickBotCommentTarget(posts = [], botId) {
+  return (posts || []).find((p) => p && p.authorId !== botId && !botAlreadyCommented(p, botId)) || null;
+}
+
+// Bot posts are stored with an "AI Bot post · " prefix; compare texts
+// without it, case- and whitespace-insensitively.
+export function normaliseBotText(text) {
+  return String(text || '').replace(/^AI Bot post ·\s*/i, '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+export function isDuplicateBotText(text, recentTexts = []) {
+  const n = normaliseBotText(text);
+  if (!n) return false;
+  return (recentTexts || []).some((t) => normaliseBotText(t) === n);
+}
+
+// A template post that does not repeat any of the recent texts, or
+// null when every template would repeat (the caller then skips the
+// post instead of publishing a duplicate).
+export function freshTemplatePost(bot, recentTexts = []) {
+  const b = normaliseBot(bot);
+  for (let i = 0; i < POST_TEMPLATES.length; i++) {
+    const text = POST_TEMPLATES[i](b);
+    if (!isDuplicateBotText(text, recentTexts)) return text;
+  }
+  return null;
+}
+
+// Same for comments: a template comment whose text is not already in
+// the given list (e.g. the bot's own earlier comments), or null.
+export function freshTemplateComment(bot, recentTexts = []) {
+  const b = normaliseBot(bot);
+  for (let i = 0; i < COMMENT_TEMPLATES.length; i++) {
+    const text = COMMENT_TEMPLATES[i](b);
+    if (!isDuplicateBotText(text, recentTexts)) return text;
+  }
+  return null;
+}
+
 // Decide the next autonomous action for a bot, honouring its own limits and
 // the global kill switch. Pure: counters are passed in.
 export function decideBotAction(bot, counters = {}, globalEnabled = true, now = Date.now()) {

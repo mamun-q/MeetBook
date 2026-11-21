@@ -50,22 +50,43 @@ async function login(page, email, password) {
   await page.waitForSelector('.topbar', { timeout: 25000 });
 }
 
-async function checkRoute(page, route, viewportName, bag) {
+async function probeRoute(page, route, viewportName, bag) {
   const where = `#/${route} [${viewportName}]`;
   bag.length = 0;
   await page.goto(BASE + '#/' + route, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(2600); // let Firestore data + render settle
-  for (const e of bag) report(e.kind, where, e.detail);
+  const found = bag.map((e) => ({ kind: e.kind, where, detail: String(e.detail).slice(0, 300) }));
   // Blank check measures the ROUTE CONTENT (.shell), not #app: the
   // app chrome (topbar/nav/footer) alone exceeds the old threshold,
   // so a route whose view rendered empty used to pass as "fine".
   const blank = await page.evaluate(() => (document.querySelector('.shell')?.innerText || '').trim().length);
-  if (blank < 20) report('blank-page', where, `route content rendered only ${blank} chars of text`);
+  if (blank < 20) found.push({ kind: 'blank-page', where, detail: `route content rendered only ${blank} chars of text` });
   const overflow = await page.evaluate(() => Math.max(
     document.documentElement.scrollWidth - document.documentElement.clientWidth,
     document.body ? document.body.scrollWidth - document.documentElement.clientWidth : 0,
   ));
-  if (overflow > 1) report('horizontal-overflow', where, `page is ${overflow}px wider than the screen (sideways scroll)`);
+  if (overflow > 1) found.push({ kind: 'horizontal-overflow', where, detail: `page is ${overflow}px wider than the screen (sideways scroll)` });
+  return found;
+}
+
+// A route whose ONLY problems are Firestore 429s is almost always the
+// free plan's burst limit under this sweep's rapid page loads, not an
+// app bug — the page still renders from local data and a human-paced
+// reload succeeds (runs #2–#4 all failed on exactly this). Recheck
+// such a route ONCE after a pause and keep only what persists.
+function isBurst429(found) {
+  return found.length > 0 && found.every((p) => p.kind === 'http-429' || (p.kind === 'console-error' && /429/.test(p.detail)));
+}
+
+async function checkRoute(page, route, viewportName, bag) {
+  let found = await probeRoute(page, route, viewportName, bag);
+  if (isBurst429(found)) {
+    await page.waitForTimeout(20000);
+    const retry = await probeRoute(page, route, viewportName, bag);
+    if (!retry.length) notes.push(`qa: #/${route} [${viewportName}] — Firestore 429s on the first visit only (sweep burst load); clean on recheck`);
+    found = retry;
+  }
+  for (const p of found) report(p.kind, p.where, p.detail);
 }
 
 async function sweep(browser, email, password, routes, label) {

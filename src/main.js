@@ -621,7 +621,12 @@ function refreshPostCard(postId) {
     if (f.dataset.replyForm && !f.classList.contains('hidden')) openReplies.add(f.dataset.replyForm);
   });
   const tpl = document.createElement('template');
-  tpl.innerHTML = postCardHtml(post, V.viewCtx(d, user)).trim();
+  const ctx = V.viewCtx(d, user);
+  // The group view deliberately suppresses the "Posted in …" note
+  // (you are already inside the group); a card refreshed there must
+  // not grow the note until the next full render (Audit #3).
+  if (parseRoute().seg[0] === 'group') ctx.showGroupContext = false;
+  tpl.innerHTML = postCardHtml(post, ctx).trim();
   const fresh = tpl.content.firstElementChild;
   if (!fresh) { render(); return; }
   old.replaceWith(fresh);
@@ -634,15 +639,21 @@ function refreshPostCard(postId) {
 }
 
 async function engage(promise, postId, successMsg) {
-  refreshPostCard(postId); // the mirror is already patched optimistically — paint now
+  try { refreshPostCard(postId); } catch { render(); } // the mirror is already patched optimistically — paint now
   try {
     const r = await promise;
     if (successMsg) toast(successMsg, 'success');
-    refreshPostCard(postId);
+    // On the Saved view, unsaving changes the LIST itself, not just
+    // the card: a card-only refresh left the unsaved post sitting in
+    // the list until the next full render (Audit #3).
+    const user = me();
+    const post = api.data().posts.find((p) => p.id === postId);
+    if ((parseRoute().seg[0] || '') === 'saved' && post && user && !(post.savedBy || []).includes(user.id)) render();
+    else refreshPostCard(postId);
     return r;
   } catch (err) {
     toast(err.message || 'Something went wrong.', 'error');
-    refreshPostCard(postId); // the api rolled the mirror back — show the true state
+    try { refreshPostCard(postId); } catch { render(); } // the api rolled the mirror back — show the true state
     return null;
   }
 }
@@ -1062,19 +1073,41 @@ document.addEventListener('click', async (e) => {
     case 'voice-send': await sendVoiceRecording(); break;
     case 'notif-read-all': await handle(api.markAllNotificationsRead(), 'All caught up.'); break;
     case 'notif-open': {
+      // Every notification type lands on ITS OWN place (Audit #3):
+      // group/page/event notifications used to carry no target id at
+      // all and dumped the user on the home feed, and post
+      // notifications only knew the home feed — a group or page post
+      // was never found there.
+      const n = d.notifications.find((x) => x.id === actEl.dataset.id);
       await handle(api.markNotificationRead(actEl.dataset.id));
       if (actEl.dataset.conv) location.hash = `#/messages/${actEl.dataset.conv}`;
+      else if (actEl.dataset.group) location.hash = `#/group/${actEl.dataset.group}`;
+      else if (actEl.dataset.page) location.hash = `#/page/${actEl.dataset.page}`;
+      else if (actEl.dataset.event) location.hash = '#/events';
+      else if (n?.type === 'friend_request') location.hash = '#/friends';
+      else if ((n?.type === 'follow' || n?.type === 'friend_accept') && actEl.dataset.actor) location.hash = `#/profile/${actEl.dataset.actor}`;
+      else if (n && (n.type === 'group_join' || n.type === 'group_request' || n.type === 'group_request_result')) location.hash = '#/groups';
+      else if (n?.type === 'page_follow' && actEl.dataset.actor) location.hash = `#/profile/${actEl.dataset.actor}`;
       else if (actEl.dataset.post) {
-        // Land ON the post the notification points to (the view stamps
-        // data-post on every notification; this handler never read
-        // it, so like/comment notifications just dumped you at the
-        // top of the feed).
+        // Land ON the post, in the view it actually lives in (group
+        // feed, page feed, or home), then scroll + flash it. The
+        // scroll retries while the destination view settles, and if
+        // the post is older than the feed window it falls back to
+        // the author's profile, where all their posts are listed.
         const postId = actEl.dataset.post;
-        location.hash = '#/';
-        setTimeout(() => {
-          const el = document.querySelector(`[data-post="${postId}"]`);
-          if (el) { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 2000); }
-        }, 400);
+        const post = d.posts.find((p) => p.id === postId);
+        const dest = post?.groupId ? `#/group/${post.groupId}` : post?.pageId ? `#/page/${post.pageId}` : '#/';
+        location.hash = dest;
+        let tries = 0;
+        let fellBack = false;
+        const tick = () => {
+          const el = document.querySelector(`article.post-card[data-post="${CSS.escape(postId)}"]`);
+          if (el) { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 2000); return; }
+          tries += 1;
+          if (tries < 10) { setTimeout(tick, 300); return; }
+          if (!fellBack && post?.authorId && dest === '#/') { fellBack = true; tries = 0; location.hash = `#/profile/${post.authorId}`; setTimeout(tick, 350); }
+        };
+        setTimeout(tick, 350);
       }
       else location.hash = '#/';
       break;
@@ -1466,12 +1499,12 @@ document.addEventListener('submit', async (e) => {
   }
   if (form.id === 'edit-post-form') {
     const r = await handle(api.editPost(form.dataset.id, String(fd.get('text') || '')), 'Post updated.');
-    if (r) closeModal(); // stay open on failure so the edited text is not lost
+    if (r !== null) closeModal(); // handle() returns null ONLY on failure — editPost itself returns undefined, so `if (r)` kept the dialog open even on success
     return;
   }
   if (form.id === 'edit-message-form') {
     const r = await handle(api.editMessage(form.dataset.id, String(fd.get('text') || '')), t('messageEdited'));
-    if (r) closeModal();
+    if (r !== null) closeModal();
     return;
   }
   if (form.id === 'chat-poll-form') {

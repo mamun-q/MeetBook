@@ -216,7 +216,7 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 .post-menu-wrap { position: relative; }
 .menu { position: absolute; right: 0; top: 34px; background: var(--surface); background: color-mix(in srgb, var(--surface) 94%, transparent); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow-lg); min-width: 170px; z-index: 20; display: flex; flex-direction: column; padding: 6px; animation: mb-menu .16s ease-out; }
 @keyframes mb-menu { from { opacity: 0; transform: translateY(-4px) scale(.98); } }
-.menu button { background: none; border: none; text-align: left; padding: 8px 10px; border-radius: 8px; cursor: pointer; color: var(--text); transition: background .13s ease; }
+.menu button { background: none; border: none; text-align: left; padding: 10px 12px; border-radius: 8px; cursor: pointer; color: var(--text); transition: background .13s ease; }
 .menu button:hover { background: var(--surface-2); }
 .shared-note { font-size: .82rem; color: var(--muted); margin-bottom: 6px; }
 .post-text { white-space: pre-wrap; word-break: break-word; margin: .55rem 0; }
@@ -407,7 +407,7 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 .evidence-box { background: var(--surface-2); border: 1px dashed var(--border); border-radius: var(--radius-sm); padding: 10px 12px; }
 .evidence-box blockquote { margin: 6px 0 0; font-style: italic; overflow-wrap: anywhere; }
 .report-card { margin-bottom: 0; }
-.msg-report-btn { font-size: .78rem; opacity: .55; padding: 0 4px; line-height: 1; flex: none; }
+.msg-report-btn { font-size: .82rem; opacity: .6; padding: .45rem .4rem; line-height: 1; flex: none; }
 .msg-report-btn:hover { opacity: 1; }
 /* Message footer row: time/status and the report flag share ONE inline
    row inside the bubble instead of the flag dropping onto its own line
@@ -429,7 +429,7 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 
 /* modal / toast / misc */
 .modal-backdrop { position: fixed; inset: 0; background: rgba(8,10,16,.55); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); display: grid; place-items: center; z-index: 100; padding: 12px; }
-.modal { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 20px; padding: 20px; width: min(560px, 100%); max-height: 88vh; overflow-y: auto; box-shadow: var(--shadow-lg); animation: mb-modal .22s ease-out; }
+.modal { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 20px; padding: 20px; width: min(560px, 100%); max-height: 88vh; max-height: 88dvh; overflow-y: auto; box-shadow: var(--shadow-lg); animation: mb-modal .22s ease-out; }
 @keyframes mb-modal { from { opacity: 0; transform: translateY(10px) scale(.98); } }
 .toast-root { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 200; display: flex; flex-direction: column; gap: 8px; align-items: center; width: min(480px, 92vw); }
 .toast { background: rgba(27,29,35,.94); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); color: #fff; padding: 10px 16px; border-radius: 12px; box-shadow: var(--shadow-lg); opacity: 0; transition: opacity .25s, transform .25s; transform: translateY(8px); text-align: center; max-width: 100%; }
@@ -651,12 +651,12 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 .msg-quote span { display: block; font-size: .78rem; opacity: .85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
 /* Per-message action cluster (reply / react / pin / report). */
 .msg-actions { display: inline-flex; align-items: center; gap: 2px; flex: none; }
-.msg-act-btn { font-size: .78rem; opacity: .55; padding: 0 3px; line-height: 1; }
+.msg-act-btn { font-size: .85rem; opacity: .65; padding: .45rem .4rem; line-height: 1; }
 .msg-act-btn:hover { opacity: 1; }
 .msg-act-btn.active { opacity: 1; }
 /* Inline reaction picker inside the bubble. */
 .msg-picker { display: flex; gap: 2px; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 2px 6px; margin-top: 6px; box-shadow: var(--shadow-md); animation: mb-menu .16s ease-out; }
-.msg-picker .emoji-btn { width: 32px; height: 32px; font-size: 1.15rem; }
+.msg-picker .emoji-btn { width: 36px; height: 36px; font-size: 1.15rem; }
 /* Reaction count chips under the bubble. */
 .msg-chips { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 3px; }
 .msg-chip { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; font-size: .78rem; cursor: pointer; line-height: 1.5; transition: transform .12s ease, background .15s ease; }
@@ -681,7 +681,7 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 .pinned-item:last-child { border-bottom: none; }
 .pinned-item .grow { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* Conversation info panel (themes + pinned list + group members). */
-.conv-info { border-bottom: 1px solid var(--border); padding: 10px 14px; display: flex; flex-direction: column; gap: 14px; background: var(--surface); max-height: 46vh; overflow-y: auto; }
+.conv-info { border-bottom: 1px solid var(--border); padding: 10px 14px; display: flex; flex-direction: column; gap: 14px; background: var(--surface); max-height: 46vh; max-height: 46dvh; overflow-y: auto; }
 .conv-info-section h4 { margin: 0 0 8px; font-size: .85rem; }
 .theme-swatches { display: flex; gap: 8px; flex-wrap: wrap; }
 .theme-swatch { width: 34px; height: 34px; border-radius: 50%; border: 2px solid var(--border); background: var(--surface-2); color: var(--muted, #888); cursor: pointer; font-size: .9rem; display: grid; place-items: center; padding: 0; transition: transform .12s ease, box-shadow .15s ease, border-color .15s ease; }
@@ -771,6 +771,8 @@ a, button, input, select, textarea, label { touch-action: manipulation; }
 .msg-vanish { border: 1px dashed var(--brand-2); }
 .msg-file { display: flex; gap: 10px; align-items: center; text-decoration: none; color: inherit; background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; padding: 9px 12px; min-width: min(230px, 60vw); }
 .msg-file small { display: block; color: var(--muted); font-size: .75rem; }
+.msg-file .grow { min-width: 0; }
+.msg-file b { overflow-wrap: anywhere; }
 .msg-file-icon { font-size: 1.4rem; }
 .mention-badge { background: var(--brand); color: #fff; border-radius: 50%; width: 20px; height: 20px; display: grid; place-items: center; font-size: .75rem; font-weight: 700; flex: none; align-self: center; }
 .msg-mention { color: var(--brand); font-weight: 700; background: rgba(24, 119, 242, .12); border-radius: 5px; padding: 0 3px; }
@@ -815,4 +817,11 @@ a, button, input, select, textarea, label { touch-action: manipulation; }
   .profile-meta h2 { font-size: 1.3rem; }
   .post-stats { flex-wrap: wrap; gap: 6px 12px; font-size: .85rem; }
   .tabs { flex-wrap: wrap; }
+  /* Audit #3 mobile tap targets: the chat composer's small buttons
+     (➕ tray, 😊 emoji, 🎤 voice, thread emoji) were ~30px tall —
+     the most-touched controls in the app and the easiest to mis-tap.
+     The role select in Admin → Users also beat the 16px iOS
+     auto-zoom guard with its own smaller font-size. */
+  .message-form .btn-sm, .thread-emoji-btn { min-height: 42px; min-width: 42px; }
+  .admin-role-select { font-size: 16px !important; }
 }

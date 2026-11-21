@@ -24,7 +24,8 @@ import { DEFAULT_FIREBASE_CONFIG } from '../src/firebase-config.js';
 import {
   normaliseBot, findBotReplyTargets, decideBotAction,
   templateBotMessageReply, generateTemplatePost, generateTemplateComment,
-  emptyBotCounters, counterDayKey, botCountersForDay, memoryFromConversation
+  emptyBotCounters, counterDayKey, botCountersForDay, memoryFromConversation,
+  pickBotCommentTarget, isDuplicateBotText, freshTemplatePost
 } from '../src/botLogic.js';
 import {
   resolveAiConfig, generateRouted, normaliseUsageMap, usageTotals,
@@ -225,7 +226,17 @@ async function main() {
       // --- autonomous action (post / comment / like) ---
       const decision = decideBotAction(bot, c, true);
       if (decision.action === 'post') {
-        const gen = await generateBotText(bot, memories, { kind: 'post' }, generateTemplatePost(bot), secretsDoc, platformConfig);
+        const ownSnap = await getDocs(query(collection(db, 'posts'), where('authorId', '==', bot.id), limit(10)));
+        const recentTexts = ownSnap.docs.map((d) => d.data().text);
+        let gen = await generateBotText(bot, memories, { kind: 'post' }, generateTemplatePost(bot), secretsDoc, platformConfig);
+        if (isDuplicateBotText(gen.text, recentTexts)) {
+          // Repeated a recent post — swap in a fresh template once;
+          // if every variant repeats, skip the post entirely.
+          const fresh = freshTemplatePost(bot, recentTexts);
+          if (!fresh) { results.push(`${bot.name} → skipped post (would repeat a recent post)`); gen = null; }
+          else gen = { ...gen, text: fresh, provider: 'template', model: '' };
+        }
+        if (gen) {
         await addDoc(collection(db, 'posts'), {
           authorId: bot.id, text: `AI Bot post · ${gen.text}`, image: '',
           visibility: 'public', audienceIds: [],
@@ -239,12 +250,16 @@ async function main() {
         c.lastActionAt = Date.now();
         acted = true;
         results.push(`${bot.name} → post (via ${gen.provider})`);
+        }
       } else if (decision.action === 'comment') {
         const postsSnap = await getDocs(query(collection(db, 'posts'), orderBy('createdAt', 'desc'), limit(30)));
         const candidates = postsSnap.docs
           .map((d) => ({ id: d.id, ...d.data() }))
           .filter((p) => p.visibility === 'public' && !p.groupId && !p.pageId && p.authorId !== bot.id);
-        const target = candidates.find((p) => !(p.comments || []).some((cm) => cm.authorId === bot.id)) || candidates[0];
+        // One comment per post, ever: no fallback to a post the bot
+        // already commented on (that fallback stacked repeat comments
+        // onto the same post).
+        const target = pickBotCommentTarget(candidates, bot.id);
         if (target) {
           const blockSnap = await getDoc(doc(db, 'blocks', `${target.authorId}_${bot.id}`));
           if (!blockSnap.exists()) {
