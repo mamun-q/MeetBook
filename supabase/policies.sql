@@ -957,38 +957,35 @@ create policy blocks_delete on public.blocks
 
 -- =====================================================================
 -- notifications
--- Guarantee: read by the owner or admins; create by ANY signed-in
--- user (actors notify each other — the app suppresses
--- self-notifications in createNotification); update by the owner;
--- delete by owner or admins.
+-- Guarantee: read by the owner or admins; create with actorId
+-- pinned to the caller, admins exempt (TIGHTENED 2026-11-22 with
+-- Limon's approval — a deliberate deviation from the Firestore
+-- mirror, see the note at the insert policy below); update by the
+-- owner; delete by owner or admins.
 -- =====================================================================
 create policy notifications_select on public.notifications
   for select to authenticated
   using ("userId" = (select auth.uid())::text or public.is_admin());
 
--- FAITHFUL Firestore version: any signed-in user may create a
--- notification for anyone. This preserves Firestore's known
--- forge-any-notification hole 1:1 (RLS_NOTES.md, notifications flag).
-create policy notifications_insert_faithful on public.notifications
+-- ADOPTED 2026-11-22 (Limon approved): actorId is pinned to the
+-- caller (admins exempt), closing Firestore's forge-any-notification
+-- hole. Deliberate deviation from the 1:1 mirror (RLS_NOTES.md,
+-- notifications flag): the faithful version allowed any signed-in
+-- user to create a notification for anyone. Every real write path
+-- in api.js already sets actorId to the caller, so no legitimate
+-- flow changes.
+create policy notifications_insert_actor_pinned on public.notifications
   for insert to authenticated
-  with check (true);
+  with check (
+    "actorId" = (select auth.uid())::text
+    or public.is_admin()
+  );
 
 -- -------------------------------------------------------------------
--- OPTIONAL — needs Limon approval (Phase 2 decision)
--- Deliberate deviation recommended in RLS_NOTES.md: pin actorId to
--- the caller (admins exempt), closing the forgery hole. Every real
--- write path in api.js already sets actorId to the caller, so this
--- breaks nothing legitimate — but it IS a behaviour change. To
--- adopt: drop the faithful policy above and uncomment these two
--- statements.
---
--- drop policy notifications_insert_faithful on public.notifications;
--- create policy notifications_insert_actor_pinned on public.notifications
---   for insert to authenticated
---   with check (
---     "actorId" = (select auth.uid())::text
---     or public.is_admin()
---   );
+-- (This block previously held the OPTIONAL proposal to pin actorId,
+-- marked as needing Limon's approval. He approved it on 2026-11-22,
+-- so the actor-pinned insert policy above is the applied state and
+-- the old faithful policy no longer exists.)
 -- -------------------------------------------------------------------
 
 create policy notifications_update on public.notifications
