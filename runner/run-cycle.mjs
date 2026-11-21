@@ -25,7 +25,7 @@ import {
   normaliseBot, findBotReplyTargets, decideBotAction,
   templateBotMessageReply, generateTemplatePost, generateTemplateComment,
   emptyBotCounters, counterDayKey, botCountersForDay, memoryFromConversation,
-  pickBotCommentTarget, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost
+  pickBotCommentTarget, pickBotReplyTarget, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost
 } from '../src/botLogic.js';
 import {
   resolveAiConfig, generateRouted, normaliseUsageMap, usageTotals,
@@ -262,8 +262,39 @@ async function main() {
         }
       } else if (decision.action === 'comment') {
         const postsSnap = await getDocs(query(collection(db, 'posts'), orderBy('createdAt', 'desc'), limit(30)));
-        const candidates = postsSnap.docs
-          .map((d) => ({ id: d.id, ...d.data() }))
+        const allPosts = postsSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        const botIds = new Set(bots.map((b) => b.id));
+        // Phase 2: reply before a new top-level comment (thread
+        // budgets + loop detection live in pickBotReplyTarget).
+        const replyTarget = pickBotReplyTarget(allPosts, bot, botIds);
+        if (replyTarget) {
+          const hostPost = replyTarget.post;
+          const hostComment = replyTarget.comment;
+          const blockSnap = await getDoc(doc(db, 'blocks', `${hostComment.authorId}_${bot.id}`));
+          if (!blockSnap.exists()) {
+            const gen = await generateBotText(bot, memories, { kind: 'comment', text: hostComment.text }, generateTemplateComment(bot), secretsDoc, platformConfig);
+            const freshSnap = await getDoc(doc(db, 'posts', hostPost.id));
+            const freshComments = freshSnap.exists() ? (freshSnap.data().comments || []) : (hostPost.comments || []);
+            const host = freshComments.find((cm) => cm.id === hostComment.id);
+            if (host) {
+              host.replies = [...(host.replies || []), { id: `c_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`, authorId: bot.id, text: gen.text, createdAt: Date.now() }];
+              await updateDoc(doc(db, 'posts', hostPost.id), { comments: freshComments });
+              c.commentsToday += 1;
+              c.lastActionAt = Date.now();
+              if (!botIds.has(hostComment.authorId)) {
+                await addDoc(collection(db, 'notifications'), {
+                  userId: hostComment.authorId, type: 'comment', actorId: bot.id,
+                  text: `${bot.name} (AI Bot) replied to your comment.`, postId: hostPost.id, conversationId: '',
+                  read: false, createdAt: Date.now()
+                });
+              }
+              await recordBotBrain(bot, gen.provider, gen.model);
+              acted = true;
+              results.push(`${bot.name} → comment reply (via ${gen.provider})`);
+            }
+          }
+        } else {
+        const candidates = allPosts
           .filter((p) => p.visibility === 'public' && !p.groupId && !p.pageId && p.authorId !== bot.id);
         // One comment per post, ever: no fallback to a post the bot
         // already commented on (that fallback stacked repeat comments
@@ -294,6 +325,7 @@ async function main() {
             acted = true;
             results.push(`${bot.name} → comment (via ${gen.provider})`);
           }
+        }
         }
       } else if (decision.action === 'like') {
         const postsSnap = await getDocs(query(collection(db, 'posts'), orderBy('createdAt', 'desc'), limit(30)));

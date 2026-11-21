@@ -8,7 +8,7 @@ import {
 } from './store.js';
 import { firebaseReady, auth, db, storage, googleProvider } from './firebase.js';
 import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme, canEditMessage, chatPollVote, VANISH_TTL_MS } from './utils.js';
-import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost } from './botLogic.js';
+import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, pickBotReplyTarget, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost } from './botLogic.js';
 import { canAccessBotSecrets, botModel } from './gemini.js';
 import { providerById, resolveAiConfig, generateRouted, testProvider as testAiProvider, getLastRoutedFailure, resetLastRoutedFailure, anyProviderConfigured, dhakaDayKey, normaliseUsageMap, usageTotals } from './aiProviders.js';
 import { isCloudinaryConfigured, uploadToCloudinary, uploadFileToCloudinary } from './cloudinary.js';
@@ -3163,10 +3163,18 @@ export async function runDemoBotCycle() {
         entry.gen = fresh ? { ...entry.gen, text: fresh, provider: 'template' } : null;
       }
     } else if (decision.action === 'comment') {
-      const target = pickBotCommentTarget(s.posts, bot);
-      if (target) {
-        entry.targetId = target.id;
-        entry.gen = await generateBotText(bot, s.botMemories[bot.id] || [], { kind: 'comment', text: target.text }, generateTemplateComment(bot));
+      // Phase 2: reply before a new top-level comment (thread budgets).
+      const botIds = new Set(s.bots.map((b) => b.id));
+      const replyTarget = pickBotReplyTarget(s.posts, bot, botIds);
+      if (replyTarget) {
+        entry.replyTo = { postId: replyTarget.post.id, commentId: replyTarget.comment.id, authorId: replyTarget.comment.authorId };
+        entry.gen = await generateBotText(bot, s.botMemories[bot.id] || [], { kind: 'comment', text: replyTarget.comment.text }, generateTemplateComment(bot));
+      } else {
+        const target = pickBotCommentTarget(s.posts, bot);
+        if (target) {
+          entry.targetId = target.id;
+          entry.gen = await generateBotText(bot, s.botMemories[bot.id] || [], { kind: 'comment', text: target.text }, generateTemplateComment(bot));
+        }
       }
     }
     plan.push(entry);
@@ -3183,15 +3191,29 @@ export async function runDemoBotCycle() {
         counters.postsToday += 1;
         st.botActivities.unshift({ id: genId('act'), botId: bot.id, action: 'post', detail: text.slice(0, 90), createdAt: Date.now(), status: 'ok' });
       } else if (entry.action === 'comment' && entry.gen) {
-        const target = st.posts.find((p) => p.id === entry.targetId);
-        if (target) {
-          const text = entry.gen.text;
-          target.comments.push({ id: genId('c'), authorId: bot.id, text, createdAt: Date.now(), replies: [] });
-          counters.commentsToday += 1;
-          st.botActivities.unshift({ id: genId('act'), botId: bot.id, action: 'comment', detail: text.slice(0, 90), createdAt: Date.now(), status: 'ok' });
-          const author = st.users.find((u) => u.id === target.authorId);
-          if (author && !author.isBot) {
-            st.notifications.unshift({ id: genId('n'), userId: author.id, type: 'comment', actorId: bot.id, text: `${bot.name} (AI Bot) commented on your post.`, postId: target.id, conversationId: '', read: false, createdAt: Date.now() });
+        const text = entry.gen.text;
+        if (entry.replyTo) {
+          const hostPost = st.posts.find((p) => p.id === entry.replyTo.postId);
+          const host = hostPost?.comments.find((cm) => cm.id === entry.replyTo.commentId);
+          if (host) {
+            host.replies = [...(host.replies || []), { id: genId('c'), authorId: bot.id, text, createdAt: Date.now() }];
+            counters.commentsToday += 1;
+            st.botActivities.unshift({ id: genId('act'), botId: bot.id, action: 'comment', detail: text.slice(0, 90), createdAt: Date.now(), status: 'ok' });
+            const author = st.users.find((u) => u.id === entry.replyTo.authorId);
+            if (author && !author.isBot) {
+              st.notifications.unshift({ id: genId('n'), userId: author.id, type: 'comment', actorId: bot.id, text: `${bot.name} (AI Bot) replied to your comment.`, postId: hostPost.id, conversationId: '', read: false, createdAt: Date.now() });
+            }
+          }
+        } else {
+          const target = st.posts.find((p) => p.id === entry.targetId);
+          if (target) {
+            target.comments.push({ id: genId('c'), authorId: bot.id, text, createdAt: Date.now(), replies: [] });
+            counters.commentsToday += 1;
+            st.botActivities.unshift({ id: genId('act'), botId: bot.id, action: 'comment', detail: text.slice(0, 90), createdAt: Date.now(), status: 'ok' });
+            const author = st.users.find((u) => u.id === target.authorId);
+            if (author && !author.isBot) {
+              st.notifications.unshift({ id: genId('n'), userId: author.id, type: 'comment', actorId: bot.id, text: `${bot.name} (AI Bot) commented on your post.`, postId: target.id, conversationId: '', read: false, createdAt: Date.now() });
+            }
           }
         }
       } else if (entry.action === 'like') {
@@ -3489,7 +3511,45 @@ export async function runLiveBotCycle() {
           results.push({ bot: bot.name, action: 'post' });
           }
         } else if (decision.action === 'comment') {
-          const candidates = (data().posts || []).filter((p) => p.visibility === 'public' && !p.groupId && !p.pageId && p.authorId !== bot.id);
+          const allPosts = data().posts || [];
+          const botIds = new Set([
+            ...(data().users || []).filter((u) => u.isBot).map((u) => u.id),
+            ...(data().bots || []).map((b) => b.id)
+          ]);
+          // Phase 2: a REPLY comes before a new top-level comment —
+          // answering a commenter on the bot's own post, or joining a
+          // bot-to-bot thread, under the thread budgets.
+          const replyTarget = pickBotReplyTarget(allPosts, bot, botIds);
+          if (replyTarget) {
+            const hostPost = replyTarget.post;
+            const hostComment = replyTarget.comment;
+            const blockSnap = await getDoc(doc(db, 'blocks', `${hostComment.authorId}_${bot.id}`));
+            if (blockSnap.exists()) {
+              results.push({ bot: bot.name, action: 'none', reason: 'comment author blocked this bot' });
+            } else {
+              const gen = await generateBotText(bot, memories, { kind: 'comment', text: hostComment.text }, generateTemplateComment(bot));
+              const postSnap = await getDoc(doc(db, 'posts', hostPost.id));
+              const freshComments = postSnap.exists() ? (postSnap.data().comments || []) : (hostPost.comments || []);
+              const host = freshComments.find((cm) => cm.id === hostComment.id);
+              if (host) {
+                host.replies = [...(host.replies || []), { id: genId('c'), authorId: bot.id, text: gen.text, createdAt: Date.now() }];
+                await updateDoc(doc(db, 'posts', hostPost.id), { comments: freshComments });
+                c.commentsToday += 1;
+                c.lastActionAt = Date.now();
+                if (!botIds.has(hostComment.authorId)) {
+                  await createNotification({
+                    userId: hostComment.authorId, type: 'comment', actorId: bot.id,
+                    text: `${bot.name} (AI Bot) replied to your comment.`, postId: hostPost.id, conversationId: '',
+                    read: false, createdAt: Date.now()
+                  });
+                }
+                actions += 1;
+                acted = true;
+                results.push({ bot: bot.name, action: 'comment-reply' });
+              }
+            }
+          } else {
+          const candidates = allPosts.filter((p) => p.visibility === 'public' && !p.groupId && !p.pageId && p.authorId !== bot.id);
           // One comment per post, ever: no fallback to a post the bot
           // already commented on (that fallback is what stacked
           // repeat comments onto the same post).
@@ -3516,6 +3576,7 @@ export async function runLiveBotCycle() {
               acted = true;
               results.push({ bot: bot.name, action: 'comment' });
             }
+          }
           }
         } else if (decision.action === 'like') {
           // PUBLIC posts only — the comment filter above always had

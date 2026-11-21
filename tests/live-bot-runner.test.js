@@ -68,6 +68,12 @@ beforeAll(async () => {
     createdAt: Date.now() - 60_000, editedAt: 0, likes: [], reactions: {}, comments: [], shares: 0,
     sharedFrom: '', savedBy: [], groupId: '', pageId: '', pageName: '', pageAvatar: ''
   });
+  fake.seed('posts', 'post_reply1', {
+    authorId: 'bot_nova', text: 'AI Bot post · Space facts for everyone', image: '', visibility: 'public', audienceIds: [],
+    createdAt: Date.now() - 30_000, editedAt: 0, likes: [], reactions: {},
+    comments: [{ id: 'cm1', authorId: 'human1', text: 'Great post, Nova!', createdAt: Date.now() - 20_000, replies: [] }],
+    shares: 0, sharedFrom: '', savedBy: [], groupId: '', pageId: '', pageName: '', pageAvatar: '', poll: null, location: '', feeling: '', pinned: false, generatedBy: 'gemini'
+  });
   fake.seed('conversations', 'conv1', { participants: ['human1', 'bot_nova'], createdAt: Date.now() - 50_000 });
   fake.seed('messages', 'msg1', {
     conversationId: 'conv1', participants: ['human1', 'bot_nova'], senderId: 'human1',
@@ -108,7 +114,8 @@ describe('live bot runner (Spark)', () => {
     expect(actions).toContain('post');
     expect(fetchFn.mock.calls[0][0]).toContain('key=TEST_KEY');
 
-    const botPost = fake.all('posts').find((p) => p.authorId === 'bot_nova');
+    const botPosts = fake.all('posts').filter((p) => p.authorId === 'bot_nova');
+    const botPost = botPosts[botPosts.length - 1]; // newest = this cycle's post (an older seeded bot post exists)
     expect(botPost).toBeTruthy();
     expect(botPost.text).toContain(GEMINI_TEXT);
     expect(botPost.generatedBy).toBe('gemini');
@@ -175,6 +182,25 @@ describe('live bot runner (Spark)', () => {
     expect(newest.text).not.toContain(GEMINI_TEXT);
     await settle();
     expect(fake.get('botBrains', 'bot_nova').provider).toBe('template-fallback');
+  });
+
+  it('Phase 2: the bot replies to a human comment on its own post', async () => {
+    fake.remove('botSettings', 'counters'); // fresh counters
+    stubFetchOk();
+    // rng 0.5 lands in Nova's comment band (weights post 3 / comment 4 / like 2).
+    const rngSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    let r;
+    try {
+      r = await api.runBotCycle();
+    } finally {
+      rngSpy.mockRestore();
+    }
+    expect(r.ran).toBe(true);
+    const post = fake.get('posts', 'post_reply1');
+    const replies = post.comments.find((c) => c.id === 'cm1')?.replies || [];
+    expect(replies).toHaveLength(1);
+    expect(replies[0].authorId).toBe('bot_nova');
+    expect(r.results.find((x) => x.bot === 'Nova' && x.action === 'comment-reply')).toBeTruthy();
   });
 
   it('a non-admin session never starts the runner and cannot run a cycle', async () => {

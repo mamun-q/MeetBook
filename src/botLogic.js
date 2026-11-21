@@ -195,6 +195,64 @@ export function threadContextText(messages = [], botId = '', max = 6) {
     .join('\n');
 }
 
+// --- Master Vision Phase 2: thread replies with budgets ---------------
+// Bots replying to comments — on their OWN posts (answering people who
+// engaged with them) and to OTHER BOTS' comments (bot-to-bot
+// discussion) — under strict budgets so threads never become bot echo
+// chambers: at most 6 bot entries per thread, at most 2 entries per bot
+// per post, never a reply to the bot's own comment, never two replies
+// to the same comment, and when the last 3 entries are all bots the
+// only allowed next step is answering a HUMAN (loop detection).
+export const BOT_THREAD_ENTRY_CAP = 6;
+export const BOT_PER_POST_ENTRY_CAP = 2;
+
+export function flattenThread(post) {
+  const out = [];
+  for (const cm of post?.comments || []) {
+    out.push({ id: cm.id, parentId: null, authorId: cm.authorId, text: cm.text || '', createdAt: cm.createdAt || 0 });
+    for (const r of cm.replies || []) {
+      out.push({ id: r.id, parentId: cm.id, authorId: r.authorId, text: r.text || '', createdAt: r.createdAt || 0 });
+    }
+  }
+  return out;
+}
+
+export function pickBotReplyTarget(posts = [], bot = {}, botIds = new Set()) {
+  const b = normaliseBot(bot || {});
+  if (!b.id) return null;
+  const isBot = (id) => botIds.has(id);
+  let best = null; // { post, comment, rank } — lowest rank across ALL posts
+  for (const post of posts || []) {
+    if (!post || post.visibility !== 'public' || post.groupId || post.pageId) continue;
+    const flat = flattenThread(post);
+    if (!flat.length) continue;
+    const botEntries = flat.filter((e) => isBot(e.authorId)).length;
+    if (botEntries >= BOT_THREAD_ENTRY_CAP) continue;
+    const myEntries = flat.filter((e) => e.authorId === b.id).length;
+    if (myEntries >= BOT_PER_POST_ENTRY_CAP) continue;
+    const lastThreeAllBot = flat.length >= 3 && flat.slice(-3).every((e) => isBot(e.authorId));
+    const repliedTo = new Set(flat.filter((e) => e.authorId === b.id && e.parentId).map((e) => e.parentId));
+    // Reply hosts are TOP-LEVEL comments only (the app nests one level;
+    // a bot's reply lands in that comment's replies array).
+    const candidates = flat.filter((e) => e.parentId === null && e.authorId !== b.id && !repliedTo.has(e.id));
+    // Preference: comments on the bot's OWN post first (answering its
+    // audience), then other bots' comments (bot-to-bot). Human comments
+    // on other people's posts are rank 2 — left to top-level comments.
+    const ownPost = post.authorId === b.id;
+    const ranked = candidates
+      .map((e) => ({ e, rank: ownPost ? 0 : (isBot(e.authorId) ? 1 : 2) }))
+      .filter(({ rank }) => rank < 2)
+      .sort((x, y) => x.rank - y.rank);
+    for (const { e, rank } of ranked) {
+      if (lastThreeAllBot && isBot(e.authorId)) continue; // loop guard
+      if (!best || rank < best.rank) best = { post, comment: e, rank };
+      break; // only this post's best candidate competes
+    }
+    if (best && best.rank === 0) return { post: best.post, comment: best.comment };
+  }
+  return best ? { post: best.post, comment: best.comment } : null;
+}
+
 // A template post that does not repeat any of the recent texts, or
 // null when every template would repeat (the caller then skips the
 // post instead of publishing a duplicate).

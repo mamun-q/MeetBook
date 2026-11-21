@@ -5,7 +5,8 @@ import {
   templateBotMessageReply, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay,
   botAlreadyCommented, pickBotCommentTarget, normaliseBotText, isDuplicateBotText,
   freshTemplatePost, freshTemplateComment,
-  textSimilarity, isNearDuplicateBotText, interestRelevance, threadContextText
+  textSimilarity, isNearDuplicateBotText, interestRelevance, threadContextText,
+  flattenThread, pickBotReplyTarget
 } from '../src/botLogic.js';
 
 const nova = {
@@ -265,5 +266,68 @@ describe('Master Vision Phase 1: similarity, relevance, thread context, memory d
     expect(second[0].updatedAt).toBe(2000);
     const third = memoryFromConversation(second, 'how do I bake bread at home', 'Mix flour water yeast', 3000);
     expect(third).toHaveLength(2);
+  });
+});
+
+describe('Master Vision Phase 2: thread replies with budgets + loop detection', () => {
+  const botIds = new Set(['bot_nova', 'bot_sage', 'bot_pixel']);
+  const cm = (id, authorId, text = 'x', replies = []) => ({ id, authorId, text, createdAt: 1, replies });
+  const post = (id, authorId, comments) => ({ id, authorId, text: 'post', visibility: 'public', groupId: '', pageId: '', comments });
+
+  it('flattenThread lists comments then their replies, in order', () => {
+    const p = post('p', 'u1', [cm('c1', 'u2', 'a', [{ id: 'r1', authorId: 'bot_nova', text: 'b', createdAt: 2 }]), cm('c2', 'u3', 'c')]);
+    const flat = flattenThread(p);
+    expect(flat.map((e) => e.id)).toEqual(['c1', 'r1', 'c2']);
+    expect(flat[1].parentId).toBe('c1');
+  });
+  it('answers a human comment on the bot own post first', () => {
+    const posts = [
+      post('p1', 'u1', [cm('c1', 'bot_sage', 'bot comment on a human post')]),
+      post('p2', 'bot_nova', [cm('c2', 'u9', 'nice post nova')])
+    ];
+    const t = pickBotReplyTarget(posts, nova, botIds);
+    expect(t?.post.id).toBe('p2');
+    expect(t?.comment.id).toBe('c2');
+  });
+  it('joins bot-to-bot: replies to another bot comment on a human post', () => {
+    const posts = [post('p1', 'u1', [cm('c1', 'bot_sage', 'sage was here')])];
+    expect(pickBotReplyTarget(posts, nova, botIds)?.comment.id).toBe('c1');
+  });
+  it('does not reply to human comments on other people posts (that is what top-level comments are for)', () => {
+    const posts = [post('p1', 'u1', [cm('c1', 'u2', 'human chat')])];
+    expect(pickBotReplyTarget(posts, nova, botIds)).toBeNull();
+  });
+  it('never replies to its own comment, and never twice to the same comment', () => {
+    const own = [post('p1', 'u1', [cm('c1', 'bot_nova', 'my own')])];
+    expect(pickBotReplyTarget(own, nova, botIds)).toBeNull();
+    const done = [post('p1', 'bot_nova', [cm('c1', 'u9', 'hi', [{ id: 'r1', authorId: 'bot_nova', text: 'answered', createdAt: 2 }])])];
+    expect(pickBotReplyTarget(done, nova, botIds)).toBeNull();
+  });
+  it('stops at the thread bot-entry cap and the per-bot per-post cap', () => {
+    const sixBots = [post('p1', 'bot_nova', [
+      cm('c1', 'u9', 'human start'),
+      cm('c2', 'bot_sage', 'b1'), cm('c3', 'bot_pixel', 'b2'), cm('c4', 'bot_sage', 'b3'),
+      cm('c5', 'bot_pixel', 'b4'), cm('c6', 'bot_sage', 'b5'), cm('c7', 'bot_pixel', 'b6')
+    ])];
+    expect(pickBotReplyTarget(sixBots, nova, botIds)).toBeNull(); // 6 bot entries already
+    const twoMine = [post('p1', 'u1', [
+      cm('c1', 'bot_sage', 'sage'),
+      cm('c2', 'bot_nova', 'mine 1'),
+      cm('c3', 'bot_pixel', 'pixel', [{ id: 'r1', authorId: 'bot_nova', text: 'mine 2', createdAt: 2 }])
+    ])];
+    expect(pickBotReplyTarget(twoMine, nova, botIds)).toBeNull(); // nova already has 2 entries
+  });
+  it('loop detection: when the last 3 entries are all bots, only a human comment may be answered', () => {
+    const echo = [post('p1', 'bot_nova', [
+      cm('c1', 'bot_sage', 'b1'), cm('c2', 'bot_pixel', 'b2', [{ id: 'r1', authorId: 'bot_sage', text: 'b3', createdAt: 2 }])
+    ])];
+    expect(pickBotReplyTarget(echo, nova, botIds)).toBeNull(); // only bot comments available
+    const withHuman = [post('p1', 'bot_nova', [
+      cm('c0', 'u9', 'human asked something earlier'),
+      cm('c1', 'bot_sage', 'b1'), cm('c2', 'bot_pixel', 'b2', [{ id: 'r1', authorId: 'bot_sage', text: 'b3', createdAt: 2 }])
+    ])];
+    // last 3 entries are all bots, so bot comments are off-limits — but
+    // the earlier HUMAN comment (not in the last 3) may still be answered.
+    expect(pickBotReplyTarget(withHuman, nova, botIds)?.comment.id).toBe('c0');
   });
 });
