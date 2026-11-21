@@ -753,25 +753,26 @@ create policy conversations_delete on public.conversations
 -- =====================================================================
 -- invites
 -- Guarantee: any signed-in user may read a code (possession of the
--- code is the secret); create only by the conversation's creator,
--- for their own conversation; never update; delete by its creator.
+-- code is the secret); create by any participant of the conversation
+-- (Firestore parity — amended 2026-11-22 during Phase 2; the first
+-- applied version required the conversation's creator, which was
+-- narrower than Firestore); never update; delete by its creator.
 -- =====================================================================
 create policy invites_select on public.invites
   for select to authenticated
   using (true);
 
--- Note: the conversations subquery is filtered by
--- conversations_select; the conversation's creator is a participant
--- in every app flow, so it resolves. (Edge: a creator who was later
--- removed from the group could mint an invite in Firestore but not
--- here — narrowing in the safe direction.)
+-- Note: the EXISTS subquery is filtered by conversations_select;
+-- a participant can read their own conversation, so it resolves.
 create policy invites_insert on public.invites
   for insert to authenticated
   with check (
     public.writer_status_ok()
     and "createdBy" = (select auth.uid())::text
-    and (select c."createdBy" from public.conversations c
-         where c.id = "conversationId") = (select auth.uid())::text
+    and exists (
+          select 1 from public.conversations c
+          where c.id = "conversationId"
+            and (select auth.uid())::text = any (c.participants))
   );
 
 -- No UPDATE policy: updates are denied for everyone (= Firestore
