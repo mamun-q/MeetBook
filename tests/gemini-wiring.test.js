@@ -5,9 +5,8 @@
 // to template text and records that instead.
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 
-vi.mock('../src/firebase.js', () => ({
-  firebaseReady: false, isFirebaseConfigured: false, firebaseConfig: {},
-  app: null, auth: null, db: null, storage: null, googleProvider: null
+vi.mock('../src/supabase.js', () => ({
+  supabaseReady: false, isSupabaseConfigured: false, supabaseConfig: {}, supabase: null
 }));
 
 // store.js reads localStorage at import time — shim it before importing.

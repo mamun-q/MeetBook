@@ -9,9 +9,8 @@ import * as V from '../src/views.js';
 // messages, pinned chats, timed mute, @mentions and invite links.
 // Pure helpers, view rendering, i18n keys, and the DEMO-mode api.
 
-vi.mock('../src/firebase.js', () => ({
-  firebaseReady: false, isFirebaseConfigured: false, firebaseConfig: {},
-  app: null, auth: null, db: null, storage: null, googleProvider: null
+vi.mock('../src/supabase.js', () => ({
+  supabaseReady: false, isSupabaseConfigured: false, supabaseConfig: {}, supabase: null
 }));
 
 afterEach(() => { setLocale('en'); });

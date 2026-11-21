@@ -1,19 +1,21 @@
 // Regression: bot creation in LIVE mode. saveBot used to write
-// `{ ...saved, id: undefined }` into bots/{id}; real Firestore rejects
-// undefined field values, so creating any bot failed live. The fake
-// Firestore now rejects undefined exactly like the SDK, and this suite
-// drives the REAL api.saveBot through it.
+// `{ ...saved, id: undefined }` into the bots payload; the real
+// backend rejects undefined field values, so creating any bot failed
+// live. The fake Supabase client rejects undefined exactly like the
+// real PostgREST payload validation, and this suite drives the REAL
+// api.saveBot through it. (Postgres rows DO carry their id as a
+// column — unlike Firestore doc paths — so the stored-payload
+// assertions check the id matches, not that it is absent.)
 import { describe, it, expect, vi, beforeAll } from 'vitest';
 
-vi.mock('../src/firebase.js', () => ({
-  firebaseReady: true, isFirebaseConfigured: true, firebaseConfig: {},
-  app: {}, auth: { fake: 'auth' }, db: { fake: 'db' }, storage: null, googleProvider: null
-}));
-vi.mock('firebase/firestore', async () => await import('./fake-firestore.js'));
-vi.mock('firebase/auth', async () => (await import('./fake-firestore.js')).fakeAuth);
-vi.mock('firebase/storage', () => ({
-  ref: () => ({}), uploadBytes: async () => ({}), getDownloadURL: async () => ''
-}));
+vi.mock('../src/supabase.js', async () => {
+  const fake = await import('./fake-supabase.js');
+  return {
+    supabaseReady: true, isSupabaseConfigured: true,
+    supabaseConfig: { url: 'https://fake.supabase.co', publishableKey: 'fake', projectRef: 'fake' },
+    supabase: fake.fakeClient
+  };
+});
 
 const mem = new Map();
 globalThis.localStorage = {
@@ -25,14 +27,14 @@ globalThis.document = { dispatchEvent: () => true };
 
 let api;
 let fake;
-let firestore;
+let fakeSb;
 const settle = async () => { await new Promise((r) => setTimeout(r, 15)); await new Promise((r) => setTimeout(r, 15)); };
 
 const ADMIN = { name: 'MeetBook Admin', username: 'admin', email: 'admin@meetbook.app', role: 'admin', isBot: false, followers: [], following: [], closeFriends: [], settings: {} };
 
 beforeAll(async () => {
-  firestore = await import('./fake-firestore.js');
-  fake = firestore.fakeControl;
+  fakeSb = await import('./fake-supabase.js');
+  fake = fakeSb.fakeControl;
   fake.reset();
   fake.usersByEmail = { 'admin@meetbook.app': 'admin1' };
   fake.seed('users', 'admin1', ADMIN);
@@ -43,11 +45,12 @@ beforeAll(async () => {
   await settle();
 });
 
-describe('fake Firestore undefined guard', () => {
-  it('rejects undefined field values like the real SDK, at any depth', async () => {
-    await expect(firestore.setDoc(firestore.doc(null, 'bots', 'x'), { name: 'X', id: undefined })).rejects.toThrow(/Unsupported field value: undefined/);
-    await expect(firestore.setDoc(firestore.doc(null, 'bots', 'x'), { personality: { tone: undefined } })).rejects.toThrow(/personality\.tone/);
-    await expect(firestore.addDoc(firestore.collection(null, 'bots'), { tags: ['a', undefined] })).rejects.toThrow(/Unsupported field value: undefined/);
+describe('fake Supabase undefined guard', () => {
+  it('rejects undefined field values like the real backend, at any depth', async () => {
+    const client = fakeSb.fakeClient;
+    await expect(client.from('bots').insert({ id: 'x', name: 'X', avatar: undefined })).rejects.toThrow(/undefined/);
+    await expect(client.from('bots').upsert({ id: 'x', personality: { tone: undefined } })).rejects.toThrow(/personality\.tone/);
+    await expect(client.from('bots').insert({ id: 'y', tags: ['a', undefined] })).rejects.toThrow(/undefined/);
   });
 });
 
@@ -61,10 +64,11 @@ describe('saveBot (live mode)', () => {
     const stored = fake.get('bots', saved.id);
     expect(stored).toBeTruthy();
     expect(stored.name).toBe('Pixel');
-    // The doc id belongs to the path only — no `id` field is stored,
-    // and nothing in the payload is undefined (the fake would have
-    // thrown, exactly like production Firestore did before the fix).
-    expect('id' in stored).toBe(false);
+    // The row's id column is the bot's id (Postgres carries ids in
+    // the row, unlike Firestore doc paths), and nothing in the
+    // payload is undefined (the fake would have thrown, exactly like
+    // the production backend did before the fix).
+    expect(stored.id).toBe(saved.id);
     expect(JSON.stringify(stored)).not.toContain('undefined');
     // The brain doc and the public users doc were written too.
     expect(fake.get('botBrains', saved.id)).toMatchObject({ botId: saved.id });
@@ -77,6 +81,6 @@ describe('saveBot (live mode)', () => {
     const updated = await api.saveBot({ ...existing, id: existing.id, bio: 'Updated bio.' });
     expect(updated.id).toBe(existing.id);
     expect(fake.get('bots', existing.id).bio).toBe('Updated bio.');
-    expect('id' in fake.get('bots', existing.id)).toBe(false);
+    expect(fake.get('bots', existing.id).id).toBe(existing.id);
   });
 });

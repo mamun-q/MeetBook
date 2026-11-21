@@ -13,9 +13,8 @@ import { LOCALES, setLocale, t } from '../src/i18n.js';
 import { toast, clearToasts } from '../src/components.js';
 import * as V from '../src/views.js';
 
-vi.mock('../src/firebase.js', () => ({
-  firebaseReady: false, isFirebaseConfigured: false, firebaseConfig: {},
-  app: null, auth: null, db: null, storage: null, googleProvider: null
+vi.mock('../src/supabase.js', () => ({
+  supabaseReady: false, isSupabaseConfigured: false, supabaseConfig: {}, supabase: null
 }));
 
 let api;

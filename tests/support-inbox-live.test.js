@@ -6,15 +6,14 @@
 // staff appeal decision must preserve the appeal text and notify.
 import { describe, it, expect, vi, beforeAll } from 'vitest';
 
-vi.mock('../src/firebase.js', () => ({
-  firebaseReady: true, isFirebaseConfigured: true, firebaseConfig: {},
-  app: {}, auth: { fake: 'auth' }, db: { fake: 'db' }, storage: null, googleProvider: null
-}));
-vi.mock('firebase/firestore', async () => await import('./fake-firestore.js'));
-vi.mock('firebase/auth', async () => (await import('./fake-firestore.js')).fakeAuth);
-vi.mock('firebase/storage', () => ({
-  ref: () => ({}), uploadBytes: async () => ({}), getDownloadURL: async () => ''
-}));
+vi.mock('../src/supabase.js', async () => {
+  const fake = await import('./fake-supabase.js');
+  return {
+    supabaseReady: true, isSupabaseConfigured: true,
+    supabaseConfig: { url: 'https://fake.supabase.co', publishableKey: 'fake', projectRef: 'fake' },
+    supabase: fake.fakeClient
+  };
+});
 
 const mem = new Map();
 globalThis.localStorage = {
@@ -31,7 +30,7 @@ const settle = async () => { await new Promise((r) => setTimeout(r, 15)); await 
 const USER = (name, username) => ({ name, username, email: `${username}@example.com`, role: 'user', isBot: false, followers: [], following: [], closeFriends: [], settings: {} });
 
 beforeAll(async () => {
-  fake = (await import('./fake-firestore.js')).fakeControl;
+  fake = (await import('./fake-supabase.js')).fakeControl;
   fake.reset();
   fake.usersByEmail = { 'rita@example.com': 'reporter1', 'adam@example.com': 'author1', 'boss@example.com': 'boss1' };
   fake.seed('users', 'reporter1', USER('Rita Reporter', 'rita'));

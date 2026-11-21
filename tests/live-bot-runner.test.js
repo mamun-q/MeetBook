@@ -7,15 +7,14 @@
 // posts. (Security rules themselves are not executed here.)
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 
-vi.mock('../src/firebase.js', () => ({
-  firebaseReady: true, isFirebaseConfigured: true, firebaseConfig: {},
-  app: {}, auth: { fake: 'auth' }, db: { fake: 'db' }, storage: null, googleProvider: null
-}));
-vi.mock('firebase/firestore', async () => await import('./fake-firestore.js'));
-vi.mock('firebase/auth', async () => (await import('./fake-firestore.js')).fakeAuth);
-vi.mock('firebase/storage', () => ({
-  ref: () => ({}), uploadBytes: async () => ({}), getDownloadURL: async () => ''
-}));
+vi.mock('../src/supabase.js', async () => {
+  const fake = await import('./fake-supabase.js');
+  return {
+    supabaseReady: true, isSupabaseConfigured: true,
+    supabaseConfig: { url: 'https://fake.supabase.co', publishableKey: 'fake', projectRef: 'fake' },
+    supabase: fake.fakeClient
+  };
+});
 
 // store.js reads localStorage at import time; api.js dispatches DOM
 // events when mirroring Firestore — shim both for the node runtime.
@@ -53,7 +52,7 @@ const NOVA = {
 };
 
 beforeAll(async () => {
-  fake = (await import('./fake-firestore.js')).fakeControl;
+  fake = (await import('./fake-supabase.js')).fakeControl;
   fake.reset();
   fake.usersByEmail = { 'admin@meetbook.app': 'admin1', 'hasan@example.com': 'human1' };
   fake.seed('users', 'admin1', ADMIN);
@@ -118,7 +117,10 @@ describe('live bot runner (Spark)', () => {
     const botPost = botPosts[botPosts.length - 1]; // newest = this cycle's post (an older seeded bot post exists)
     expect(botPost).toBeTruthy();
     expect(botPost.text).toContain(GEMINI_TEXT);
-    expect(botPost.generatedBy).toBe('gemini');
+    // Supabase posts rows have no generatedBy column — the provider
+    // stamp lives on the bot's brain record instead.
+    expect(botPost.generatedBy).toBeUndefined();
+    expect(fake.get('botBrains', 'bot_nova').provider).toBe('gemini');
     expect(botPost.visibility).toBe('public');
     expect(botPost.audienceIds).toEqual([]);
 
@@ -177,7 +179,7 @@ describe('live bot runner (Spark)', () => {
     expect(r.ran).toBe(true);
     const botPosts = fake.all('posts').filter((p) => p.authorId === 'bot_nova');
     const newest = botPosts[botPosts.length - 1];
-    expect(newest.generatedBy).toBe('template-fallback');
+    expect(newest.generatedBy).toBeUndefined(); // no such column on Supabase; the brain assertion below carries the stamp
     // Natural Presence: bot posts are stored raw — no "AI Bot post ·" stamp.
     expect(newest.text).not.toContain('AI Bot post ·');
     expect(newest.text).not.toContain(GEMINI_TEXT);

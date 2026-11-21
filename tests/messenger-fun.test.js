@@ -10,9 +10,8 @@ import * as V from '../src/views.js';
 // sharing, chat polls and nicknames. Pure helpers, view rendering,
 // i18n keys, the bot-reply guard, and the DEMO-mode api.
 
-vi.mock('../src/firebase.js', () => ({
-  firebaseReady: false, isFirebaseConfigured: false, firebaseConfig: {},
-  app: null, auth: null, db: null, storage: null, googleProvider: null
+vi.mock('../src/supabase.js', () => ({
+  supabaseReady: false, isSupabaseConfigured: false, supabaseConfig: {}, supabase: null
 }));
 
 afterEach(() => { setLocale('en'); });

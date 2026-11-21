@@ -1,58 +1,64 @@
 // @vitest-environment jsdom
 // Audit fix #3 — DOM-level regression for the login error path, with
-// the REAL src/main.js + src/api.js (the firebase SDK packages are
-// stubbed so api runs its LIVE login code: signInWithEmailAndPassword
-// -> friendlyAuthError). The audit found wrong-password logins failing
-// silently. Code-level diagnosis showed the error toast IS raised —
-// the proven defect in this area is on the success path: the login
-// branch raises its toast and THEN sets location.hash, and the
-// hashchange handler's clearToasts() wiped the toast in the same
-// tick, so auth feedback never survived the navigation it caused.
-// Both paths are pinned here end to end.
+// the REAL src/main.js + src/api.js (the @supabase/supabase-js package
+// is stubbed so api runs its LIVE login code:
+// signInWithPassword -> friendlySupabaseAuthError). The audit found
+// wrong-password logins failing silently. Code-level diagnosis showed
+// the error toast IS raised — the proven defect in this area is on
+// the success path: the login branch raises its toast and THEN sets
+// location.hash, and the hashchange handler's clearToasts() wiped the
+// toast in the same tick, so auth feedback never survived the
+// navigation it caused. Both paths are pinned here end to end.
 import { describe, it, expect, vi, beforeAll } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({ authCb: null }));
-const signIn = vi.fn(async (auth, email, password) => {
-  if (password === 'wrong-pass') {
-    const err = new Error('Firebase: Error (auth/invalid-credential).');
-    err.code = 'auth/invalid-credential';
-    throw err;
-  }
-  const user = { uid: 'u_human', email };
-  queueMicrotask(() => { if (hoisted.authCb) hoisted.authCb(user); });
-  return { user };
-});
 
-vi.mock('firebase/app', () => ({ initializeApp: () => ({}) }));
-vi.mock('firebase/auth', () => ({
-  getAuth: () => ({}),
-  GoogleAuthProvider: class {},
-  createUserWithEmailAndPassword: vi.fn(async () => { throw new Error('unused in this test'); }),
-  signInWithEmailAndPassword: (a, e, p) => signIn(a, e, p),
-  signInWithPopup: vi.fn(async () => { throw new Error('unused in this test'); }),
-  sendPasswordResetEmail: vi.fn(async () => {}),
-  signOut: vi.fn(async () => { if (hoisted.authCb) hoisted.authCb(null); }),
-  deleteUser: vi.fn(async () => {}),
-  onAuthStateChanged: (auth, cb) => { hoisted.authCb = cb; queueMicrotask(() => cb(null)); return () => {}; }
-}));
-vi.mock('firebase/firestore', () => ({
-  getFirestore: () => ({}),
-  collection: () => ({}), doc: () => ({}),
-  setDoc: vi.fn(async () => {}),
-  getDoc: vi.fn(async () => ({ exists: () => false, data: () => ({}) })),
-  getDocs: vi.fn(async () => ({ docs: [] })),
-  getCountFromServer: vi.fn(async () => ({ data: () => ({ count: 0 }) })),
-  addDoc: vi.fn(async () => ({ id: 'new-doc' })),
-  updateDoc: vi.fn(async () => {}),
-  deleteDoc: vi.fn(async () => {}),
-  query: () => ({}), where: () => ({}), orderBy: () => ({}), limit: () => ({}),
-  onSnapshot: () => () => {},
-  serverTimestamp: () => Date.now(),
-  arrayUnion: (v) => v, arrayRemove: (v) => v
-}));
-vi.mock('firebase/storage', () => ({
-  getStorage: () => ({}), ref: () => ({}),
-  uploadBytes: vi.fn(async () => ({})), getDownloadURL: vi.fn(async () => '')
+vi.mock('@supabase/supabase-js', () => ({
+  createClient: () => ({
+    auth: {
+      signInWithPassword: async ({ email, password }) => {
+        if (password === 'wrong-pass') {
+          return { data: { user: null, session: null }, error: { message: 'Invalid login credentials', code: 'invalid_credentials' } };
+        }
+        const user = { id: 'u_human', email, app_metadata: { provider: 'email' }, user_metadata: {} };
+        const session = { user, access_token: 'stub-token' };
+        queueMicrotask(() => { if (hoisted.authCb) hoisted.authCb('SIGNED_IN', session); });
+        return { data: { user, session }, error: null };
+      },
+      signUp: vi.fn(async () => ({ data: { user: null, session: null }, error: { message: 'unused in this test' } })),
+      signInWithOAuth: vi.fn(async () => ({ data: {}, error: { message: 'unused in this test' } })),
+      resetPasswordForEmail: vi.fn(async () => ({ data: {}, error: null })),
+      signOut: vi.fn(async () => { if (hoisted.authCb) hoisted.authCb('SIGNED_OUT', null); return { error: null }; }),
+      getSession: vi.fn(async () => ({ data: { session: null }, error: null })),
+      onAuthStateChange: (cb) => {
+        hoisted.authCb = cb;
+        queueMicrotask(() => cb('INITIAL_SESSION', null));
+        return { data: { subscription: { unsubscribe: () => {} } } };
+      }
+    },
+    // PostgREST surface: only the chains ensureAuthProfile walks are
+    // fully shaped (select -> eq -> maybeSingle); every sync fetcher's
+    // chain dead-ends into its own try/catch, exactly like a failed
+    // read would — the mirror simply stays empty for this test.
+    from: () => ({
+      select: () => ({
+        eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }),
+        maybeSingle: async () => ({ data: null, error: null })
+      }),
+      update: () => ({ eq: () => ({ select: async () => ({ data: [], error: null }) }) }),
+      insert: () => ({ select: async () => ({ data: [], error: null }) }),
+      upsert: () => ({ select: async () => ({ data: [], error: null }) }),
+      delete: () => ({ eq: async () => ({ data: null, error: null }) })
+    }),
+    channel: () => ({
+      on() { return this; },
+      subscribe() { return this; },
+      track: async () => 'ok',
+      presenceState: () => ({})
+    }),
+    removeChannel: async () => 'ok',
+    rpc: async () => ({ data: null, error: null })
+  })
 }));
 
 const settle = async (rounds = 6) => { for (let i = 0; i < rounds; i++) await new Promise((r) => setTimeout(r, 10)); };

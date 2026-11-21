@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { t, setLocale, getLocale, availableLocales, LOCALES } from '../src/i18n.js';
-import { resolveFirebaseConfig, isConfigComplete, DEFAULT_FIREBASE_CONFIG } from '../src/firebase-config.js';
+import { resolveSupabaseConfig, isSupabaseConfigComplete, DEFAULT_SUPABASE_CONFIG } from '../src/supabase.js';
 
 describe('i18n', () => {
   it('has English and Bangla dictionaries with matching core keys', () => {
@@ -25,26 +25,25 @@ describe('i18n', () => {
   });
 });
 
-describe('firebase-config', () => {
+describe('supabase-config', () => {
   it('defaults to the live meetbook project config', () => {
-    const cfg = resolveFirebaseConfig({});
-    expect(cfg.projectId).toBe('meetbook-5f491');
-    expect(cfg.authDomain).toBe('meetbook-5f491.firebaseapp.com');
-    expect(cfg.storageBucket).toBe('meetbook-5f491.firebasestorage.app');
-    expect(cfg.appId).toContain('249684575470');
-    expect(isConfigComplete(cfg)).toBe(true);
-    expect(DEFAULT_FIREBASE_CONFIG.measurementId).toBe('');
+    const cfg = resolveSupabaseConfig({});
+    expect(cfg.url).toBe('https://ouyuijpxhhvtnxnvavza.supabase.co');
+    expect(cfg.projectRef).toBe('ouyuijpxhhvtnxnvavza');
+    expect(cfg.publishableKey).toMatch(/^sb_publishable_/);
+    expect(isSupabaseConfigComplete(cfg)).toBe(true);
+    expect(DEFAULT_SUPABASE_CONFIG.url).toContain('ouyuijpxhhvtnxnvavza.supabase.co');
   });
   it('env vars override defaults, blank env values do not', () => {
-    const cfg = resolveFirebaseConfig({ VITE_FIREBASE_PROJECT_ID: 'other-proj', VITE_FIREBASE_API_KEY: '  ' });
-    expect(cfg.projectId).toBe('other-proj');
-    expect(cfg.apiKey).toBe(DEFAULT_FIREBASE_CONFIG.apiKey);
-    const custom = resolveFirebaseConfig({ VITE_FIREBASE_API_KEY: 'KEY123' });
-    expect(custom.apiKey).toBe('KEY123');
+    const cfg = resolveSupabaseConfig({ VITE_SUPABASE_PROJECT_REF: 'other-proj', VITE_SUPABASE_PUBLISHABLE_KEY: '  ' });
+    expect(cfg.projectRef).toBe('other-proj');
+    expect(cfg.publishableKey).toBe(DEFAULT_SUPABASE_CONFIG.publishableKey);
+    const custom = resolveSupabaseConfig({ VITE_SUPABASE_PUBLISHABLE_KEY: 'KEY123' });
+    expect(custom.publishableKey).toBe('KEY123');
   });
   it('detects incomplete configs (demo fallback trigger)', () => {
-    expect(isConfigComplete({})).toBe(false);
-    expect(isConfigComplete({ apiKey: 'x', authDomain: 'y', projectId: 'z' })).toBe(false);
-    expect(isConfigComplete(null)).toBe(false);
+    expect(isSupabaseConfigComplete({})).toBe(false);
+    expect(isSupabaseConfigComplete({ url: 'https://x.supabase.co' })).toBe(false);
+    expect(isSupabaseConfigComplete(null)).toBe(false);
   });
 });

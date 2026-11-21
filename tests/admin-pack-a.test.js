@@ -4,9 +4,8 @@
 // out, localStorage shimmed), mirroring tests/gemini-wiring.test.js.
 import { describe, it, expect, vi, beforeAll } from 'vitest';
 
-vi.mock('../src/firebase.js', () => ({
-  firebaseReady: false, isFirebaseConfigured: false, firebaseConfig: {},
-  app: null, auth: null, db: null, storage: null, googleProvider: null
+vi.mock('../src/supabase.js', () => ({
+  supabaseReady: false, isSupabaseConfigured: false, supabaseConfig: {}, supabase: null
 }));
 
 const mem = new Map();

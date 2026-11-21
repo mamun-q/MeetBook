@@ -12,9 +12,8 @@ import * as V from '../src/views.js';
 import { generateGeminiDetailed, getLastGeminiAttempts, resetLastGeminiFailure } from '../src/gemini.js';
 import { generateRouted, resolveAiConfig } from '../src/aiProviders.js';
 
-vi.mock('../src/firebase.js', () => ({
-  firebaseReady: false, isFirebaseConfigured: false, firebaseConfig: {},
-  app: null, auth: null, db: null, storage: null, googleProvider: null
+vi.mock('../src/supabase.js', () => ({
+  supabaseReady: false, isSupabaseConfigured: false, supabaseConfig: {}, supabase: null
 }));
 
 afterEach(() => { setLocale('en'); vi.unstubAllGlobals(); });

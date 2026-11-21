@@ -1,20 +1,20 @@
 import { describe, it, expect, vi, beforeAll } from 'vitest';
 
-// Chat Pack — LIVE-mode (fake Firestore): reply snapshots persist on
-// the message doc, message reactions / pins patch the mirror
-// immediately and land in Firestore, and conversation theme + typing
-// writes go through the conversations doc — all on the existing
-// participants array-contains sync, no new queries or indexes.
+// Chat Pack — LIVE-mode (fake Supabase): reply snapshots persist on
+// the message row, message reactions / pins patch the mirror
+// immediately and land in the table, conversation theme persists on
+// the conversation row, and typing rides the Phase 3 broadcast
+// channel into the mirror's typing map — all on the existing
+// participants contains sync, no new queries or indexes.
 
-vi.mock('../src/firebase.js', () => ({
-  firebaseReady: true, isFirebaseConfigured: true, firebaseConfig: {},
-  app: {}, auth: { fake: 'auth' }, db: { fake: 'db' }, storage: null, googleProvider: null
-}));
-vi.mock('firebase/firestore', async () => await import('./fake-firestore.js'));
-vi.mock('firebase/auth', async () => (await import('./fake-firestore.js')).fakeAuth);
-vi.mock('firebase/storage', () => ({
-  ref: () => ({}), uploadBytes: async () => ({}), getDownloadURL: async () => ''
-}));
+vi.mock('../src/supabase.js', async () => {
+  const fake = await import('./fake-supabase.js');
+  return {
+    supabaseReady: true, isSupabaseConfigured: true,
+    supabaseConfig: { url: 'https://fake.supabase.co', publishableKey: 'fake', projectRef: 'fake' },
+    supabase: fake.fakeClient
+  };
+});
 
 const mem = new Map();
 globalThis.localStorage = {
@@ -31,7 +31,7 @@ const mirrorMsg = (id) => api.data().messages.find((m) => m.id === id);
 const mirrorConv = (id) => api.data().conversations.find((c) => c.id === id);
 
 beforeAll(async () => {
-  fake = (await import('./fake-firestore.js')).fakeControl;
+  fake = (await import('./fake-supabase.js')).fakeControl;
   fake.reset();
   fake.usersByEmail = { 'me@example.com': 'human1', 'friend@example.com': 'human2' };
   fake.seed('users', 'human1', { name: 'Mamun Hossen', username: 'your.name', email: 'me@example.com', role: 'user', isBot: false, followers: [], following: [], closeFriends: [], settings: {} });
@@ -91,13 +91,18 @@ describe('live chat pack', () => {
     expect(mirrorConv('conv1').theme).toBe('grape');
   });
 
-  it('typing heartbeat writes and clears the conversations typing map', async () => {
+  it('typing heartbeat updates the mirror typing map and clears it (Phase 3: broadcast, not a doc write)', async () => {
     await api.setTyping('conv1', true);
     await settle();
-    const typing = fake.get('conversations', 'conv1').typing;
+    // The indicator lives in the mirror's typing map (fed by the
+    // broadcast channel + local state) with a fresh timestamp…
+    const typing = mirrorConv('conv1').typing;
     expect(Math.abs(Date.now() - typing.human1)).toBeLessThan(5000);
+    // …and is deliberately NOT persisted to the conversation row any
+    // more: typing is heartbeat-only state on the Phase 3 channel.
+    expect(fake.get('conversations', 'conv1').typing).toBeUndefined();
     await api.setTyping('conv1', false);
     await settle();
-    expect(fake.get('conversations', 'conv1').typing.human1).toBeUndefined();
+    expect(mirrorConv('conv1').typing.human1).toBeUndefined();
   });
 });

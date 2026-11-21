@@ -26,9 +26,8 @@ import * as V from '../src/views.js';
 // predicate, the markup precondition it relies on, and the synchronous
 // emit premise that made the blur-time clear destructive.
 
-vi.mock('../src/firebase.js', () => ({
-  firebaseReady: false, isFirebaseConfigured: false, firebaseConfig: {},
-  app: null, auth: null, db: null, storage: null, googleProvider: null
+vi.mock('../src/supabase.js', () => ({
+  supabaseReady: false, isSupabaseConfigured: false, supabaseConfig: {}, supabase: null
 }));
 
 describe('focusMovesWithinForm — the blur decision behind the fix', () => {

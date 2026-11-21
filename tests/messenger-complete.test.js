@@ -10,9 +10,8 @@ import * as V from '../src/views.js';
 // shared media, thread emoji and group management. Pure helpers, view
 // rendering, i18n keys, and the DEMO-mode api (firebase mocked off).
 
-vi.mock('../src/firebase.js', () => ({
-  firebaseReady: false, isFirebaseConfigured: false, firebaseConfig: {},
-  app: null, auth: null, db: null, storage: null, googleProvider: null
+vi.mock('../src/supabase.js', () => ({
+  supabaseReady: false, isSupabaseConfigured: false, supabaseConfig: {}, supabase: null
 }));
 
 afterEach(() => { setLocale('en'); });

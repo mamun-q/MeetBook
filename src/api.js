@@ -1,28 +1,117 @@
 // Unified data/API layer. Two backends behind one interface:
-//  - Firebase mode (env config present): Firebase Auth + Firestore + Storage.
+//  - Live mode (Supabase config present): Supabase Auth + PostgREST +
+//    Realtime (postgres_changes / broadcast / presence channels).
 //  - Demo mode (no config): the local seeded store in store.js.
 // Views always read from data() and write through these functions, so the UI
 // code is identical in both modes.
 import {
   getState, mutate, findUser, userByUsername, friendIdsOf, blockedIdsOf, notify, resetDemo
 } from './store.js';
-import { firebaseReady, auth, db, storage, googleProvider } from './firebase.js';
-import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme, canEditMessage, chatPollVote, VANISH_TTL_MS } from './utils.js';
+import { supabase, supabaseReady } from './supabase.js';
+import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme, canEditMessage, chatPollVote, VANISH_TTL_MS, TYPING_FRESH_MS } from './utils.js';
 import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost } from './botLogic.js';
 import { canAccessBotSecrets, botModel } from './gemini.js';
 import { providerById, resolveAiConfig, generateRouted, testProvider as testAiProvider, getLastRoutedFailure, resetLastRoutedFailure, anyProviderConfigured, dhakaDayKey, normaliseUsageMap, usageTotals } from './aiProviders.js';
 import { isCloudinaryConfigured, uploadToCloudinary, uploadFileToCloudinary } from './cloudinary.js';
 
-// --- Firebase imports are dynamic-free static imports of the SDK ---------
-import {
-  createUserWithEmailAndPassword, signInWithEmailAndPassword, signInWithPopup,
-  sendPasswordResetEmail, signOut, deleteUser, onAuthStateChanged
-} from 'firebase/auth';
-import {
-  collection, doc, setDoc, getDoc, getDocs, getCountFromServer, addDoc, updateDoc, deleteDoc,
-  query, where, orderBy, limit, onSnapshot, serverTimestamp, arrayUnion, arrayRemove, runTransaction
-} from 'firebase/firestore';
-import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage';
+// Live-mode switch: every `if (live)` branch below is the Supabase path,
+// every fall-through is the demo store — the same split the Firebase
+// version of this module had, function for function.
+const live = supabaseReady;
+
+// -------------------------------------------------------------------------
+// Supabase data-access helpers (live mode). Each helper throws an Error
+// carrying the PostgREST error code on failure — the throw-on-error
+// contract the Firestore SDK gave the call sites below. Row shapes are
+// the Firestore document shapes: the schema's quoted camelCase columns
+// make supabase-js return rows already shaped like documents.
+// -------------------------------------------------------------------------
+function sbError(error, context) {
+  const err = new Error(error?.message || `Supabase request failed${context ? ` (${context})` : ''}`);
+  if (error?.code) err.code = error.code;
+  if (error?.details) err.details = error.details;
+  return err;
+}
+
+async function sbSelect(table, build) {
+  let q = supabase.from(table).select('*');
+  if (build) q = build(q);
+  const { data, error } = await q;
+  if (error) throw sbError(error, table);
+  return data || [];
+}
+
+async function sbGet(table, id) {
+  const { data, error } = await supabase.from(table).select('*').eq('id', id).maybeSingle();
+  if (error) throw sbError(error, table);
+  return data || null;
+}
+
+async function sbInsert(table, row) {
+  const { data, error } = await supabase.from(table).insert(row).select();
+  if (error) throw sbError(error, table);
+  return data?.[0] || row;
+}
+
+// Upsert with Firestore setDoc semantics: with merge, only the given
+// columns are written (existing columns survive); without merge the
+// given columns still replace only themselves — every setDoc call site
+// in this module passes complete documents or deliberate partial
+// patches, exactly as it did against Firestore.
+async function sbUpsert(table, row, opts = {}) {
+  const { data, error } = await supabase.from(table).upsert(row, opts).select();
+  if (error) throw sbError(error, table);
+  return data?.[0] || row;
+}
+
+// PostgREST update: an RLS USING denial surfaces as zero affected rows
+// (not an error), a WITH CHECK denial as error 42501. Zero rows is
+// therefore NOT thrown here — the optimistic-mirror rollback call sites
+// rely on thrown errors only for hard failures, and a row the caller
+// may not touch simply keeps its server truth for the next refetch.
+async function sbUpdate(table, id, patch) {
+  const { data, error } = await supabase.from(table).update(patch).eq('id', id).select();
+  if (error) throw sbError(error, table);
+  return data?.[0] || null;
+}
+
+async function sbDelete(table, id) {
+  const { error } = await supabase.from(table).delete().eq('id', id);
+  if (error) throw sbError(error, table);
+}
+
+async function sbCount(table, build) {
+  let q = supabase.from(table).select('*', { count: 'exact', head: true });
+  if (build) q = build(q);
+  const { count, error } = await q;
+  if (error) throw sbError(error, table);
+  return count || 0;
+}
+
+async function sbRpc(name, args) {
+  const { data, error } = await supabase.rpc(name, args);
+  if (error) throw sbError(error, name);
+  return data;
+}
+
+// Map a Supabase Auth error onto the Firebase-style codes utils'
+// friendlyAuthError already translates, so every user-facing auth
+// string stays exactly what it was ("Wrong email or password.", …).
+function friendlySupabaseAuthError(err) {
+  const raw = String(err?.message || '');
+  const code = String(err?.code || '');
+  const mapped =
+    code === 'invalid_credentials' || /invalid login credentials/i.test(raw) ? 'auth/invalid-credential'
+    : code === 'user_already_exists' || code === 'email_exists' || /already registered/i.test(raw) ? 'auth/email-already-in-use'
+    : code === 'weak_password' || /password.*(weak|short|characters)/i.test(raw) ? 'auth/weak-password'
+    : code === 'user_not_found' ? 'auth/user-not-found'
+    : code === 'over_request_rate_limit' || code === 'over_email_send_rate_limit' || /rate limit/i.test(raw) ? 'auth/too-many-requests'
+    : code === 'validation_failed' || /invalid.*email|email.*invalid/i.test(raw) ? 'auth/invalid-email'
+    : '';
+  if (mapped) return friendlyAuthError({ code: mapped, message: raw });
+  if (/provider.*not enabled|unsupported provider/i.test(raw)) return 'That sign-in method is not enabled for this app.';
+  return friendlyAuthError({ message: raw });
+}
 
 // -------------------------------------------------------------------------
 let remote = null; // Firestore-mirrored dataset (same shape as demo state)
@@ -32,7 +121,7 @@ let emptyRemoteCache = null;
 // Optimistic local echo for live-mode post creation: a freshly created
 // post is inserted into the mirror IMMEDIATELY (under a temporary id)
 // so the composer doesn't wait for the Firestore snapshot round-trip;
-// when addDoc resolves, the echo adopts the real id, and the posts
+// when the insert resolves, the echo adopts the real id, and the posts
 // merge prunes the echo as soon as a listener delivers the server copy.
 let localEchoPosts = [];
 
@@ -67,7 +156,7 @@ function emitData() {
 // patch silently and main.js refreshes just that post's card in place —
 // a full-page re-render per tap reads as a screen shake on phones.
 function patchRemotePost(postId, apply, opts = {}) {
-  if (!firebaseReady || !remote) return null;
+  if (!live || !remote) return null;
   const post = remote.posts.find((p) => p.id === postId);
   if (!post) return null;
   apply(post);
@@ -79,7 +168,7 @@ function patchRemotePost(postId, apply, opts = {}) {
 // Pack: reactions, pins, themes, typing heartbeats) — patch locally so
 // the UI responds instantly, then let the snapshot listener confirm.
 function patchRemoteMessage(messageId, apply) {
-  if (!firebaseReady || !remote) return null;
+  if (!live || !remote) return null;
   const msg = remote.messages.find((m) => m.id === messageId);
   if (!msg) return null;
   apply(msg);
@@ -88,7 +177,7 @@ function patchRemoteMessage(messageId, apply) {
 }
 
 function patchRemoteConversation(convId, apply) {
-  if (!firebaseReady || !remote) return null;
+  if (!live || !remote) return null;
   const conv = remote.conversations.find((c) => c.id === convId);
   if (!conv) return null;
   apply(conv);
@@ -104,11 +193,18 @@ function patchRemoteConversation(convId, apply) {
 // the write was suppressed as a self-notification.
 async function createNotification(note) {
   if (!note || !note.userId || note.userId === note.actorId) return null;
-  return addDoc(collection(db, 'notifications'), note);
+  // The id is generated client-side (Firestore's addDoc generated it
+  // server-side; the shape callers see — an object carrying the id —
+  // is unchanged). The notifications insert policy pins actorId to
+  // the caller, admins exempt — every real caller passes its own id,
+  // and bot notifications ride the admin exemption.
+  const row = { id: genId('n'), ...note };
+  await sbInsert('notifications', row);
+  return row;
 }
 
 export function data() {
-  if (firebaseReady) {
+  if (live) {
     // Live mode must never fall through to demo data.
     if (remote) return remote;
     if (!emptyRemoteCache) emptyRemoteCache = blankRemote();
@@ -118,7 +214,7 @@ export function data() {
 }
 
 export function currentUid() {
-  if (firebaseReady) return remoteUid;
+  if (live) return remoteUid;
   return getState().sessionUid;
 }
 
@@ -169,18 +265,33 @@ export async function register({ name, username, email, password, dob = '', gend
   if (data().config?.registrationOpen === false) {
     throw new Error('Registration is currently closed. Please try again later.');
   }
-  if (firebaseReady) {
-    // Create the Auth account FIRST: Firestore rules only allow signed-in
-    // reads, so the username-uniqueness query must run after sign-up (an
-    // unauthenticated query fails with "Missing or insufficient
-    // permissions"). If anything after account creation fails, delete the
-    // just-created Auth user so the email is not stranded.
-    let cred;
+  if (live) {
+    // Create the Auth account FIRST: the users table is only readable
+    // by authenticated callers (RLS), so the username-uniqueness query
+    // must run after sign-up (an anonymous query returns nothing). If
+    // anything after account creation fails, sign the session out so
+    // the app is not left half-registered. (Supabase has no client-side
+    // auth-user delete without a service key, so the orphaned auth
+    // account keeps the email reserved — the same caveat the Spark
+    // plan imposed on admin deletions.)
+    let authData;
     try {
-      cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
+      const res = await supabase.auth.signUp({ email: email.trim(), password });
+      if (res.error) throw res.error;
+      authData = res.data;
     } catch (err) {
-      throw new Error(friendlyAuthError(err));
+      throw new Error(friendlySupabaseAuthError(err));
     }
+    const authUser = authData?.user;
+    if (!authUser) throw new Error('Something went wrong. Please try again.');
+    if (!authData.session) {
+      // Email confirmation is enabled on the project: without a
+      // session the profile row cannot be written yet (RLS requires an
+      // authenticated caller whose id matches the row). The auth
+      // account exists; sign-in after confirmation completes it.
+      throw new Error('Account created — please confirm your email, then sign in.');
+    }
+    remoteUid = authUser.id;
     const profile = {
       name: name.trim(), username: v.value, email: email.trim(), bio: '', avatar: '', cover: '',
       work: '', education: '', currentCity: '', hometown: '', relationship: '', website: '', nickname: '',
@@ -188,18 +299,19 @@ export async function register({ name, username, email, password, dob = '', gend
       role: 'user', isBot: false, online: true, lastSeen: Date.now(), createdAt: Date.now(), followers: [], following: [], closeFriends: [], settings: {}
     };
     try {
-      const taken = await getDocs(query(collection(db, 'users'), where('username', '==', v.value)));
-      if (!taken.empty) throw new Error('That username is already taken.');
-      await setDoc(doc(db, 'users', cred.user.uid), profile);
+      const taken = await sbSelect('users', (q) => q.eq('username', v.value));
+      if (taken.length) throw new Error('That username is already taken.');
+      await sbInsert('users', { id: authUser.id, ...profile });
     } catch (err) {
-      try { await deleteUser(cred.user); } catch { /* rollback is best-effort */ }
-      // The users-create rule denies the profile write when platform
-      // registration is closed (Pack C) — surface that honestly
-      // instead of a raw permission error.
-      if (err?.code === 'permission-denied') throw new Error('Registration is currently closed. Please try again later.');
+      try { await supabase.auth.signOut(); } catch { /* rollback is best-effort */ }
+      remoteUid = '';
+      // The users insert policy denies the profile write when platform
+      // registration is closed (Pack C) — RLS denials are error 42501;
+      // surface that honestly instead of a raw permission error.
+      if (err?.code === '42501') throw new Error('Registration is currently closed. Please try again later.');
       throw err;
     }
-    return { id: cred.user.uid, ...profile };
+    return { id: authUser.id, ...profile };
   }
   let created = null;
   mutate((s) => {
@@ -219,18 +331,22 @@ export async function register({ name, username, email, password, dob = '', gend
 }
 
 export async function login(email, password) {
-  if (firebaseReady) {
-    let cred;
+  if (live) {
+    let authData;
     try {
-      cred = await signInWithEmailAndPassword(auth, email.trim(), password);
+      const res = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+      if (res.error) throw res.error;
+      authData = res.data;
     } catch (err) {
-      throw new Error(friendlyAuthError(err));
+      throw new Error(friendlySupabaseAuthError(err));
     }
-    remoteUid = cred.user.uid;
+    const user = authData?.user;
+    if (!user) throw new Error('Something went wrong. Please try again.');
+    remoteUid = user.id;
     // Presence: stamp online + lastSeen (the online rail freshness check
     // keys off lastSeen). Best-effort — never block the sign-in on it.
-    updateDoc(doc(db, 'users', cred.user.uid), { online: true, lastSeen: Date.now() }).catch(() => {});
-    return cred.user;
+    sbUpdate('users', user.id, { online: true, lastSeen: Date.now() }).catch(() => {});
+    return { id: user.id, uid: user.id, email: user.email || email.trim() };
   }
   let user = null;
   mutate((s) => {
@@ -244,45 +360,65 @@ export async function login(email, password) {
 }
 
 export async function loginWithGoogle() {
-  if (!firebaseReady) throw new Error('Google sign-in needs Firebase configuration. In demo mode, register or use a demo account.');
-  let cred;
+  if (!live) throw new Error('Google sign-in needs Supabase configuration. In demo mode, register or use a demo account.');
+  // OAuth is a full-page redirect: signInWithOAuth sends the browser
+  // to Google and the session returns on the redirect URL (PKCE, so
+  // the app's hash routing is untouched). First-sign-in profile
+  // creation therefore happens in ensureAuthProfile (onAuthReady)
+  // when the session lands — the same profile the Firebase popup flow
+  // created inline. If the Google provider is not configured in the
+  // Supabase dashboard yet, the call returns an error and we surface
+  // the friendly "not enabled" message instead of navigating away.
+  const redirectTo = typeof window !== 'undefined' ? window.location.origin + window.location.pathname : undefined;
+  const { error } = await supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo } });
+  if (error) throw new Error(friendlySupabaseAuthError(error));
+  return { redirected: true };
+}
+
+// First-sign-in profile for OAuth users: email/password registration
+// writes its profile row explicitly, but an OAuth session can land
+// with no users row at all. Mirror of the old loginWithGoogle inline
+// creation — probe the username (the email prefix is NOT unique
+// across domains) and suffix until free, or @mentions and username
+// lookups would conflate two people. Also stamps presence for an
+// existing profile, like the old popup flow did. Best-effort: a
+// missing profile reads as signed-out everywhere in the app.
+async function ensureAuthProfile(user) {
+  if (!live || !user?.id) return;
   try {
-    cred = await signInWithPopup(auth, googleProvider);
-  } catch (err) {
-    throw new Error(friendlyAuthError(err));
-  }
-  remoteUid = cred.user.uid;
-  const ref = doc(db, 'users', cred.user.uid);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) {
-    const base = (cred.user.email || 'user').split('@')[0].replace(/[^a-z0-9_.]/gi, '').toLowerCase() || 'user';
-    // The email prefix is NOT unique across domains (two Google
-    // accounts can share it) — probe Firestore and suffix until free,
-    // or @mentions and username lookups would conflate two people.
+    const existing = await sbGet('users', user.id);
+    if (existing) {
+      sbUpdate('users', user.id, { online: true, lastSeen: Date.now() }).catch(() => {});
+      return;
+    }
+    const provider = user.app_metadata?.provider || '';
+    const providers = user.app_metadata?.providers || [];
+    if (provider !== 'google' && !providers.includes('google')) return;
+    const base = (user.email || 'user').split('@')[0].replace(/[^a-z0-9_.]/gi, '').toLowerCase() || 'user';
     let username = base.slice(0, 24);
     for (let i = 0; i < 5; i++) {
-      const taken = await getDocs(query(collection(db, 'users'), where('username', '==', username)));
-      if (taken.empty) break;
+      const taken = await sbSelect('users', (q) => q.eq('username', username));
+      if (!taken.length) break;
       username = `${base.slice(0, 20)}${Math.floor(100 + Math.random() * 900)}`;
     }
-    await setDoc(ref, {
-      name: cred.user.displayName || 'MeetBook User', username, email: cred.user.email || '',
-      bio: '', avatar: cred.user.photoURL || '', cover: '', work: '', education: '', currentCity: '',
+    await sbInsert('users', {
+      id: user.id,
+      name: user.user_metadata?.full_name || user.user_metadata?.name || 'MeetBook User', username, email: user.email || '',
+      bio: '', avatar: user.user_metadata?.avatar_url || user.user_metadata?.picture || '', cover: '', work: '', education: '', currentCity: '',
       hometown: '', relationship: '', website: '', nickname: '', dob: '', gender: '', role: 'user', isBot: false, online: true,
       lastSeen: Date.now(), createdAt: Date.now(), followers: [], following: [], closeFriends: [], settings: {}
     });
-  } else {
-    updateDoc(ref, { online: true, lastSeen: Date.now() }).catch(() => {});
-  }
-  return cred.user;
+  } catch { /* best-effort — see header note */ }
 }
 
 export async function resetPassword(email) {
-  if (firebaseReady) {
+  if (live) {
     try {
-      await sendPasswordResetEmail(auth, email.trim());
+      const redirectTo = typeof window !== 'undefined' ? window.location.origin + window.location.pathname : undefined;
+      const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), { redirectTo });
+      if (error) throw error;
     } catch (err) {
-      throw new Error(friendlyAuthError(err));
+      throw new Error(friendlySupabaseAuthError(err));
     }
     return;
   }
@@ -293,12 +429,12 @@ export async function resetPassword(email) {
 }
 
 export async function logout() {
-  if (firebaseReady) {
+  if (live) {
     // Best-effort presence stamp before the session ends.
     if (remoteUid) {
-      try { await updateDoc(doc(db, 'users', remoteUid), { online: false, lastSeen: Date.now() }); } catch { /* best-effort */ }
+      try { await sbUpdate('users', remoteUid, { online: false, lastSeen: Date.now() }); } catch { /* best-effort */ }
     }
-    await signOut(auth); remoteUid = ''; return;
+    await supabase.auth.signOut(); remoteUid = ''; return;
   }
   mutate((s) => {
     const u = s.users.find((x) => x.id === s.sessionUid);
@@ -310,23 +446,15 @@ export async function logout() {
 export async function deleteAccount() {
   const user = me();
   if (!user) throw new Error('Not signed in.');
-  if (firebaseReady) {
-    // Snapshot the profile first: if the Auth deletion then fails
-    // (deleteUser commonly rejects with requires-recent-login on an
-    // older session), restore the doc so the account is not stranded
-    // profile-less while its email stays registered.
-    const profileSnap = { ...user };
-    delete profileSnap.password;
-    await deleteDoc(doc(db, 'users', user.id));
-    try {
-      await deleteUser(auth.currentUser);
-    } catch (err) {
-      try { await setDoc(doc(db, 'users', user.id), profileSnap); } catch { /* restore is best-effort */ }
-      if (String(err?.code || err?.message || '').includes('requires-recent-login')) {
-        throw new Error('For security, please log out, log back in, and delete the account right away.');
-      }
-      throw err;
-    }
+  if (live) {
+    // Delete the profile row (the users delete policy allows self),
+    // then end the session. Supabase Auth offers no client-side
+    // self-delete without a service key, so the auth record itself
+    // remains — with no profile row the app treats the account as
+    // signed-out everywhere and none of its content renders, the same
+    // end state the Spark plan produced for admin deletions.
+    await sbDelete('users', user.id);
+    try { await supabase.auth.signOut(); } catch { /* session is over either way */ }
     remoteUid = '';
     return;
   }
@@ -338,55 +466,119 @@ export async function deleteAccount() {
 }
 
 export function onAuthReady(cb) {
-  if (firebaseReady) {
-    return onAuthStateChanged(auth, async (user) => {
-      remoteUid = user ? user.uid : '';
-      if (user) startRemoteSync();
-      else { stopRemoteSync(); stopBotRunner(); } // no session -> no listeners, no live bot runner, ever
-      cb(user ? { id: user.uid } : null);
+  if (live) {
+    // onAuthStateChange fires once immediately with the restored
+    // session (or null), then on every sign-in/out — the same cadence
+    // the Firebase callback had. The handler is async (OAuth profile
+    // ensure + sync start), and its ordering per event is preserved
+    // because each event's work is self-contained.
+    const { data } = supabase.auth.onAuthStateChange(async (event, session) => {
+      const user = session?.user || null;
+      remoteUid = user ? user.id : '';
+      if (user) { await ensureAuthProfile(user); startRemoteSync(); }
+      else { stopRemoteSync(); stopBotRunner(); } // no session -> no sync, no live bot runner, ever
+      cb(user ? { id: user.id } : null);
     });
+    return () => { try { data?.subscription?.unsubscribe(); } catch { /* already gone */ } };
   }
   cb(me());
   return () => {};
 }
 
 // -------------------------------------------------------------------------
-// FIREBASE SYNC (mirrors Firestore into the shared dataset shape)
+// SUPABASE SYNC (mirrors Postgres into the shared dataset shape)
 //
-// PROVABLE-QUERY DESIGN: Firestore rejects a list query unless the
-// security rules are provable from the query's own constraints ("rules
-// are not filters") — a listener whose read rule depends on per-document
-// data the query doesn't constrain (or on get()/exists() joins) is denied
-// silently. Every listener below is therefore shaped so one rule branch
-// is guaranteed by its where() clauses, and audiences are DENORMALIZED
-// onto documents at write time to make that possible:
-//  - posts: three listeners merged by id — my own posts (authorId == me),
-//    public posts (visibility == 'public'), and posts whose denormalized
-//    `audienceIds` contain me (friends posts + private-group posts).
-//  - stories: the same three-listener pattern as posts (public / mine /
-//    audience), merged by id; expiry (24h) is filtered in the view layer.
-//  - friendships: two listeners merged by id (from == me, to == me).
-//  - messages: participants array-contains me (participants are copied
-//    onto each message at send time).
-//  - groups: two listeners merged by id (public + members contains me).
-// Collections with signedIn-only read rules (users, pages, bots) can use
-// plain listeners. Admin-only collections (reports, botActivities,
-// botLogs) get silent error callbacks so non-admin sessions don't raise
-// unhandled permission errors.
+// RLS IS THE FILTER: unlike Firestore ("rules are not filters"), every
+// PostgREST read below is row-filtered server-side by the policies in
+// supabase/policies.sql, so a plain select returns exactly the rows
+// this user may see. The denormalized audiences (audienceIds /
+// participants snapshots) are still what the policies key off, and the
+// client keeps the same slice-and-merge mirror the Firestore listeners
+// fed, with the same emit discipline:
+//  - posts/stories/events/groups: slices merged by id; posts go
+//    through mergePosts (echo pruning by id) so a
+//    refetch that changes nothing emits nothing — the anti-shake rule.
+//  - friendships/groupRequests/supportReports: two slices merged by id.
+//  - everything else: one slice, replaced only when its content
+//    actually changed (setSlice compares canonical JSON), because a
+//    realtime event for a row OUTSIDE a slice's filter (a stranger's
+//    notification, someone else's block) must not re-render the page.
+// Realtime (Phase 3): one postgres_changes channel per table; any
+// change refetches that table's slices, RLS-filtered again on the way
+// out. Admin-only tables (reports, botActivities, botLogs, adminLogs)
+// simply return zero rows for non-admins — no error path needed.
+// Typing indicators and presence ride broadcast/presence channels
+// instead of document writes: they are heartbeat-only state, and RLS
+// does not govern channels — see setTyping / startPresenceChannel.
 // -------------------------------------------------------------------------
 let syncStarted = false;
 let syncUid = '';
-let unsubscribers = [];
-// Register a listener under the current sync session so an account switch
-// can tear every listener down (see stopRemoteSync).
-function listen(...args) {
-  const un = onSnapshot(...args);
-  unsubscribers.push(un);
-  return un;
+let syncChannels = [];
+const channelByTable = new Map();
+const tableRefetchers = new Map();
+// Broadcast typing state per conversation ({ uid: epochMs }), merged
+// over the conversations rows on every fetch: a conversations refetch
+// must never wipe an in-flight "typing…" indicator.
+const typingState = new Map();
+let typingChannel = null;
+let presenceChannel = null;
+
+function patchMirror(fn) {
+  if (!remote) return;
+  fn(remote);
+  emitData();
 }
+
+// Replace a single-query slice of the mirror, emitting ONLY when the
+// content actually changed (canonical-JSON compare).
+function setSlice(key, rows) {
+  if (!remote) return;
+  const prev = remote[key] || [];
+  if (prev.length === rows.length && stableStringify(prev) === stableStringify(rows)) {
+    // Equal content: rebind SILENTLY to the fresh row objects anyway,
+    // so the mirror's objects stay the very objects the latest fetch
+    // produced (optimistic patch helpers mutate mirror objects; a
+    // stale binding would let a later merge resurrect pre-patch state).
+    remote[key] = rows;
+    return;
+  }
+  patchMirror((r) => { r[key] = rows; });
+}
+
+// Content-compare for merged slices: sort a COPY by id (mirror order
+// follows merge order, which is slice order, so an order-insensitive
+// compare is the honest one) and canonicalise.
+function sameRowsById(a, b) {
+  if (a.length !== b.length) return false;
+  const key = (arr) => stableStringify([...arr].sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0)));
+  return key(a) === key(b);
+}
+
+function watchTable(table, refetch) {
+  if (!tableRefetchers.has(table)) tableRefetchers.set(table, new Set());
+  tableRefetchers.get(table).add(refetch);
+  if (channelByTable.has(table)) return;
+  const ch = supabase.channel(`mb-sync-${table}`)
+    .on('postgres_changes', { event: '*', schema: 'public', table }, () => {
+      for (const fn of tableRefetchers.get(table) || []) {
+        try { void fn(); } catch { /* a failed refetch leaves the mirror untouched */ }
+      }
+    })
+    .subscribe();
+  channelByTable.set(table, ch);
+  syncChannels.push(ch);
+}
+
 function stopRemoteSync() {
-  for (const un of unsubscribers) { try { un(); } catch { /* already gone */ } }
-  unsubscribers = [];
+  for (const ch of syncChannels) {
+    try { supabase.removeChannel(ch); } catch { /* already gone */ }
+  }
+  syncChannels = [];
+  channelByTable.clear();
+  tableRefetchers.clear();
+  typingChannel = null;
+  presenceChannel = null;
+  typingState.clear();
   syncStarted = false;
   syncUid = '';
   // Per-session state must not leak into the next account on this tab:
@@ -395,267 +587,404 @@ function stopRemoteSync() {
   // post could render in the next account's feed).
   botSecretsLoaded = false;
   localEchoPosts = [];
+  remergePosts = null;
   remote = blankRemote();
   emitData();
 }
+
+// ---------------------------------------------------------------------------
+// Presence (Phase 3): one shared channel keyed by the signed-in uid.
+// Subscribers learn who is online from the channel's presence state —
+// no per-heartbeat database write at all. The users-row online/lastSeen
+// columns still carry the durable record (login/logout stamps + the
+// throttled setOnline writes); the channel is the live overlay, and
+// like presence-only users snapshots in the Firestore era it is applied
+// SILENTLY (shake-fix discipline: presence never triggers a render).
+// ---------------------------------------------------------------------------
+function startPresenceChannel() {
+  if (!supabase || !remoteUid) return;
+  presenceChannel = supabase.channel('meetbook-presence', { config: { presence: { key: remoteUid } } });
+  presenceChannel.on('presence', { event: 'sync' }, () => applyPresenceState());
+  presenceChannel.subscribe((status) => {
+    if (status === 'SUBSCRIBED') {
+      presenceChannel.track({ online_at: Date.now() }).catch(() => {});
+    }
+  });
+  syncChannels.push(presenceChannel);
+}
+
+function applyPresenceState() {
+  if (!remote || !presenceChannel) return;
+  let state;
+  try { state = presenceChannel.presenceState(); } catch { return; }
+  const onlineIds = new Set(Object.keys(state || {}));
+  if (!onlineIds.size) return;
+  const now = Date.now();
+  for (const u of remote.users || []) {
+    if (onlineIds.has(u.id)) { u.online = true; u.lastSeen = now; }
+  }
+  // Deliberately no emitData() — see the header note.
+}
+
+// ---------------------------------------------------------------------------
+// Typing indicators (Phase 3): broadcast on a shared channel instead of
+// document writes. setTyping records the local state and broadcasts;
+// receivers fold remote state into the same typingState map, and the
+// conversations mapper overlays it — so the freshness window views
+// already use (TYPING_FRESH_MS) works unchanged: an indicator expires
+// when its last broadcast ages out, exactly as a stale typing
+// timestamp did. Broadcasts carry no persistence and no RLS — a
+// spoofed typing event can only light up a "typing…" label in a
+// conversation the receiver already sees.
+// ---------------------------------------------------------------------------
+function startTypingChannel() {
+  if (!supabase) return;
+  typingChannel = supabase.channel('meetbook-typing');
+  typingChannel.on('broadcast', { event: 'typing' }, ({ payload }) => handleTypingBroadcast(payload));
+  typingChannel.subscribe();
+  syncChannels.push(typingChannel);
+}
+
+function handleTypingBroadcast(payload) {
+  const conversationId = payload?.conversationId;
+  const userId = payload?.userId;
+  if (!conversationId || !userId || userId === remoteUid || !remote) return;
+  const conv = (remote.conversations || []).find((c) => c.id === conversationId);
+  if (!conv) return;
+  const next = { ...(typingState.get(conversationId) || conv.typing || {}) };
+  if (payload.isTyping) next[userId] = Date.now(); else delete next[userId];
+  typingState.set(conversationId, next);
+  if (stableStringify(conv.typing || {}) !== stableStringify(next)) {
+    patchRemoteConversation(conversationId, (c) => { c.typing = next; });
+  }
+}
+
 function startRemoteSync() {
-  if (!firebaseReady) return;
-  // Account-switch guard: the per-user listeners below bake the uid into
-  // their queries, so a sync started for a previous account must be torn
-  // down and restarted — otherwise the new account keeps receiving the
-  // OLD account's conversations/messages (or nothing, once rules deny the
-  // stale listeners), which made sent DMs silently invisible.
+  if (!live) return;
+  // Account-switch guard: onAuthStateChanged can fire again (token
+  // refresh, a second sign-in) while listeners are already running for
+  // THIS user — restarting them would churn the UI. But if the
+  // signed-in user CHANGED, the previous user's listeners (some
+  // user-scoped) must be replaced.
   if (syncStarted && syncUid === remoteUid) return;
   if (syncStarted) stopRemoteSync();
   syncStarted = true;
   syncUid = remoteUid;
   remote = blankRemote();
-  const patch = (fn) => { fn(remote); document.dispatchEvent(new CustomEvent('meetbook:data')); };
-  // TIME NORMALISATION: every mirrored document passes its epoch-ms
-  // fields through normaliseTimeFields — Firestore serverTimestamp()
-  // values arrive as Timestamp objects, and any view that feeds one to
-  // timeAgo() directly renders a 1970s date. (Stories/events mappers
-  // below predate the helper and call tsToMs inline — same effect.)
-  const mapUser = (d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt', 'lastSeen']) });
-  listen(query(collection(db, 'users'), limit(300)), (snap) => {
-    const mapped = snap.docs.map(mapUser);
-    // Presence heartbeats (lastSeen/online) land here every minute for
-    // every online user. If NOTHING else changed, refresh the mirror
-    // silently — a full emit re-renders the whole page, and constant
-    // repaints are what made the feed visibly shake on phones.
-    const stripPresence = (u) => { const c = { ...u }; delete c.lastSeen; delete c.online; return c; };
-    const prevUsers = remote.users || [];
-    const presenceOnly = prevUsers.length > 0 && prevUsers.length === mapped.length
-      && mapped.every((u) => { const p = prevUsers.find((x) => x.id === u.id); return p && stableStringify(stripPresence(p)) === stableStringify(stripPresence(u)); });
-    if (presenceOnly) { remote.users = mapped; return; }
-    patch((r) => { r.users = mapped; });
-    void loadBotSecrets(); void loadAdminStats(); syncLiveBotRunner();
-  });
-  // Posts: three provable listeners merged by id (see header note).
-  // Comment/reply timestamps are normalised too — they are written as
-  // client-side ms today, but a Timestamp shape must never leak through.
-  const mapPost = (d) => {
-    const raw = normaliseTimeFields(d.data(), ['createdAt', 'editedAt']);
-    // A pending serverTimestamp() reads back as null → 0 (epoch): the
-    // post would flash at the bottom of the feed dated 1/1/1970 until
-    // the resolved snapshot lands. Estimate it as "now" instead — the
-    // resolved value replaces it a moment later.
+  const uid = remoteUid;
+  // A fetch started under a previous session must never land in the
+  // new session's mirror (the Firestore version got this for free by
+  // unsubscribing; an in-flight PostgREST read cannot be cancelled).
+  const stale = () => !syncStarted || syncUid !== uid;
+
+  // TIME NORMALISATION: PostgREST returns bigint epoch-ms as numbers,
+  // so times arrive already normalised; the normaliseTimeFields pass
+  // stays as a belt-and-braces guard so a Timestamp-shaped value can
+  // never leak into a view.
+  const mapUser = (row) => {
+    const u = { ...normaliseTimeFields(row, ['createdAt', 'lastSeen']) };
+    // Firestore documents omit the key entirely for human users;
+    // Postgres stores NULL — drop it so consumers see the same shape.
+    if (u.botId == null) delete u.botId;
+    return u;
+  };
+  const fetchUsers = async () => {
+    if (stale()) return;
+    try {
+      // Ordered by id so the canonical compare below is stable.
+      const rows = await sbSelect('users', (q) => q.order('id', { ascending: true }).limit(300));
+      const mapped = rows.map(mapUser);
+      // PRESENCE-ONLY snapshots (an online/lastSeen heartbeat — the
+      // login/logout stamps and setOnline writes land here) must not
+      // re-render the page: applying them silently into the mirror
+      // keeps presence fresh while a heartbeat can never shake the
+      // feed (Limon's like-shake report, round 2). Any REAL change
+      // (name, avatar, role, followers…) goes through the normal
+      // patch+emit path.
+      const stripPresence = (u) => { const c = { ...u }; delete c.lastSeen; delete c.online; return c; };
+      const prevUsers = remote.users || [];
+      const presenceOnly = prevUsers.length > 0 && prevUsers.length === mapped.length
+        && mapped.every((u) => {
+          const p = prevUsers.find((x) => x.id === u.id);
+          return p && stableStringify(stripPresence(p)) === stableStringify(stripPresence(u));
+        });
+      if (presenceOnly) {
+        remote.users = mapped;
+      } else if (stableStringify(prevUsers) !== stableStringify(mapped)) {
+        patchMirror((r) => { r.users = mapped; });
+      }
+    } catch { /* leave the mirrored set untouched */ }
+    // Load this user's bot secrets (admin-gated inside) once users
+    // are known, and the admin platform stats (staff-gated inside).
+    void loadBotSecrets();
+    void loadAdminStats();
+    syncLiveBotRunner();
+  };
+  void fetchUsers();
+  watchTable('users', fetchUsers);
+
+  // ---- post slices ---------------------------------------------------
+  const mapPost = (row) => {
+    const raw = normaliseTimeFields(row, ['createdAt', 'editedAt']);
     if (!raw.createdAt) raw.createdAt = Date.now();
     const comments = (raw.comments || []).map((c) => ({
       ...normaliseTimeFields(c, ['createdAt']),
       replies: (c.replies || []).map((rep) => normaliseTimeFields(rep, ['createdAt']))
     }));
-    return { id: d.id, comments: [], likes: [], reactions: {}, savedBy: [], groupId: '', pageId: '', audienceIds: [], ...raw, comments };
+    return { comments: [], likes: [], reactions: {}, savedBy: [], groupId: '', pageId: '', audienceIds: [], ...raw, comments };
   };
-  let ownPosts = [];
   let publicPosts = [];
+  let ownPosts = [];
   let audiencePosts = [];
+  // THREE post slices (public / mine / audience) must merge by id: any
+  // one alone is incomplete, and a naive "latest wins" loses posts
+  // whenever an out-of-scope event fires.
   const mergePosts = () => {
-    // Dedupe by id across the three listeners (a public post by a
-    // friend matches two of them) plus the optimistic echo list; the
-    // server copies come last so they replace their echoes.
-    const delivered = new Set([...publicPosts, ...audiencePosts, ...ownPosts].map((p) => p.id));
-    localEchoPosts = localEchoPosts.filter((p) => !delivered.has(p.id));
-    const next = mergePostLists(localEchoPosts, publicPosts, audiencePosts, ownPosts);
-    // Echo suppression: a snapshot that changes nothing — e.g. the
-    // server confirming my own like, which the optimistic patch
-    // already mirrored — must not emit: every emit is a full-page
-    // re-render, and on phones that rebuild reads as a screen shake.
-    // (Canonical stringify: key order must not defeat the compare.)
-    const prev = remote.posts || [];
-    const prevById = new Map(prev.map((p) => [p.id, p]));
-    // The three listeners deliver at slightly different moments: while
-    // one still holds a stale copy of a post, another may already hold
-    // the fresh one. If any copy matches the mirror, the mirror is
-    // consistent with a fresh snapshot — adopt the matching copy, so
-    // a slow listener can never revert an optimistic like mid-flight.
-    const copiesOf = (id) => [...localEchoPosts, ...publicPosts, ...audiencePosts, ...ownPosts].filter((p) => p && p.id === id);
-    const reconciled = next.map((p) => {
-      const current = prevById.get(p.id);
-      if (!current) return p;
-      if (stableStringify(p) === stableStringify(current)) return p;
-      // Skew case: another listener's copy already matches the mirror
-      // — adopt THAT copy (never the mirror object itself, so the
-      // mirror entry always stays a real list member that optimistic
-      // patches can mutate in place).
-      return copiesOf(p.id).find((c) => stableStringify(c) === stableStringify(current)) || p;
-    });
-    if (prev.length === reconciled.length && reconciled.every((p, i) => prev[i].id === p.id && stableStringify(prev[i]) === stableStringify(p))) return;
-    patch((r) => { r.posts = reconciled; });
+    const serverPosts = mergePostLists(publicPosts, ownPosts, audiencePosts);
+    const serverIds = new Set(serverPosts.map((p) => p.id));
+    // Prune echoes the server has confirmed (the merge is by id, so a
+    // confirmed echo and its server copy could never duplicate — the
+    // prune just retires the echo object); echoes older than a minute
+    // that never landed are dropped as a leak guard (their write path
+    // already removes them on failure).
+    const cutoff = Date.now() - 60000;
+    localEchoPosts = localEchoPosts.filter((p) => !serverIds.has(p.id) && p.createdAt > cutoff);
+    const next = mergePostLists(serverPosts, localEchoPosts);
+    // NO-OP GUARD: a realtime event that changes nothing visible (a
+    // presence heartbeat landing in another slice, an out-of-scope
+    // edit) must not re-render the page — that full re-render was the
+    // "posts shake while scrolling" bug.
+    if (!sameRowsById(remote.posts || [], next)) patchMirror((r) => { r.posts = next; });
+    else remote.posts = next; // silent rebind — see setSlice's note
   };
   remergePosts = mergePosts;
-  listen(query(collection(db, 'posts'), where('visibility', '==', 'public'), orderBy('createdAt', 'desc'), limit(100)),
-    (snap) => { publicPosts = snap.docs.map(mapPost); mergePosts(); },
-    () => { /* listener rejected — leave the mirrored set untouched */ });
-  // Stories: same provable three-listener pattern as posts, merged by id.
-  // createdAt is normalised to epoch ms (Firestore returns Timestamps) so
-  // the 24h expiry filter in the view layer compares real numbers.
-  const mapStory = (d) => {
-    const raw = d.data();
-    return { id: d.id, image: '', text: '', bg: 'sunset', audienceIds: [], views: [], ...raw, createdAt: tsToMs(raw.createdAt) || Date.now() };
-  };
-  let ownStories = [];
+  const fetchPublicPosts = async () => { if (stale()) return; try { publicPosts = (await sbSelect('posts', (q) => q.eq('visibility', 'public').order('createdAt', { ascending: false }).limit(100))).map(mapPost); mergePosts(); } catch { /* leave the mirrored set untouched */ } };
+  const fetchOwnPosts = async () => { if (stale()) return; try { ownPosts = (await sbSelect('posts', (q) => q.eq('authorId', uid))).map(mapPost); mergePosts(); } catch { /* leave untouched */ } };
+  const fetchAudiencePosts = async () => { if (stale()) return; try { audiencePosts = (await sbSelect('posts', (q) => q.contains('audienceIds', [uid]))).map(mapPost); mergePosts(); } catch { /* leave untouched */ } };
+  void fetchPublicPosts();
+  watchTable('posts', fetchPublicPosts);
+  if (uid) { void fetchOwnPosts(); void fetchAudiencePosts(); watchTable('posts', fetchOwnPosts); watchTable('posts', fetchAudiencePosts); }
+
+  // ---- story slices --------------------------------------------------
+  const mapStory = (row) => ({ image: '', text: '', bg: 'sunset', audienceIds: [], views: [], ...row, createdAt: tsToMs(row.createdAt) || Date.now() });
   let publicStories = [];
+  let ownStories = [];
   let audienceStories = [];
-  const mergeStories = () => patch((r) => {
+  const mergeStories = () => {
     const byIdMap = new Map();
     for (const s of [...publicStories, ...audienceStories, ...ownStories]) byIdMap.set(s.id, s);
-    r.stories = [...byIdMap.values()];
-  });
-  listen(query(collection(db, 'stories'), where('visibility', '==', 'public'), orderBy('createdAt', 'desc'), limit(100)),
-    (snap) => { publicStories = snap.docs.map(mapStory); mergeStories(); },
-    () => { /* listener rejected — leave the mirrored set untouched */ });
-  // Events: same provable three-listener pattern as posts (public /
-  // createdBy == me / audienceIds contains me), merged by id. dateTime is
-  // normalised to epoch ms like story createdAt.
-  const mapEvent = (d) => {
-    const raw = d.data();
-    return { id: d.id, description: '', location: '', cover: '', audienceIds: [], going: [], interested: [], ...raw, dateTime: tsToMs(raw.dateTime), createdAt: tsToMs(raw.createdAt) };
+    const next = [...byIdMap.values()];
+    if (sameRowsById(remote.stories || [], next)) { remote.stories = next; return; } // silent rebind — see setSlice's note
+    patchMirror((r) => { r.stories = next; });
   };
-  let ownEvents = [];
+  const fetchPublicStories = async () => { if (stale()) return; try { publicStories = (await sbSelect('stories', (q) => q.eq('visibility', 'public').order('createdAt', { ascending: false }).limit(100))).map(mapStory); mergeStories(); } catch { /* leave untouched */ } };
+  const fetchOwnStories = async () => { if (stale()) return; try { ownStories = (await sbSelect('stories', (q) => q.eq('authorId', uid))).map(mapStory); mergeStories(); } catch { /* leave untouched */ } };
+  const fetchAudienceStories = async () => { if (stale()) return; try { audienceStories = (await sbSelect('stories', (q) => q.contains('audienceIds', [uid]))).map(mapStory); mergeStories(); } catch { /* leave untouched */ } };
+  void fetchPublicStories();
+  watchTable('stories', fetchPublicStories);
+  if (uid) { void fetchOwnStories(); void fetchAudienceStories(); watchTable('stories', fetchOwnStories); watchTable('stories', fetchAudienceStories); }
+
+  // ---- event slices --------------------------------------------------
+  const mapEvent = (row) => {
+    const raw = normaliseTimeFields(row, ['createdAt', 'dateTime']);
+    return { going: [], interested: [], audienceIds: [], ...raw };
+  };
   let publicEvents = [];
+  let ownEvents = [];
   let audienceEvents = [];
-  const mergeEvents = () => patch((r) => {
+  const mergeEvents = () => {
     const byIdMap = new Map();
     for (const e of [...publicEvents, ...audienceEvents, ...ownEvents]) byIdMap.set(e.id, e);
-    r.events = [...byIdMap.values()];
-  });
-  listen(query(collection(db, 'events'), where('visibility', '==', 'public'), orderBy('dateTime', 'asc'), limit(100)),
-    (snap) => { publicEvents = snap.docs.map(mapEvent); mergeEvents(); },
-    () => { /* listener rejected — leave the mirrored set untouched */ });
-  // Reviews: the read rule is signedIn-only (field-independent), so a
-  // plain listener is provable — same as users/pages.
-  listen(query(collection(db, 'reviews'), orderBy('createdAt', 'desc'), limit(500)),
-    (snap) => patch((r) => { r.reviews = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }),
-    () => { /* listener rejected — leave the mirrored set untouched */ });
-  listen(query(collection(db, 'pages'), limit(200)), (snap) => patch((r) => { r.pages = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
-  // Groups use two provably-readable queries merged by id (public groups +
-  // groups I belong to): a single unfiltered listener would be rejected by
-  // the rules because private groups I cannot see exist in the collection.
+    const next = [...byIdMap.values()];
+    if (sameRowsById(remote.events || [], next)) { remote.events = next; return; } // silent rebind — see setSlice's note
+    patchMirror((r) => { r.events = next; });
+  };
+  const fetchPublicEvents = async () => { if (stale()) return; try { publicEvents = (await sbSelect('events', (q) => q.eq('visibility', 'public').order('dateTime', { ascending: true }).limit(100))).map(mapEvent); mergeEvents(); } catch { /* leave untouched */ } };
+  const fetchOwnEvents = async () => { if (stale()) return; try { ownEvents = (await sbSelect('events', (q) => q.eq('createdBy', uid))).map(mapEvent); mergeEvents(); } catch { /* leave untouched */ } };
+  const fetchAudienceEvents = async () => { if (stale()) return; try { audienceEvents = (await sbSelect('events', (q) => q.contains('audienceIds', [uid]))).map(mapEvent); mergeEvents(); } catch { /* leave untouched */ } };
+  void fetchPublicEvents();
+  watchTable('events', fetchPublicEvents);
+  if (uid) { void fetchOwnEvents(); void fetchAudienceEvents(); watchTable('events', fetchOwnEvents); watchTable('events', fetchAudienceEvents); }
+
+  // ---- single-slice tables -------------------------------------------
+  const fetchReviews = async () => { if (stale()) return; try { setSlice('reviews', (await sbSelect('reviews', (q) => q.order('createdAt', { ascending: false }).limit(500))).map((row) => normaliseTimeFields(row, ['createdAt']))); } catch { /* leave untouched */ } };
+  void fetchReviews();
+  watchTable('reviews', fetchReviews);
+
+  const fetchPages = async () => { if (stale()) return; try { setSlice('pages', (await sbSelect('pages', (q) => q.order('id', { ascending: true }).limit(200))).map((row) => normaliseTimeFields(row, ['createdAt']))); } catch { /* leave untouched */ } };
+  void fetchPages();
+  watchTable('pages', fetchPages);
+
+  const mapGroup = (row) => normaliseGroup(normaliseTimeFields(row, ['createdAt']));
   let publicGroups = [];
   let memberGroups = [];
-  const mergeGroups = () => patch((r) => {
+  const mergeGroups = () => {
     const byIdMap = new Map();
     for (const g of [...publicGroups, ...memberGroups]) byIdMap.set(g.id, g);
-    r.groups = [...byIdMap.values()];
-  });
-  const mapGroup = (d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) });
-  listen(query(collection(db, 'groups'), where('privacy', '==', 'public'), limit(200)), (snap) => { publicGroups = snap.docs.map(mapGroup); mergeGroups(); });
-  // Friendships: two provable listeners merged by id (from == me, to == me).
-  let friendshipsFrom = [];
-  let friendshipsTo = [];
-  const mergeFriendships = () => patch((r) => {
-    const byIdMap = new Map();
-    for (const f of [...friendshipsFrom, ...friendshipsTo]) byIdMap.set(f.id, f);
-    r.friendships = [...byIdMap.values()];
-  });
-  const mapFriendship = (d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) });
-  listen(query(collection(db, 'bots'), limit(100)), (snap) => patch((r) => { r.bots = snap.docs.map((d) => normaliseBot({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
-  listen(query(collection(db, 'botActivities'), orderBy('createdAt', 'desc'), limit(100)),
-    (snap) => patch((r) => { r.botActivities = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }),
-    () => { /* non-admins cannot read bot activities — ignore */ });
-  listen(query(collection(db, 'botLogs'), orderBy('createdAt', 'desc'), limit(100)),
-    (snap) => patch((r) => { r.botLogs = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }),
-    () => { /* non-admins cannot read bot logs — ignore */ });
-  listen(doc(db, 'botSettings', 'global'), (snap) => patch((r) => { if (snap.exists()) r.botSettings.global = snap.data(); }));
-  listen(doc(db, 'config', 'app'), (snap) => patch((r) => { if (snap.exists()) r.config = { ...r.config, ...snap.data() }; }));
-  // Announcements (Pack C): the read rule is signedIn-only
-  // (field-independent), so a plain ordered listener is provable.
-  listen(query(collection(db, 'announcements'), orderBy('createdAt', 'desc'), limit(50)),
-    (snap) => patch((r) => { r.announcements = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }),
-    () => { /* listener rejected — leave the mirrored set untouched */ });
-  if (remoteUid) {
-    listen(query(collection(db, 'posts'), where('authorId', '==', remoteUid)),
-      (snap) => { ownPosts = snap.docs.map(mapPost); mergePosts(); },
-      () => { /* listener rejected — leave the mirrored set untouched */ });
-    listen(query(collection(db, 'posts'), where('audienceIds', 'array-contains', remoteUid)),
-      (snap) => { audiencePosts = snap.docs.map(mapPost); mergePosts(); },
-      () => { /* listener rejected — leave the mirrored set untouched */ });
-    listen(query(collection(db, 'stories'), where('authorId', '==', remoteUid)),
-      (snap) => { ownStories = snap.docs.map(mapStory); mergeStories(); },
-      () => { /* listener rejected — leave the mirrored set untouched */ });
-    listen(query(collection(db, 'stories'), where('audienceIds', 'array-contains', remoteUid)),
-      (snap) => { audienceStories = snap.docs.map(mapStory); mergeStories(); },
-      () => { /* listener rejected — leave the mirrored set untouched */ });
-    listen(query(collection(db, 'events'), where('createdBy', '==', remoteUid)),
-      (snap) => { ownEvents = snap.docs.map(mapEvent); mergeEvents(); },
-      () => { /* listener rejected — leave the mirrored set untouched */ });
-    listen(query(collection(db, 'events'), where('audienceIds', 'array-contains', remoteUid)),
-      (snap) => { audienceEvents = snap.docs.map(mapEvent); mergeEvents(); },
-      () => { /* listener rejected — leave the mirrored set untouched */ });
-    // Group join requests: two provable listeners merged by id — requests
-    // I made (userId == me) and requests for groups I own
-    // (groupOwnerId == me, denormalized onto the request at creation).
+    const next = [...byIdMap.values()];
+    if (sameRowsById(remote.groups || [], next)) { remote.groups = next; return; } // silent rebind — see setSlice's note
+    patchMirror((r) => { r.groups = next; });
+  };
+  const fetchPublicGroups = async () => { if (stale()) return; try { publicGroups = (await sbSelect('groups', (q) => q.eq('privacy', 'public').limit(200))).map(mapGroup); mergeGroups(); } catch { /* leave untouched */ } };
+  const fetchMemberGroups = async () => { if (stale()) return; try { memberGroups = (await sbSelect('groups', (q) => q.contains('members', [uid]))).map(mapGroup); mergeGroups(); } catch { /* leave untouched */ } };
+  void fetchPublicGroups();
+  watchTable('groups', fetchPublicGroups);
+  if (uid) { void fetchMemberGroups(); watchTable('groups', fetchMemberGroups); }
+
+  const fetchBots = async () => { if (stale()) return; try { setSlice('bots', (await sbSelect('bots', (q) => q.order('id', { ascending: true }).limit(100))).map((row) => normaliseBot(normaliseTimeFields(row, ['createdAt'])))); } catch { /* leave untouched */ } };
+  void fetchBots();
+  watchTable('bots', fetchBots);
+
+  // Admin-only in RLS (non-admins simply read zero rows).
+  const fetchBotActivities = async () => { if (stale()) return; try { setSlice('botActivities', (await sbSelect('botActivities', (q) => q.order('createdAt', { ascending: false }).limit(100))).map((row) => normaliseTimeFields(row, ['createdAt']))); } catch { /* leave untouched */ } };
+  void fetchBotActivities();
+  watchTable('botActivities', fetchBotActivities);
+
+  const fetchBotLogs = async () => { if (stale()) return; try { setSlice('botLogs', (await sbSelect('botLogs', (q) => q.order('createdAt', { ascending: false }).limit(100))).map((row) => normaliseTimeFields(row, ['createdAt']))); } catch { /* leave untouched */ } };
+  void fetchBotLogs();
+  watchTable('botLogs', fetchBotLogs);
+
+  const fetchBotSettings = async () => {
+    if (stale()) return;
+    try {
+      const row = await sbGet('botSettings', 'global');
+      if (row && remote && remote.botSettings.global.enabled !== (row.enabled !== false)) {
+        patchMirror((r) => { r.botSettings.global = { enabled: row.enabled !== false }; });
+      }
+    } catch { /* leave untouched */ }
+  };
+  void fetchBotSettings();
+  watchTable('botSettings', fetchBotSettings);
+
+  const fetchConfig = async () => {
+    if (stale()) return;
+    try {
+      const row = await sbGet('config', 'app');
+      if (!row || !remote) return;
+      // The config row spreads its overflow jsonb first, then the
+      // named columns (NULL columns are absent keys, exactly as a
+      // Firestore document would omit them) — the same merged shape
+      // config consumers read in the Firestore era.
+      const { id: _ignored, extra, ...cols } = row;
+      const docData = { ...(extra || {}) };
+      for (const [k, v] of Object.entries(cols)) if (v !== null && v !== undefined) docData[k] = v;
+      const merged = { ...remote.config, ...docData };
+      if (stableStringify(remote.config) !== stableStringify(merged)) {
+        patchMirror((r) => { r.config = merged; });
+      }
+    } catch { /* leave untouched */ }
+  };
+  void fetchConfig();
+  watchTable('config', fetchConfig);
+
+  const fetchAnnouncements = async () => { if (stale()) return; try { setSlice('announcements', (await sbSelect('announcements', (q) => q.order('createdAt', { ascending: false }).limit(50))).map((row) => normaliseTimeFields(row, ['createdAt']))); } catch { /* leave untouched */ } };
+  void fetchAnnouncements();
+  watchTable('announcements', fetchAnnouncements);
+
+  if (uid) {
+    // Friendships: rows I sent (from == me) + rows sent to me
+    // (to == me), merged by id.
+    let sentFriendships = [];
+    let receivedFriendships = [];
+    const mergeFriendships = () => {
+      const byIdMap = new Map();
+      for (const f of [...sentFriendships, ...receivedFriendships]) byIdMap.set(f.id, f);
+      const next = [...byIdMap.values()];
+      if (sameRowsById(remote.friendships || [], next)) { remote.friendships = next; return; } // silent rebind — see setSlice's note
+      patchMirror((r) => { r.friendships = next; });
+    };
+    const fetchSentFriendships = async () => { if (stale()) return; try { sentFriendships = await sbSelect('friendships', (q) => q.eq('from', uid)); mergeFriendships(); } catch { /* leave untouched */ } };
+    const fetchReceivedFriendships = async () => { if (stale()) return; try { receivedFriendships = await sbSelect('friendships', (q) => q.eq('to', uid)); mergeFriendships(); } catch { /* leave untouched */ } };
+    void fetchSentFriendships();
+    void fetchReceivedFriendships();
+    watchTable('friendships', fetchSentFriendships);
+    watchTable('friendships', fetchReceivedFriendships);
+
+    const fetchNotifications = async () => { if (stale()) return; try { setSlice('notifications', (await sbSelect('notifications', (q) => q.eq('userId', uid).order('createdAt', { ascending: false }).limit(100))).map((row) => normaliseTimeFields(row, ['createdAt']))); } catch { /* leave untouched */ } };
+    void fetchNotifications();
+    watchTable('notifications', fetchNotifications);
+
+    // Conversations I take part in. RLS already restricts rows to
+    // participants (+ staff); the participants filter mirrors the
+    // Firestore query and keeps staff mirrors conversation-free.
+    // Broadcast typing state overlays the stored column (which stays
+    // at its default — typing is channel state now, Phase 3).
+    const mapConversation = (row) => {
+      const c = normaliseTimeFields(row, ['createdAt']);
+      const liveTyping = typingState.get(c.id);
+      if (liveTyping) c.typing = liveTyping;
+      return c;
+    };
+    const fetchConversations = async () => { if (stale()) return; try { setSlice('conversations', (await sbSelect('conversations', (q) => q.contains('participants', [uid]))).map(mapConversation)); } catch { /* leave untouched */ } };
+    void fetchConversations();
+    watchTable('conversations', fetchConversations);
+
+    // Messages: NEWEST 500 across all my conversations (desc +
+    // limit; the view sorts ascending for display). RLS restricts to
+    // conversations I participate in; the participants filter is the
+    // query the Firestore version used, kept for parity.
+    const fetchMessages = async () => { if (stale()) return; try { setSlice('messages', (await sbSelect('messages', (q) => q.contains('participants', [uid]).order('createdAt', { ascending: false }).limit(500))).map((row) => normaliseTimeFields(row, ['createdAt']))); } catch { /* leave the mirrored set untouched */ } };
+    void fetchMessages();
+    watchTable('messages', fetchMessages);
+
+    const fetchBlocks = async () => { if (stale()) return; try { setSlice('blocks', await sbSelect('blocks', (q) => q.eq('blockerId', uid))); } catch { /* leave untouched */ } };
+    void fetchBlocks();
+    watchTable('blocks', fetchBlocks);
+
+    // Group join requests: mine + requests to groups I admin,
+    // merged by id.
     let myGroupRequests = [];
-    let ownedGroupRequests = [];
-    const mergeGroupRequests = () => patch((r) => {
+    let adminGroupRequests = [];
+    const mergeGroupRequests = () => {
       const byIdMap = new Map();
-      for (const g of [...myGroupRequests, ...ownedGroupRequests]) byIdMap.set(g.id, g);
-      r.groupRequests = [...byIdMap.values()];
-    });
-    const mapGroupRequest = (d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) });
-    listen(query(collection(db, 'groupRequests'), where('userId', '==', remoteUid)),
-      (snap) => { myGroupRequests = snap.docs.map(mapGroupRequest); mergeGroupRequests(); },
-      () => { /* listener rejected — leave the mirrored set untouched */ });
-    listen(query(collection(db, 'groupRequests'), where('groupOwnerId', '==', remoteUid)),
-      (snap) => { ownedGroupRequests = snap.docs.map(mapGroupRequest); mergeGroupRequests(); },
-      () => { /* listener rejected — leave the mirrored set untouched */ });
-    // Support Inbox: two provable listeners merged by id — reports I
-    // filed (reporterId == me) and reports about my content
-    // (targetAuthorId == me, stamped at creation). The staff-wide
-    // reports listener below stays moderator-only under the rules.
-    let myFiledReports = [];
-    let myNoticeReports = [];
-    const mergeSupportReports = () => patch((r) => {
+      for (const g of [...myGroupRequests, ...adminGroupRequests]) byIdMap.set(g.id, g);
+      const next = [...byIdMap.values()];
+      if (sameRowsById(remote.groupRequests || [], next)) { remote.groupRequests = next; return; } // silent rebind — see setSlice's note
+      patchMirror((r) => { r.groupRequests = next; });
+    };
+    const fetchMyGroupRequests = async () => { if (stale()) return; try { myGroupRequests = await sbSelect('groupRequests', (q) => q.eq('userId', uid)); mergeGroupRequests(); } catch { /* leave untouched */ } };
+    const fetchAdminGroupRequests = async () => { if (stale()) return; try { adminGroupRequests = await sbSelect('groupRequests', (q) => q.eq('groupAdminId', uid)); mergeGroupRequests(); } catch { /* leave untouched */ } };
+    void fetchMyGroupRequests();
+    void fetchAdminGroupRequests();
+    watchTable('groupRequests', fetchMyGroupRequests);
+    watchTable('groupRequests', fetchAdminGroupRequests);
+
+    // Support Inbox (Support Pack): reports I filed + reports ABOUT
+    // my content (the notices), merged by id. RLS already restricts
+    // report reads to reporter / target author / staff, so these two
+    // slices are belt-and-braces scoping identical to the Firestore
+    // queries; the staff slice below keeps the Reports Center full.
+    let filedReports = [];
+    let aboutReports = [];
+    const mergeSupportReports = () => {
       const byIdMap = new Map();
-      for (const x of [...myFiledReports, ...myNoticeReports]) byIdMap.set(x.id, x);
-      r.supportReports = [...byIdMap.values()];
-    });
-    const mapSupportReport = (d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) });
-    listen(query(collection(db, 'reports'), where('reporterId', '==', remoteUid)),
-      (snap) => { myFiledReports = snap.docs.map(mapSupportReport); mergeSupportReports(); },
-      () => { /* listener rejected — leave the mirrored set untouched */ });
-    listen(query(collection(db, 'reports'), where('targetAuthorId', '==', remoteUid)),
-      (snap) => { myNoticeReports = snap.docs.map(mapSupportReport); mergeSupportReports(); },
-      () => { /* listener rejected — leave the mirrored set untouched */ });
-    listen(query(collection(db, 'friendships'), where('from', '==', remoteUid)),
-      (snap) => { friendshipsFrom = snap.docs.map(mapFriendship); mergeFriendships(); },
-      () => { /* listener rejected — leave the mirrored set untouched */ });
-    listen(query(collection(db, 'friendships'), where('to', '==', remoteUid)),
-      (snap) => { friendshipsTo = snap.docs.map(mapFriendship); mergeFriendships(); },
-      () => { /* listener rejected — leave the mirrored set untouched */ });
-    listen(query(collection(db, 'notifications'), where('userId', '==', remoteUid), orderBy('createdAt', 'desc'), limit(100)),
-      (snap) => patch((r) => { r.notifications = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
-    listen(query(collection(db, 'conversations'), where('participants', 'array-contains', remoteUid)),
-      (snap) => patch((r) => { r.conversations = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
-    const applyMessages = (snap) => patch((r) => { r.messages = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); });
-    // NEWEST 500, not oldest: an ascending limit() returns the FIRST
-    // 500 documents, so past 500 total messages every newer DM fell
-    // outside the window and the inbox silently froze. Descending +
-    // limit keeps the most recent 500; the view sorts for display.
-    listen(query(collection(db, 'messages'), where('participants', 'array-contains', remoteUid), orderBy('createdAt', 'desc'), limit(500)),
-      applyMessages,
-      () => {
-        // The ordered query needs a composite index; if it is missing or
-        // still building, the inbox must NOT silently stay empty (that
-        // failure mode hid every DM while sends/posts/notifications all
-        // worked). Fall back to the single-field query — its index is
-        // automatic — and let the view layer sort by createdAt.
-        listen(query(collection(db, 'messages'), where('participants', 'array-contains', remoteUid), limit(500)),
-          applyMessages,
-          () => { /* both queries rejected — leave the mirrored set untouched */ });
-      });
-    listen(query(collection(db, 'blocks'), where('by', '==', remoteUid)),
-      (snap) => patch((r) => { r.blocks = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }));
-    listen(query(collection(db, 'groups'), where('members', 'array-contains', remoteUid), limit(200)),
-      (snap) => { memberGroups = snap.docs.map(mapGroup); mergeGroups(); });
-    listen(query(collection(db, 'reports'), orderBy('createdAt', 'desc'), limit(100)),
-      (snap) => patch((r) => { r.reports = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }), () => { /* non-admins cannot read reports — ignore */ });
-    // Audit trail: readable by admins/superadmins only (rules), so the
-    // listener simply never delivers for anyone else.
-    listen(query(collection(db, 'adminLogs'), orderBy('createdAt', 'desc'), limit(200)),
-      (snap) => patch((r) => { r.adminLogs = snap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })); }), () => { /* moderators/analysts cannot read the audit log — ignore */ });
+      for (const r of [...filedReports, ...aboutReports]) byIdMap.set(r.id, r);
+      const next = [...byIdMap.values()];
+      if (sameRowsById(remote.supportReports || [], next)) { remote.supportReports = next; return; } // silent rebind — see setSlice's note
+      patchMirror((r) => { r.supportReports = next; });
+    };
+    const fetchFiledReports = async () => { if (stale()) return; try { filedReports = (await sbSelect('reports', (q) => q.eq('reporterId', uid))).map((row) => normaliseTimeFields(row, ['createdAt'])); mergeSupportReports(); } catch { /* leave untouched */ } };
+    const fetchAboutReports = async () => { if (stale()) return; try { aboutReports = (await sbSelect('reports', (q) => q.eq('targetAuthorId', uid))).map((row) => normaliseTimeFields(row, ['createdAt'])); mergeSupportReports(); } catch { /* leave untouched */ } };
+    void fetchFiledReports();
+    void fetchAboutReports();
+    watchTable('reports', fetchFiledReports);
+    watchTable('reports', fetchAboutReports);
   }
+
+  // Staff-only mirrors (RLS returns zero rows for non-staff, so these
+  // are safe to run for everyone): the Reports Center and the admin
+  // activity log.
+  const fetchStaffReports = async () => { if (stale()) return; try { setSlice('reports', (await sbSelect('reports', (q) => q.order('createdAt', { ascending: false }).limit(100))).map((row) => normaliseTimeFields(row, ['createdAt']))); } catch { /* leave untouched */ } };
+  void fetchStaffReports();
+  watchTable('reports', fetchStaffReports);
+
+  const fetchAdminLogs = async () => { if (stale()) return; try { setSlice('adminLogs', (await sbSelect('adminLogs', (q) => q.order('createdAt', { ascending: false }).limit(200))).map((row) => normaliseTimeFields(row, ['createdAt']))); } catch { /* leave untouched */ } };
+  void fetchAdminLogs();
+  watchTable('adminLogs', fetchAdminLogs);
+
+  // Phase 3 channels: presence + typing (see their sections above).
+  startPresenceChannel();
+  startTypingChannel();
 }
 
 // -------------------------------------------------------------------------
@@ -668,14 +997,14 @@ export async function updateProfile(userId, patch) {
     patch.username = v.value;
     const clash = data().users.some((u) => u.username === v.value && u.id !== userId);
     if (clash) throw new Error('That username is already taken.');
-    if (firebaseReady) {
+    if (live) {
       // The local mirror is capped (~300 users) and may not have
-      // loaded — verify against Firestore itself before writing.
-      const taken = await getDocs(query(collection(db, 'users'), where('username', '==', v.value)));
-      if (taken.docs.some((d) => d.id !== userId)) throw new Error('That username is already taken.');
+      // loaded — verify against Supabase itself before writing.
+      const taken = await sbSelect('users', (q) => q.eq('username', v.value));
+      if (taken.some((d) => d.id !== userId)) throw new Error('That username is already taken.');
     }
   }
-  if (firebaseReady) { await updateDoc(doc(db, 'users', userId), patch); return; }
+  if (live) { await sbUpdate('users', userId, patch); return; }
   mutate((s) => {
     const u = s.users.find((x) => x.id === userId);
     if (u) Object.assign(u, patch);
@@ -723,9 +1052,8 @@ export async function compressImageToDataUrl(file, maxBytes = 200 * 1024, maxDim
 export async function uploadImage(file, path) {
   if (!file) return '';
   if (!String(file.type || '').startsWith('image/')) throw new Error('Please choose an image file.');
-  // 1) Cloudinary first when configured (free tier): the Firebase project is
-  //    on Spark, where Firebase Storage is unavailable, so Cloudinary is the
-  //    working hosted storage and Firestore then stores only the image URL.
+  // 1) Cloudinary first when configured (free tier): Cloudinary is the
+  //    working hosted storage; the database then stores only the URL.
   if (isCloudinaryConfigured()) {
     try {
       return await uploadToCloudinary(file);
@@ -733,24 +1061,8 @@ export async function uploadImage(file, path) {
       console.warn('Cloudinary upload failed, falling back:', err?.message || err);
     }
   }
-  // 2) Firebase Storage (works once the project is on Blaze).
-  if (firebaseReady && storage) {
-    try {
-      const r = storageRef(storage, path);
-      await uploadBytes(r, file, { contentType: file.type });
-      return await getDownloadURL(r);
-    } catch (err) {
-      // STORAGE FALLBACK: Firebase Storage is not enabled on this project yet
-      // (it requires the Blaze plan; the project is on Spark). Degrade
-      // gracefully instead of breaking posting/profile flows: store a
-      // compressed image (canvas-resized, max ~200KB) as a data URL directly
-      // in the Firestore document. Once Storage is enabled, new uploads use
-      // Storage automatically and old data-URL images keep rendering.
-      console.warn('Firebase Storage unavailable, using compressed data-URL fallback:', err?.code || err);
-    }
-  }
-  // 3) Demo mode / all hosted storage unavailable: compressed data URL
-  //    stored locally (demo store) or in the Firestore document (live mode).
+  // 2) Demo mode / no hosted storage: compressed data URL stored
+  //    locally (demo store) or in the row itself (live mode).
   return compressImageToDataUrl(file);
 }
 
@@ -766,7 +1078,7 @@ export function setOnline(userId, online) {
   const now = Date.now();
   if (online && now - (presenceWriteAt.get(userId) || 0) < 120_000) return;
   presenceWriteAt.set(userId, now);
-  if (firebaseReady) { updateDoc(doc(db, 'users', userId), { online, lastSeen: now }).catch(() => {}); return; }
+  if (live) { sbUpdate('users', userId, { online, lastSeen: now }).catch(() => {}); return; }
   mutate((s) => { const u = s.users.find((x) => x.id === userId); if (u) { u.online = online; u.lastSeen = now; } });
 }
 
@@ -826,22 +1138,26 @@ export async function createPost({ text, image, visibility, groupId = '', pageId
     feeling: String(feeling || ''), pinned: false
   };
   if (!post.text && !post.image && !post.poll) throw new Error('Write something or add a photo first.');
-  if (firebaseReady) {
+  if (live) {
     // Optimistic echo: show the post in the feed at once under a temp
     // id; the echo adopts the real id when the write lands and the
-    // posts merge prunes it once a listener delivers the server copy.
+    // posts merge prunes it once the refetch delivers the server copy.
+    // (The real id is generated client-side — PostgREST has no
+    // addDoc — but it is only revealed once the insert succeeds, so a
+    // failed write never leaves a "real-looking" phantom behind.)
     const echo = { id: `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, ...post };
     localEchoPosts = [echo, ...localEchoPosts];
     // Rebuild the mirror now (not just emit): the echo only becomes
-    // visible once the merge runs, and the snapshot may not fire until
+    // visible once the merge runs, and the refetch may not land until
     // the server copy arrives.
     if (remergePosts) remergePosts(); else emitData();
     try {
-      const ref = await addDoc(collection(db, 'posts'), { ...post, createdAt: serverTimestamp() });
-      echo.id = ref.id;
+      const postId = genId('p');
+      await sbInsert('posts', { id: postId, ...post });
+      echo.id = postId;
       if (remergePosts) remergePosts(); else emitData();
-      fanOutMentions(post.text, author, ref.id).catch(() => { /* mention notifications are best-effort; an unhandled rejection here used to be the only trace */ });
-      return { id: ref.id, ...post };
+      fanOutMentions(post.text, author, postId).catch(() => { /* mention notifications are best-effort; an unhandled rejection here used to be the only trace */ });
+      return { id: postId, ...post };
     } catch (err) {
       localEchoPosts = localEchoPosts.filter((p) => p !== echo);
       if (remergePosts) remergePosts(); else emitData();
@@ -866,35 +1182,40 @@ function notifyMentions(s, post, author) {
 
 async function fanOutMentions(text, author, postId) {
   for (const uname of extractMentions(text)) {
-    const snap = await getDocs(query(collection(db, 'users'), where('username', '==', uname)));
-    for (const d of snap.docs) {
+    const rows = await sbSelect('users', (q) => q.eq('username', uname));
+    for (const d of rows) {
       await createNotification({ userId: d.id, type: 'mention', actorId: author.id, text: `${author.name} mentioned you in a post.`, postId, conversationId: '', read: false, createdAt: Date.now() });
     }
   }
 }
 
 export async function editPost(postId, text) {
-  if (firebaseReady) { await updateDoc(doc(db, 'posts', postId), { text, editedAt: Date.now() }); return; }
+  if (live) { await sbUpdate('posts', postId, { text, editedAt: Date.now() }); return; }
   mutate((s) => { const p = s.posts.find((x) => x.id === postId); if (p) { p.text = text; p.editedAt = Date.now(); } });
 }
 
 export async function deletePost(postId) {
-  if (firebaseReady) { await deleteDoc(doc(db, 'posts', postId)); return; }
+  if (live) { await sbDelete('posts', postId); return; }
   mutate((s) => { s.posts = s.posts.filter((p) => p.id !== postId); });
 }
 
 export async function toggleLike(postId) {
   const user = me(); if (!user) throw new Error('Sign in to like posts.');
-  if (firebaseReady) {
+  if (live) {
     const post = data().posts.find((p) => p.id === postId);
     const has = post?.likes?.includes(user.id);
     // Optimistic: flip the mirror first so the heart/count update in
     // the same frame as the tap; roll back if the write fails.
     const applyLike = (p) => { p.likes = has ? (p.likes || []).filter((id) => id !== user.id) : [...(p.likes || []), user.id]; };
     const undoLike = (p) => { p.likes = has ? [...(p.likes || []), user.id] : (p.likes || []).filter((id) => id !== user.id); };
+    // Capture the write payload BEFORE the optimistic patch: the patch
+    // mutates the very object `post` points at, so reading post.likes
+    // afterwards would double-count (Firestore's arrayUnion hid this —
+    // a whole-array write cannot).
+    const nextLikes = has ? (post?.likes || []).filter((id) => id !== user.id) : [...(post?.likes || []), user.id];
     patchRemotePost(postId, applyLike, { silent: true });
     try {
-      await updateDoc(doc(db, 'posts', postId), { likes: has ? arrayRemove(user.id) : arrayUnion(user.id) });
+      await sbUpdate('posts', postId, { likes: nextLikes });
     } catch (err) { patchRemotePost(postId, undoLike, { silent: true }); throw err; }
     if (!has && post) { try { await createNotification({ userId: post.authorId, type: 'like', actorId: user.id, text: `${user.name} liked your post.`, postId, conversationId: '', read: false, createdAt: Date.now() }); } catch { /* the like itself already succeeded */ } }
     return;
@@ -909,14 +1230,14 @@ export async function toggleLike(postId) {
 
 export async function toggleReaction(postId, emoji) {
   const user = me(); if (!user) throw new Error('Sign in to react.');
-  if (firebaseReady) {
+  if (live) {
     const post = data().posts.find((p) => p.id === postId);
     const prevReactions = post ? { ...(post.reactions || {}) } : null;
     const reactions = { ...(post?.reactions || {}) };
     if (reactions[user.id] === emoji) delete reactions[user.id]; else reactions[user.id] = emoji;
     patchRemotePost(postId, (p) => { p.reactions = reactions; }, { silent: true });
     try {
-      await updateDoc(doc(db, 'posts', postId), { reactions });
+      await sbUpdate('posts', postId, { reactions });
     } catch (err) { if (prevReactions) patchRemotePost(postId, (p) => { p.reactions = prevReactions; }, { silent: true }); throw err; }
     return;
   }
@@ -930,14 +1251,16 @@ export async function toggleReaction(postId, emoji) {
 
 export async function toggleSave(postId) {
   const user = me(); if (!user) throw new Error('Sign in to save posts.');
-  if (firebaseReady) {
+  if (live) {
     const post = data().posts.find((p) => p.id === postId);
     const has = post?.savedBy?.includes(user.id);
     const applySave = (p) => { p.savedBy = has ? (p.savedBy || []).filter((id) => id !== user.id) : [...(p.savedBy || []), user.id]; };
     const undoSave = (p) => { p.savedBy = has ? [...(p.savedBy || []), user.id] : (p.savedBy || []).filter((id) => id !== user.id); };
+    // Payload captured before the optimistic patch — see toggleLike.
+    const nextSavedBy = has ? (post?.savedBy || []).filter((id) => id !== user.id) : [...(post?.savedBy || []), user.id];
     patchRemotePost(postId, applySave, { silent: true });
     try {
-      await updateDoc(doc(db, 'posts', postId), { savedBy: has ? arrayRemove(user.id) : arrayUnion(user.id) });
+      await sbUpdate('posts', postId, { savedBy: nextSavedBy });
     } catch (err) { patchRemotePost(postId, undoSave, { silent: true }); throw err; }
     return;
   }
@@ -958,11 +1281,11 @@ export async function votePoll(postId, optionId) {
   const post = data().posts.find((p) => p.id === postId);
   if (!post?.poll) throw new Error('This post has no poll.');
   const votes = castPollVote(post.poll, user.id, optionId);
-  if (firebaseReady) {
+  if (live) {
     const prevPoll = post.poll;
     patchRemotePost(postId, (p) => { p.poll = { options: prevPoll.options, votes }; }, { silent: true });
     try {
-      await updateDoc(doc(db, 'posts', postId), { poll: { options: post.poll.options, votes } });
+      await sbUpdate('posts', postId, { poll: { options: post.poll.options, votes } });
     } catch (err) { patchRemotePost(postId, (p) => { p.poll = prevPoll; }, { silent: true }); throw err; }
     return;
   }
@@ -983,7 +1306,7 @@ export async function togglePinPost(postId) {
   const group = (data().groups || []).find((g) => g.id === post.groupId);
   if (!group || group.createdBy !== user.id) throw new Error('Only the group creator can pin announcements.');
   const pinned = !post.pinned;
-  if (firebaseReady) { await updateDoc(doc(db, 'posts', postId), { pinned }); return pinned; }
+  if (live) { await sbUpdate('posts', postId, { pinned }); return pinned; }
   mutate((s) => { const p = s.posts.find((x) => x.id === postId); if (p) p.pinned = pinned; });
   return pinned;
 }
@@ -997,7 +1320,7 @@ export async function sharePost(postId) {
     createdAt: Date.now(), editedAt: 0, likes: [], reactions: {}, comments: [], shares: 0,
     sharedFrom: original.authorId, savedBy: [], groupId: '', pageId: '', pageName: '', pageAvatar: ''
   };
-  if (firebaseReady) {
+  if (live) {
     // Same optimistic echo as createPost, plus the original's share
     // count flips locally at once. NOTE: nextShares is captured BEFORE
     // the optimistic patch — the patch mutates the shared `original`
@@ -1009,10 +1332,11 @@ export async function sharePost(postId) {
     patchRemotePost(postId, (p) => { p.shares = nextShares; });
     if (remergePosts) remergePosts(); else emitData();
     try {
-      const ref = await addDoc(collection(db, 'posts'), shared);
-      echo.id = ref.id;
+      const shareId = genId('p');
+      await sbInsert('posts', { id: shareId, ...shared });
+      echo.id = shareId;
       if (remergePosts) remergePosts(); else emitData();
-      await updateDoc(doc(db, 'posts', postId), { shares: nextShares });
+      await sbUpdate('posts', postId, { shares: nextShares });
     } catch (err) {
       localEchoPosts = localEchoPosts.filter((p) => p !== echo);
       patchRemotePost(postId, (p) => { p.shares = Math.max(0, nextShares - 1); });
@@ -1036,7 +1360,7 @@ export async function addComment(postId, text, parentCommentId = '') {
   const user = me(); if (!user) throw new Error('Sign in to comment.');
   const comment = { id: genId('c'), authorId: user.id, text: String(text).trim(), createdAt: Date.now(), replies: [] };
   if (!comment.text) throw new Error('Comment cannot be empty.');
-  if (firebaseReady) {
+  if (live) {
     const post = data().posts.find((p) => p.id === postId);
     const prevComments = post?.comments || [];
     // Build the next comments array immutably, apply it to the mirror
@@ -1048,7 +1372,7 @@ export async function addComment(postId, text, parentCommentId = '') {
     } else comments = [...prevComments, comment];
     patchRemotePost(postId, (p) => { p.comments = comments; });
     try {
-      await updateDoc(doc(db, 'posts', postId), { comments });
+      await sbUpdate('posts', postId, { comments });
     } catch (err) { patchRemotePost(postId, (p) => { p.comments = prevComments; }); throw err; }
     // Notification parity with demo mode: a REPLY notifies the parent
     // comment's author (not the post author), a top-level comment
@@ -1084,14 +1408,14 @@ export async function addComment(postId, text, parentCommentId = '') {
 }
 
 export async function deleteComment(postId, commentId) {
-  if (firebaseReady) {
+  if (live) {
     const post = data().posts.find((p) => p.id === postId);
     const prevComments = post?.comments || [];
     const comments = prevComments.filter((c) => c.id !== commentId)
       .map((c) => ({ ...c, replies: (c.replies || []).filter((r) => r.id !== commentId) }));
     patchRemotePost(postId, (p) => { p.comments = comments; });
     try {
-      await updateDoc(doc(db, 'posts', postId), { comments });
+      await sbUpdate('posts', postId, { comments });
     } catch (err) { patchRemotePost(postId, (p) => { p.comments = prevComments; }); throw err; }
     return;
   }
@@ -1166,7 +1490,7 @@ export async function reportContent(targetType, targetId, reason, opts = {}) {
     const p = data().posts.find((x) => x.id === targetId);
     if (p?.image) report.targetPhoto = true;
   }
-  if (firebaseReady) { await addDoc(collection(db, 'reports'), report); return report; }
+  if (live) { await sbInsert('reports', { id: genId('rep'), ...report }); return report; }
   let saved = null;
   mutate((s) => { saved = { id: genId('rep'), ...report }; s.reports.unshift(saved); });
   return saved;
@@ -1188,9 +1512,10 @@ export async function createStory({ text, image, bg, visibility }) {
     views: [], createdAt: Date.now()
   };
   if (!story.text && !story.image) throw new Error('Add a photo or some text to your story first.');
-  if (firebaseReady) {
-    const ref = await addDoc(collection(db, 'stories'), { ...story, createdAt: serverTimestamp() });
-    return { id: ref.id, ...story };
+  if (live) {
+    const storyId = genId('story');
+    await sbInsert('stories', { id: storyId, ...story });
+    return { id: storyId, ...story };
   }
   const full = { id: genId('story'), ...story };
   mutate((s) => { (s.stories = s.stories || []).unshift(full); });
@@ -1204,7 +1529,7 @@ export async function markStoryViewed(storyId) {
   const user = me(); if (!user) return;
   const story = (data().stories || []).find((s) => s.id === storyId);
   if (!story || story.authorId === user.id || (story.views || []).includes(user.id)) return;
-  if (firebaseReady) { await updateDoc(doc(db, 'stories', storyId), { views: arrayUnion(user.id) }); return; }
+  if (live) { await sbUpdate('stories', storyId, { views: [...(story.views || []), user.id] }); return; }
   mutate((s) => {
     const st = (s.stories || []).find((x) => x.id === storyId);
     if (st && !(st.views || []).includes(user.id)) st.views = [...(st.views || []), user.id];
@@ -1212,7 +1537,7 @@ export async function markStoryViewed(storyId) {
 }
 
 export async function deleteStory(storyId) {
-  if (firebaseReady) { await deleteDoc(doc(db, 'stories', storyId)); return; }
+  if (live) { await sbDelete('stories', storyId); return; }
   mutate((s) => { s.stories = (s.stories || []).filter((x) => x.id !== storyId); });
 }
 
@@ -1223,9 +1548,10 @@ export async function createGroup({ name, description, privacy, cover }) {
   const user = me(); if (!user) throw new Error('Sign in to create a group.');
   const group = normaliseGroup({ name, description, privacy, cover }, user.id);
   if (!group.name) throw new Error('Give your group a name.');
-  if (firebaseReady) {
-    const ref = await addDoc(collection(db, 'groups'), group);
-    return { id: ref.id, ...group };
+  if (live) {
+    const groupId = genId('g');
+    await sbInsert('groups', { id: groupId, ...group });
+    return { id: groupId, ...group };
   }
   const full = { id: genId('g'), ...group };
   mutate((s) => { (s.groups = s.groups || []).unshift(full); });
@@ -1233,7 +1559,7 @@ export async function createGroup({ name, description, privacy, cover }) {
 }
 
 export async function updateGroup(groupId, patch) {
-  if (firebaseReady) { await updateDoc(doc(db, 'groups', groupId), patch); return { id: groupId, ...patch }; }
+  if (live) { await sbUpdate('groups', groupId, patch); return { id: groupId, ...patch }; }
   let updated = null;
   mutate((s) => {
     const g = (s.groups || []).find((x) => x.id === groupId);
@@ -1243,7 +1569,7 @@ export async function updateGroup(groupId, patch) {
 }
 
 export async function deleteGroup(groupId) {
-  if (firebaseReady) {
+  if (live) {
     // Remove the group's posts first so no orphaned group posts remain.
     // Per-doc catch: the posts delete rule is author-or-admin, so a
     // non-admin creator cannot delete OTHER members' posts — one such
@@ -1251,9 +1577,9 @@ export async function deleteGroup(groupId) {
     // group still there). Now every deletable post goes, the group doc
     // is deleted, and any undeletable posts become unreachable orphans
     // (their group no longer exists, so no surface renders them).
-    const snap = await getDocs(query(collection(db, 'posts'), where('groupId', '==', groupId)));
-    for (const d of snap.docs) { try { await deleteDoc(doc(db, 'posts', d.id)); } catch { /* foreign post — see note above */ } }
-    await deleteDoc(doc(db, 'groups', groupId));
+    const rows = await sbSelect('posts', (q) => q.eq('groupId', groupId));
+    for (const d of rows) { try { await sbDelete('posts', d.id); } catch { /* foreign post — see note above */ } }
+    await sbDelete('groups', groupId);
     return true;
   }
   mutate((s) => {
@@ -1284,15 +1610,17 @@ export async function toggleGroupMembership(groupId) {
     const requestId = `${groupId}_${user.id}`;
     if (pending) {
       // Withdraw the pending request.
-      if (firebaseReady) { await deleteDoc(doc(db, 'groupRequests', requestId)); return 'withdrawn'; }
+      if (live) { await sbDelete('groupRequests', requestId); return 'withdrawn'; }
       mutate((s) => { s.groupRequests = (s.groupRequests || []).filter((r) => r.id !== requestId); });
       return 'withdrawn';
     }
     // groupOwnerId is denormalized onto the request so the creator's
     // queue listener + read rule stay provable (no join to the group).
-    const request = { groupId, groupOwnerId: group.createdBy, userId: user.id, status: 'pending', createdAt: Date.now() };
-    if (firebaseReady) {
-      await setDoc(doc(db, 'groupRequests', requestId), request);
+    // groupAdminId is stored alongside groupOwnerId (the schema keeps
+    // both spellings; the RLS insert check keys off groupAdminId).
+    const request = { groupId, groupOwnerId: group.createdBy, groupAdminId: group.createdBy, userId: user.id, status: 'pending', createdAt: Date.now() };
+    if (live) {
+      await sbUpsert('groupRequests', { id: requestId, ...request });
       await createNotification({ userId: group.createdBy, type: 'group_request', actorId: user.id, text: `${user.name} asked to join your private group "${group.name}".`, postId: '', conversationId: '', groupId: group.id, read: false, createdAt: Date.now() });
       return 'requested';
     }
@@ -1303,8 +1631,8 @@ export async function toggleGroupMembership(groupId) {
     });
     return 'requested';
   }
-  if (firebaseReady) {
-    await updateDoc(doc(db, 'groups', groupId), { members: isMember ? arrayRemove(user.id) : arrayUnion(user.id) });
+  if (live) {
+    await sbUpdate('groups', groupId, { members: isMember ? (group.members || []).filter((m) => m !== user.id) : [...(group.members || []), user.id] });
     if (!isMember) await createNotification({ userId: group.createdBy, type: 'group_join', actorId: user.id, text: `${user.name} joined your group "${group.name}".`, postId: '', conversationId: '', groupId: group.id, read: false, createdAt: Date.now() });
     return isMember ? 'left' : 'joined';
   }
@@ -1331,9 +1659,9 @@ export async function respondGroupRequest(requestId, approve) {
   if (!group || group.createdBy !== user.id) throw new Error('Only the group creator can review join requests.');
   if (request.status !== 'pending') return request.status;
   const status = approve ? 'approved' : 'rejected';
-  if (firebaseReady) {
-    if (approve) await updateDoc(doc(db, 'groups', group.id), { members: arrayUnion(request.userId) });
-    await updateDoc(doc(db, 'groupRequests', requestId), { status });
+  if (live) {
+    if (approve) await sbUpdate('groups', group.id, { members: [...new Set([...(group.members || []), request.userId])] });
+    await sbUpdate('groupRequests', requestId, { status });
     await createNotification({ userId: request.userId, type: 'group_request_result', actorId: user.id, text: approve ? `Your request to join "${group.name}" was approved.` : `Your request to join "${group.name}" was declined.`, postId: '', conversationId: '', groupId: group.id, read: false, createdAt: Date.now() });
     return status;
   }
@@ -1355,7 +1683,7 @@ export async function removeGroupMember(groupId, memberId) {
   if (!group) throw new Error('Group not found.');
   if (group.createdBy !== user.id) throw new Error('Only the group creator can remove members.');
   if (memberId === group.createdBy) throw new Error('The group creator cannot be removed.');
-  if (firebaseReady) { await updateDoc(doc(db, 'groups', groupId), { members: arrayRemove(memberId) }); return true; }
+  if (live) { await sbUpdate('groups', groupId, { members: (group.members || []).filter((m) => m !== memberId) }); return true; }
   mutate((s) => {
     const g = (s.groups || []).find((x) => x.id === groupId);
     if (g) g.members = (g.members || []).filter((m) => m !== memberId);
@@ -1370,9 +1698,10 @@ export async function createPage({ name, category, about, avatar, cover }) {
   const user = me(); if (!user) throw new Error('Sign in to create a page.');
   const page = normalisePage({ name, category, about, avatar, cover }, user.id);
   if (!page.name) throw new Error('Give your page a name.');
-  if (firebaseReady) {
-    const ref = await addDoc(collection(db, 'pages'), page);
-    return { id: ref.id, ...page };
+  if (live) {
+    const pageId = genId('pg');
+    await sbInsert('pages', { id: pageId, ...page });
+    return { id: pageId, ...page };
   }
   const full = { id: genId('pg'), ...page };
   mutate((s) => { (s.pages = s.pages || []).unshift(full); });
@@ -1380,7 +1709,7 @@ export async function createPage({ name, category, about, avatar, cover }) {
 }
 
 export async function updatePage(pageId, patch) {
-  if (firebaseReady) { await updateDoc(doc(db, 'pages', pageId), patch); return { id: pageId, ...patch }; }
+  if (live) { await sbUpdate('pages', pageId, patch); return { id: pageId, ...patch }; }
   let updated = null;
   mutate((s) => {
     const p = (s.pages || []).find((x) => x.id === pageId);
@@ -1390,10 +1719,10 @@ export async function updatePage(pageId, patch) {
 }
 
 export async function deletePage(pageId) {
-  if (firebaseReady) {
-    const snap = await getDocs(query(collection(db, 'posts'), where('pageId', '==', pageId)));
-    for (const d of snap.docs) await deleteDoc(doc(db, 'posts', d.id));
-    await deleteDoc(doc(db, 'pages', pageId));
+  if (live) {
+    const rows = await sbSelect('posts', (q) => q.eq('pageId', pageId));
+    for (const d of rows) await sbDelete('posts', d.id);
+    await sbDelete('pages', pageId);
     return true;
   }
   mutate((s) => {
@@ -1409,8 +1738,8 @@ export async function toggleFollowPage(pageId) {
   if (!page) throw new Error('Page not found.');
   if (page.ownerId === user.id) return true; // owners always count as following
   const following = (page.followers || []).includes(user.id);
-  if (firebaseReady) {
-    await updateDoc(doc(db, 'pages', pageId), { followers: following ? arrayRemove(user.id) : arrayUnion(user.id) });
+  if (live) {
+    await sbUpdate('pages', pageId, { followers: following ? (page.followers || []).filter((id) => id !== user.id) : [...(page.followers || []), user.id] });
     if (!following) await createNotification({ userId: page.ownerId, type: 'page_follow', actorId: user.id, text: `${user.name} started following your page "${page.name}".`, postId: '', conversationId: '', pageId: page.id, read: false, createdAt: Date.now() });
     return !following;
   }
@@ -1450,9 +1779,10 @@ export async function createEvent({ title, description, dateTime, location, cove
   }, user.id);
   if (!event.title) throw new Error('Give your event a title.');
   if (!event.dateTime) throw new Error('Pick a date and time for your event.');
-  if (firebaseReady) {
-    const ref = await addDoc(collection(db, 'events'), event);
-    return { id: ref.id, ...event };
+  if (live) {
+    const eventId = genId('ev');
+    await sbInsert('events', { id: eventId, ...event });
+    return { id: eventId, ...event };
   }
   const full = { id: genId('ev'), ...event };
   mutate((s) => { (s.events = s.events || []).unshift(full); });
@@ -1464,7 +1794,7 @@ export async function deleteEvent(eventId) {
   const event = (data().events || []).find((e) => e.id === eventId);
   if (!event) throw new Error('Event not found.');
   if (event.createdBy !== user.id && !isAdmin(user)) throw new Error('Only the event creator can delete this event.');
-  if (firebaseReady) { await deleteDoc(doc(db, 'events', eventId)); return true; }
+  if (live) { await sbDelete('events', eventId); return true; }
   mutate((s) => { s.events = (s.events || []).filter((e) => e.id !== eventId); });
   return true;
 }
@@ -1484,8 +1814,8 @@ export async function toggleEventRsvp(eventId, kind) {
     [kind]: active ? (event[kind] || []).filter((id) => id !== user.id) : [...(event[kind] || []), user.id],
     [other]: (event[other] || []).filter((id) => id !== user.id)
   };
-  if (firebaseReady) {
-    await updateDoc(doc(db, 'events', eventId), next);
+  if (live) {
+    await sbUpdate('events', eventId, next);
     if (!active && event.createdBy !== user.id) {
       await createNotification({ userId: event.createdBy, type: 'event_rsvp', actorId: user.id, text: `${user.name} is ${kind === 'going' ? 'going to' : 'interested in'} your event "${event.title}".`, postId: '', conversationId: '', eventId: event.id, read: false, createdAt: Date.now() });
     }
@@ -1514,10 +1844,11 @@ export async function saveReview(pageId, { rating, text }) {
   if (value < 1 || value > 5) throw new Error('Pick a star rating between 1 and 5.');
   const existing = (data().reviews || []).find((r) => r.pageId === pageId && r.authorId === user.id);
   const review = { pageId, authorId: user.id, rating: value, text: String(text || '').trim().slice(0, 500), createdAt: existing?.createdAt || Date.now() };
-  if (firebaseReady) {
-    if (existing) { await updateDoc(doc(db, 'reviews', existing.id), { rating: review.rating, text: review.text }); return { id: existing.id, ...review }; }
-    const ref = await addDoc(collection(db, 'reviews'), review);
-    return { id: ref.id, ...review };
+  if (live) {
+    if (existing) { await sbUpdate('reviews', existing.id, { rating: review.rating, text: review.text }); return { id: existing.id, ...review }; }
+    const reviewId = genId('rev');
+    await sbInsert('reviews', { id: reviewId, ...review });
+    return { id: reviewId, ...review };
   }
   let saved = null;
   mutate((s) => {
@@ -1538,7 +1869,7 @@ export async function deleteReview(reviewId) {
   const review = (data().reviews || []).find((r) => r.id === reviewId);
   if (!review) throw new Error('Review not found.');
   if (review.authorId !== user.id && !isAdmin(user)) throw new Error('You can only delete your own review.');
-  if (firebaseReady) { await deleteDoc(doc(db, 'reviews', reviewId)); return true; }
+  if (live) { await sbDelete('reviews', reviewId); return true; }
   mutate((s) => { s.reviews = (s.reviews || []).filter((r) => r.id !== reviewId); });
   return true;
 }
@@ -1554,7 +1885,7 @@ export function relationship(viewerId, otherId) {
 
 export async function sendFriendRequest(toId) {
   const user = me(); if (!user) throw new Error('Sign in first.');
-  if (firebaseReady) {
+  if (live) {
     // Guard (mirrors the demo branch): if ANY friendship already links
     // the pair — friends, or a request already pending in either
     // direction — do nothing. Without this, every repeated tap wrote
@@ -1563,7 +1894,7 @@ export async function sendFriendRequest(toId) {
     if (existing) return;
     // Deterministic doc id ({from}_{to}) so firestore.rules can verify a
     // friendship with a single exists() check for friends-only posts.
-    await setDoc(doc(db, 'friendships', `${user.id}_${toId}`), { from: user.id, to: toId, status: 'pending', createdAt: Date.now() });
+    await sbUpsert('friendships', { id: `${user.id}_${toId}`, from: user.id, to: toId, status: 'pending', createdAt: Date.now() });
     await createNotification({ userId: toId, type: 'friend_request', actorId: user.id, text: `${user.name} sent you a friend request.`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
     return;
   }
@@ -1583,9 +1914,19 @@ export async function respondFriendRequest(friendshipId, accept) {
   if (accept && rel && rel.to !== user.id && !isAdminRole(user)) {
     throw new Error('Only the person who received this request can accept it.');
   }
-  if (firebaseReady) {
+  if (live) {
     if (accept) {
-      await updateDoc(doc(db, 'friendships', friendshipId), { status: 'accepted' });
+      if (rel && rel.status === 'accepted') { /* already friends — nothing to write */ }
+      else if (rel && rel.to !== user.id) {
+        // Staff accepting on someone else's behalf rides the
+        // friendships_update_admin policy.
+        await sbUpdate('friendships', friendshipId, { status: 'accepted' });
+      } else {
+        // The recipient path: RLS deliberately gives friendships NO
+        // recipient UPDATE policy — the accept_friendship() RPC flips
+        // the row after validating recipient + pending server-side.
+        await sbRpc('accept_friendship', { p_friendship_id: friendshipId });
+      }
       // The sender deserves to hear it — live mode never sent this
       // notification (only the demo branch did), so accepted requests
       // used to vanish silently for the person who sent them.
@@ -1593,7 +1934,7 @@ export async function respondFriendRequest(friendshipId, accept) {
         try { await createNotification({ userId: rel.from, type: 'friend_accept', actorId: user.id, text: `${user.name} accepted your friend request.`, postId: '', conversationId: '', read: false, createdAt: Date.now() }); } catch { /* the accept itself already succeeded */ }
       }
     }
-    else await deleteDoc(doc(db, 'friendships', friendshipId));
+    else await sbDelete('friendships', friendshipId);
     return;
   }
   mutate((s) => {
@@ -1605,7 +1946,7 @@ export async function respondFriendRequest(friendshipId, accept) {
 }
 
 export async function removeFriendship(friendshipId) {
-  if (firebaseReady) { await deleteDoc(doc(db, 'friendships', friendshipId)); return; }
+  if (live) { await sbDelete('friendships', friendshipId); return; }
   mutate((s) => { s.friendships = s.friendships.filter((x) => x.id !== friendshipId); });
 }
 
@@ -1619,11 +1960,12 @@ export async function cancelFriendRequest(friendshipId) {
 export async function toggleFollow(targetId) {
   const user = me(); if (!user) throw new Error('Sign in first.');
   const following = (user.following || []).includes(targetId);
-  if (firebaseReady) {
-    await updateDoc(doc(db, 'users', user.id), { following: following ? arrayRemove(targetId) : arrayUnion(targetId) });
-    // The followers write touches ANOTHER user's doc — the rules allow
-    // exactly this one-field delta (adding/removing only yourself).
-    await updateDoc(doc(db, 'users', targetId), { followers: following ? arrayRemove(user.id) : arrayUnion(user.id) });
+  if (live) {
+    const target = data().users.find((u) => u.id === targetId);
+    await sbUpdate('users', user.id, { following: following ? (user.following || []).filter((id) => id !== targetId) : [...(user.following || []), targetId] });
+    // The followers write touches ANOTHER user's row — the policy
+    // allows exactly this one-field delta (adding/removing only yourself).
+    await sbUpdate('users', targetId, { followers: following ? (target?.followers || []).filter((id) => id !== user.id) : [...(target?.followers || []), user.id] });
     if (!following) {
       try { await createNotification({ userId: targetId, type: 'follow', actorId: user.id, text: `${user.name} started following you.`, postId: '', conversationId: '', read: false, createdAt: Date.now() }); } catch { /* the follow itself already succeeded */ }
     }
@@ -1643,12 +1985,14 @@ export async function toggleFollow(targetId) {
 
 export async function toggleBlock(targetId) {
   const user = me(); if (!user) throw new Error('Sign in first.');
-  if (firebaseReady) {
-    // Deterministic doc id ({by}_{target}) to match firestore.rules helpers.
-    const ref = doc(db, 'blocks', `${user.id}_${targetId}`);
-    const snap = await getDoc(ref);
-    if (snap.exists()) { await deleteDoc(ref); return false; }
-    await setDoc(ref, { by: user.id, target: targetId, createdAt: Date.now() });
+  if (live) {
+    // Deterministic row id ({blocker}_{blocked}); both field spellings
+    // are stored — the RLS helpers key off blockerId/blockedId, the
+    // app reads by/target.
+    const blockId = `${user.id}_${targetId}`;
+    const existingBlock = await sbGet('blocks', blockId);
+    if (existingBlock) { await sbDelete('blocks', blockId); return false; }
+    await sbInsert('blocks', { id: blockId, by: user.id, target: targetId, blockerId: user.id, blockedId: targetId, createdAt: Date.now() });
     return true;
   }
   let blocked = false;
@@ -1686,17 +2030,17 @@ export async function openConversation(otherId) {
   const existing = data().conversations.find(isPair);
   if (existing) return existing;
   const conv = { participants: [user.id, otherId], createdAt: Date.now() };
-  if (firebaseReady) {
+  if (live) {
     // Idempotent get-or-create (Audit fix #2): the local mirror alone
     // is NOT a safe existence check in live mode — it only holds what
     // the listener has delivered so far, so opening a chat before the
     // first snapshot (or right after creating one in another tab, or
     // when the other side created the thread first) minted a SECOND
-    // conversation doc for the same pair. Ask Firestore directly:
+    // conversation row for the same pair. Ask the server directly:
     // every conversation I belong to, filtered by the pair predicate.
-    const snap = await getDocs(query(collection(db, 'conversations'), where('participants', 'array-contains', user.id)));
-    const found = snap.docs
-      .map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) }))
+    const rows = await sbSelect('conversations', (q) => q.contains('participants', [user.id]));
+    const found = rows
+      .map((row) => normaliseTimeFields(row, ['createdAt']))
       .find(isPair);
     if (found) {
       mirrorConversation(found);
@@ -1704,11 +2048,11 @@ export async function openConversation(otherId) {
     }
     // Create under a DETERMINISTIC id (the sorted uid pair): two
     // simultaneous opens — double-tap, two tabs, both sides at once —
-    // write the SAME document instead of minting two threads. setDoc
-    // on an existing doc is an update the participants rule allows,
-    // and the payload is identical either way.
+    // write the SAME row instead of minting two threads. The
+    // insert-if-absent upsert leaves an existing row untouched, and
+    // the payload is identical either way.
     const convId = `dm_${[user.id, otherId].sort().join('_')}`;
-    await setDoc(doc(db, 'conversations', convId), conv);
+    await sbUpsert('conversations', { id: convId, ...conv }, { onConflict: 'id', ignoreDuplicates: true });
     const created = { id: convId, ...conv };
     // Mirror it at once: until the listener delivers the server copy,
     // a second open (double-tap, another entry point) must find this
@@ -1726,7 +2070,7 @@ export async function openConversation(otherId) {
 // the mirror wholesale when it delivers, so this only bridges the
 // gap until then). No-op outside live mode.
 function mirrorConversation(conv) {
-  if (!firebaseReady || !remote || !conv?.id) return;
+  if (!live || !remote || !conv?.id) return;
   if (remote.conversations.some((c) => c.id === conv.id)) return;
   remote.conversations = [...remote.conversations, conv];
   emitData();
@@ -1744,9 +2088,10 @@ export async function createGroupConversation({ title, memberIds }) {
     title: String(title || '').trim().slice(0, 60) || 'Group chat',
     createdBy: user.id, createdAt: Date.now()
   };
-  if (firebaseReady) {
-    const ref = await addDoc(collection(db, 'conversations'), conv);
-    return { id: ref.id, ...conv };
+  if (live) {
+    const convId = genId('conv');
+    await sbInsert('conversations', { id: convId, ...conv });
+    return { id: convId, ...conv };
   }
   const full = { id: genId('conv'), ...conv };
   mutate((s) => { s.conversations.push(full); });
@@ -1806,12 +2151,13 @@ export async function sendMessage(conversationId, { text, image, audio = '', rep
       try { await patchConversationFields(conversationId, { acceptedBy: [...(conv.acceptedBy || []), user.id] }, ['acceptedBy']); } catch { /* best effort */ }
     }
   };
-  if (firebaseReady) {
-    const ref = await addDoc(collection(db, 'messages'), msg);
-    // Mirror my own message at once (same id the listener will deliver):
-    // the sender must see it immediately, even before the snapshot lands.
-    if (remote && !remote.messages.some((m) => m.id === ref.id)) {
-      remote.messages = [...remote.messages, { id: ref.id, ...msg }];
+  if (live) {
+    const msgId = genId('m');
+    await sbInsert('messages', { id: msgId, ...msg });
+    // Mirror my own message at once (same id the refetch will deliver):
+    // the sender must see it immediately, even before realtime lands.
+    if (remote && !remote.messages.some((m) => m.id === msgId)) {
+      remote.messages = [...remote.messages, { id: msgId, ...msg }];
       emitData();
     }
     // Notifications are best-effort from here: the message is already
@@ -1822,7 +2168,7 @@ export async function sendMessage(conversationId, { text, image, audio = '', rep
       try { await createNotification({ userId: other, type: n.type, actorId: user.id, text: n.text, postId: '', conversationId, read: false, createdAt: Date.now() }); } catch { /* message already sent */ }
     }
     await acceptIfRequest();
-    return { id: ref.id, ...msg };
+    return { id: msgId, ...msg };
   }
   const full = { id: genId('m'), ...msg };
   mutate((s) => {
@@ -1835,9 +2181,9 @@ export async function sendMessage(conversationId, { text, image, audio = '', rep
 
 export async function markConversationRead(conversationId) {
   const user = me(); if (!user) return;
-  if (firebaseReady) {
+  if (live) {
     const mine = data().messages.filter((m) => m.conversationId === conversationId && !m.readBy?.includes(user.id));
-    for (const m of mine) await updateDoc(doc(db, 'messages', m.id), { readBy: arrayUnion(user.id), status: 'read' });
+    for (const m of mine) await sbUpdate('messages', m.id, { readBy: [...new Set([...(m.readBy || []), user.id])], status: 'read' });
     return;
   }
   mutate((s) => {
@@ -1851,21 +2197,24 @@ export async function markConversationRead(conversationId) {
 }
 
 // ------------------------------------------------------- Chat Pack (chat)
-// Typing heartbeat: conversations.typing is a { uid: epochMs } map. The
-// client refreshes its own entry while typing (throttled in main.js)
-// and clears it on send/blur; readers only honour entries younger than
-// TYPING_FRESH_MS (utils), so a vanished client stops "typing" within
-// seconds. Best-effort by design — a failed write is swallowed, never
-// surfaced over the conversation itself.
+// Typing heartbeat (Phase 3): typing state is a { uid: epochMs } map
+// held in typingState and carried on a broadcast channel — no database
+// write per heartbeat any more. The client refreshes its own entry
+// while typing (throttled in main.js) and clears it on send/blur;
+// readers only honour entries younger than TYPING_FRESH_MS (utils),
+// so a vanished client stops "typing" within seconds. Best-effort by
+// design — a failed broadcast is swallowed, never surfaced over the
+// conversation itself.
 export async function setTyping(conversationId, isTyping) {
   const user = me(); if (!user) return;
   const conv = data().conversations.find((c) => c.id === conversationId);
   if (!conv || !conv.participants?.includes(user.id)) return;
   const next = { ...(conv.typing || {}) };
   if (isTyping) next[user.id] = Date.now(); else delete next[user.id];
-  if (firebaseReady) {
+  if (live) {
+    typingState.set(conversationId, next);
     patchRemoteConversation(conversationId, (c) => { c.typing = next; });
-    try { await updateDoc(doc(db, 'conversations', conversationId), { typing: next }); } catch { /* heartbeat — best effort */ }
+    try { typingChannel?.send({ type: 'broadcast', event: 'typing', payload: { conversationId, userId: user.id, isTyping } }); } catch { /* heartbeat — best effort */ }
     return;
   }
   mutate((s) => { const c = s.conversations.find((x) => x.id === conversationId); if (c) c.typing = next; });
@@ -1880,10 +2229,10 @@ export async function toggleMessageReaction(messageId, emoji) {
   if (!msg) throw new Error('Message not found.');
   const prev = msg.reactions ? structuredClone(msg.reactions) : null;
   const next = toggleEmojiReaction(msg.reactions || {}, emoji, user.id);
-  if (firebaseReady) {
+  if (live) {
     patchRemoteMessage(messageId, (m) => { m.reactions = next; });
     try {
-      await updateDoc(doc(db, 'messages', messageId), { reactions: next });
+      await sbUpdate('messages', messageId, { reactions: next });
     } catch (err) {
       // Roll back even when there was no previous reactions object
       // (first-ever reaction): the original state is "no key at all".
@@ -1907,11 +2256,11 @@ export async function togglePinMessage(messageId) {
   const patch = pinned
     ? { pinned: true, pinnedBy: user.id, pinnedAt: Date.now() }
     : { pinned: false, pinnedBy: '', pinnedAt: 0 };
-  if (firebaseReady) {
+  if (live) {
     const prev = { pinned: Boolean(msg.pinned), pinnedBy: msg.pinnedBy || '', pinnedAt: msg.pinnedAt || 0 };
     patchRemoteMessage(messageId, (m) => Object.assign(m, patch));
     try {
-      await updateDoc(doc(db, 'messages', messageId), patch);
+      await sbUpdate('messages', messageId, patch);
     } catch (err) {
       patchRemoteMessage(messageId, (m) => Object.assign(m, prev));
       throw err;
@@ -1929,10 +2278,10 @@ export async function setConversationTheme(conversationId, themeId) {
   const conv = data().conversations.find((c) => c.id === conversationId);
   if (!conv || !conv.participants?.includes(user.id)) throw new Error('Conversation not found.');
   const theme = chatTheme(themeId).id;
-  if (firebaseReady) {
+  if (live) {
     patchRemoteConversation(conversationId, (c) => { c.theme = theme; });
     try {
-      await updateDoc(doc(db, 'conversations', conversationId), { theme });
+      await sbUpdate('conversations', conversationId, { theme });
     } catch (err) {
       patchRemoteConversation(conversationId, (c) => { c.theme = conv.theme; });
       throw err;
@@ -1953,12 +2302,12 @@ export async function setConversationTheme(conversationId, themeId) {
 async function patchMessageFields(messageId, patch, prevKeys) {
   const msg = data().messages.find((m) => m.id === messageId);
   if (!msg) throw new Error('Message not found.');
-  if (firebaseReady) {
+  if (live) {
     const prev = {};
     for (const k of prevKeys) prev[k] = msg[k];
     patchRemoteMessage(messageId, (m) => Object.assign(m, patch));
     try {
-      await updateDoc(doc(db, 'messages', messageId), patch);
+      await sbUpdate('messages', messageId, patch);
     } catch (err) {
       patchRemoteMessage(messageId, (m) => Object.assign(m, prev));
       throw err;
@@ -2026,11 +2375,11 @@ export async function setConversationFlag(conversationId, flag, on) {
   const next = on
     ? [...new Set([...(conv[flag] || []), user.id])]
     : (conv[flag] || []).filter((id) => id !== user.id);
-  if (firebaseReady) {
+  if (live) {
     const prev = conv[flag] || [];
     patchRemoteConversation(conversationId, (c) => { c[flag] = next; });
     try {
-      await updateDoc(doc(db, 'conversations', conversationId), { [flag]: next });
+      await sbUpdate('conversations', conversationId, { [flag]: next });
     } catch (err) {
       patchRemoteConversation(conversationId, (c) => { c[flag] = prev; });
       throw err;
@@ -2047,10 +2396,10 @@ export async function setConversationEmoji(conversationId, emoji) {
   const conv = data().conversations.find((c) => c.id === conversationId);
   if (!conv || !conv.participants?.includes(user.id)) throw new Error('Conversation not found.');
   const value = String(emoji || '👍').slice(0, 8);
-  if (firebaseReady) {
+  if (live) {
     patchRemoteConversation(conversationId, (c) => { c.emoji = value; });
     try {
-      await updateDoc(doc(db, 'conversations', conversationId), { emoji: value });
+      await sbUpdate('conversations', conversationId, { emoji: value });
     } catch (err) {
       patchRemoteConversation(conversationId, (c) => { c.emoji = conv.emoji; });
       throw err;
@@ -2070,12 +2419,12 @@ export async function setConversationEmoji(conversationId, emoji) {
 async function patchConversationFields(conversationId, patch, prevKeys) {
   const conv = data().conversations.find((c) => c.id === conversationId);
   if (!conv) throw new Error('Conversation not found.');
-  if (firebaseReady) {
+  if (live) {
     const prev = {};
     for (const k of prevKeys) prev[k] = conv[k];
     patchRemoteConversation(conversationId, (c) => Object.assign(c, patch));
     try {
-      await updateDoc(doc(db, 'conversations', conversationId), patch);
+      await sbUpdate('conversations', conversationId, patch);
     } catch (err) {
       patchRemoteConversation(conversationId, (c) => Object.assign(c, prev));
       throw err;
@@ -2169,28 +2518,28 @@ export async function uploadMessageFile(file) {
   throw new Error('That file could not be uploaded — it is too large for the free fallback.');
 }
 
-// Group invite links: the code is the id of an `invites` doc pointing
-// at the conversation (readable by any signed-in user who HAS the
-// code); joining rides the rules' self-join branch, which only allows
-// adding yourself when such an invite exists.
+// Group invite links: the code is the id of an `invites` row pointing
+// at the conversation; joining rides the join_via_invite() RPC, which
+// validates the code and adds only the caller (see the note in
+// joinConversationByCode for why a plain RLS update cannot do this).
 export async function createConversationInvite(conversationId) {
   const user = me(); if (!user) throw new Error('Sign in first.');
   const conv = data().conversations.find((c) => c.id === conversationId);
   if (!conv?.isGroup || !conv.participants?.includes(user.id)) throw new Error('Conversation not found.');
   if (conv.joinCode) return conv.joinCode;
   const code = genId('inv');
-  if (firebaseReady) {
-    await setDoc(doc(db, 'invites', code), { conversationId, createdBy: user.id, createdAt: Date.now() });
+  if (live) {
+    await sbInsert('invites', { id: code, conversationId, createdBy: user.id, createdAt: Date.now() });
     patchRemoteConversation(conversationId, (c) => { c.joinCode = code; });
     try {
-      await updateDoc(doc(db, 'conversations', conversationId), { joinCode: code });
+      await sbUpdate('conversations', conversationId, { joinCode: code });
     } catch (err) {
-      // Roll the mirror back and drop the invite doc: without the
-      // conversation-side joinCode the rules' self-join branch can
-      // never pass, and a mirror that KEEPS the code would make every
-      // retry return this same broken link forever.
+      // Roll the mirror back and drop the invite row: a mirror that
+      // KEEPS the code would make every retry return this same link
+      // forever, and an orphaned invite would outlive the failed
+      // pairing — a retry mints a fresh, consistent pair instead.
       patchRemoteConversation(conversationId, (c) => { c.joinCode = ''; });
-      try { await deleteDoc(doc(db, 'invites', code)); } catch { /* best-effort */ }
+      try { await sbDelete('invites', code); } catch { /* best-effort */ }
       throw err;
     }
     return code;
@@ -2203,18 +2552,22 @@ export async function joinConversationByCode(code) {
   const user = me(); if (!user) throw new Error('Sign in first.');
   const clean = String(code || '').trim();
   if (!clean) throw new Error('That invite link is not valid.');
-  if (firebaseReady) {
-    const snap = await getDoc(doc(db, 'invites', clean));
-    if (!snap.exists()) throw new Error('That invite link is not valid.');
-    const conversationId = snap.data().conversationId;
-    // Already a member? Joining again is a no-op SUCCESS, not an
-    // error: arrayUnion of an existing member produces a no-change
-    // update, which the self-join rule (exactly +1 participant)
-    // rejects with a raw permission-denied message.
-    const convSnap = await getDoc(doc(db, 'conversations', conversationId));
-    if (convSnap.exists() && (convSnap.data().participants || []).includes(user.id)) return conversationId;
-    await updateDoc(doc(db, 'conversations', conversationId), { participants: arrayUnion(user.id) });
-    return conversationId;
+  if (live) {
+    // The applied RLS self-join policy cannot work for a
+    // non-participant (RLS filters the policy's own subqueries, so
+    // its pin comparisons read null), so joining rides the SECURITY
+    // DEFINER join_via_invite() RPC: it validates the code, appends
+    // ONLY the caller, and returns the conversation id — being
+    // already a member is a no-op success there too, exactly like
+    // the branch this replaces.
+    try {
+      return await sbRpc('join_via_invite', { p_code: clean });
+    } catch (err) {
+      if (/invite code not found|conversation not found/i.test(String(err?.message || ''))) {
+        throw new Error('That invite link is not valid.');
+      }
+      throw err;
+    }
   }
   const conv = data().conversations.find((c) => c.joinCode === clean);
   if (!conv) throw new Error('That invite link is not valid.');
@@ -2266,7 +2619,7 @@ export async function leaveGroupConversation(conversationId) {
 // -------------------------------------------------------------------------
 export async function markAllNotificationsRead() {
   const user = me(); if (!user) return;
-  if (firebaseReady) {
+  if (live) {
     const mine = data().notifications.filter((n) => n.userId === user.id && !n.read);
     // Patch the mirror first so the badge clears in ONE click — waiting
     // for each update's snapshot round-trip left stale unread counts
@@ -2276,19 +2629,19 @@ export async function markAllNotificationsRead() {
       for (const n of remote.notifications) if (n.userId === user.id) n.read = true;
       emitData();
     }
-    await Promise.all(mine.map((n) => updateDoc(doc(db, 'notifications', n.id), { read: true })));
+    await Promise.all(mine.map((n) => sbUpdate('notifications', n.id, { read: true })));
     return;
   }
   mutate((s) => { for (const n of s.notifications) if (n.userId === user.id) n.read = true; });
 }
 
 export async function markNotificationRead(id) {
-  if (firebaseReady) {
+  if (live) {
     if (remote) {
       const n = remote.notifications.find((x) => x.id === id);
       if (n && !n.read) { n.read = true; emitData(); }
     }
-    await updateDoc(doc(db, 'notifications', id), { read: true });
+    await sbUpdate('notifications', id, { read: true });
     return;
   }
   mutate((s) => { const n = s.notifications.find((x) => x.id === id); if (n) n.read = true; });
@@ -2300,7 +2653,7 @@ export async function markNotificationRead(id) {
 // PLATFORM AGGREGATES (Pack B): the mirrored dataset only holds the
 // signed-in user's own messages and a subset of posts, so Overview
 // totals that must be platform-wide come from one-shot server queries
-// — getCountFromServer for posts/messages, plus a bounded posts scan
+// — head-count queries for posts/messages, plus a bounded posts scan
 // (newest 500) for the comments/likes sums. Staff-only: the load is
 // gated on utils.isStaff(me()) and each query settles independently,
 // so a tier that may not read a collection (e.g. an analyst scanning
@@ -2310,34 +2663,33 @@ export async function markNotificationRead(id) {
 const ADMIN_STATS_POST_SCAN = 500;
 let adminStatsLoadedFor = '';
 export async function loadAdminStats() {
-  if (!firebaseReady) return null;
+  if (!live) return null;
   const user = me();
   if (!user || !isStaff(user)) return null;
   if (adminStatsLoadedFor === user.id && remote?.adminStats) return remote.adminStats;
   adminStatsLoadedFor = user.id;
   const settle = async (p) => { try { return await p; } catch { return null; } };
-  const [postsCount, messagesCount, postsSnap] = await Promise.all([
-    settle(getCountFromServer(collection(db, 'posts'))),
-    settle(getCountFromServer(collection(db, 'messages'))),
-    settle(getDocs(query(collection(db, 'posts'), orderBy('createdAt', 'desc'), limit(ADMIN_STATS_POST_SCAN))))
+  const [postsCount, messagesCount, postsRows] = await Promise.all([
+    settle(sbCount('posts')),
+    settle(sbCount('messages')),
+    settle(sbSelect('posts', (q) => q.order('createdAt', { ascending: false }).limit(ADMIN_STATS_POST_SCAN)))
   ]);
   let commentsTotal = null;
   let likesTotal = null;
-  if (postsSnap) {
+  if (postsRows) {
     commentsTotal = 0;
     likesTotal = 0;
-    for (const snap of postsSnap.docs) {
-      const p = snap.data();
+    for (const p of postsRows) {
       commentsTotal += countPostComments(p);
       likesTotal += (p.likes || []).length;
     }
   }
   const stats = {
-    postsTotal: postsCount ? postsCount.data().count : null,
-    messagesTotal: messagesCount ? messagesCount.data().count : null,
+    postsTotal: postsCount ?? null,
+    messagesTotal: messagesCount ?? null,
     commentsTotal,
     likesTotal,
-    scannedPosts: postsSnap ? postsSnap.size : 0,
+    scannedPosts: postsRows ? postsRows.length : 0,
     loadedAt: Date.now()
   };
   if (!remote) return stats;
@@ -2369,10 +2721,11 @@ export async function logAdminAction(action, target = {}, reason = '') {
     reason: String(reason || ''),
     createdAt: Date.now()
   };
-  if (firebaseReady) {
+  if (live) {
     try {
-      const ref = await addDoc(collection(db, 'adminLogs'), entry);
-      return { id: ref.id, ...entry };
+      const entryId = genId('alog');
+      await sbInsert('adminLogs', { id: entryId, ...entry });
+      return { id: entryId, ...entry };
     } catch { return null; /* audit is best-effort live; the action already happened */ }
   }
   let saved = null;
@@ -2406,7 +2759,7 @@ function requireUserManager(userId, { superOnly = false } = {}) {
 }
 
 async function writeUserPatch(userId, patch) {
-  if (firebaseReady) { await updateDoc(doc(db, 'users', userId), patch); return; }
+  if (live) { await sbUpdate('users', userId, patch); return; }
   mutate((s) => { const u = s.users.find((x) => x.id === userId); if (u) Object.assign(u, patch); });
 }
 
@@ -2448,14 +2801,14 @@ export async function adminSetVerified(userId, verified, reason = '') {
 // signed-out, and their content is gone. Logged as 'delete-user'.
 export async function adminDeleteUser(userId, reason = '') {
   const { target } = requireUserManager(userId, { superOnly: true });
-  if (firebaseReady) {
-    // Query Firestore DIRECTLY for the user's posts: the admin mirror
-    // only holds a listener subset (public + audience + own, capped),
+  if (live) {
+    // Query the server DIRECTLY for the user's posts: the admin mirror
+    // only holds a synced subset (public + audience + own, capped),
     // so filtering it left the deleted user's older/friends-only posts
     // orphaned in other people's feeds.
-    const snap = await getDocs(query(collection(db, 'posts'), where('authorId', '==', userId)));
-    for (const d of snap.docs) { try { await deleteDoc(doc(db, 'posts', d.id)); } catch { /* best-effort cleanup */ } }
-    await deleteDoc(doc(db, 'users', userId));
+    const rows = await sbSelect('posts', (q) => q.eq('authorId', userId));
+    for (const d of rows) { try { await sbDelete('posts', d.id); } catch { /* best-effort cleanup */ } }
+    await sbDelete('users', userId);
   } else {
     mutate((s) => {
       s.users = s.users.filter((u) => u.id !== userId);
@@ -2503,7 +2856,7 @@ async function sendModerationWarning(userId, actor, reason) {
   const text = reason
     ? `A moderator warned you about a community-guideline violation: ${reason}`
     : 'A moderator warned you about a community-guideline violation. Please review the community guidelines.';
-  if (firebaseReady) {
+  if (live) {
     await createNotification({ userId, type: 'warning', actorId: actor.id, text, postId: '', conversationId: '', read: false, createdAt: Date.now() });
     return;
   }
@@ -2539,7 +2892,7 @@ function findReport(reportId) {
 // suppresses self-notifications), demo through the store's notify().
 async function sendSupportNotification(userId, actor, type, text) {
   if (!userId || userId === actor.id) return;
-  if (firebaseReady) {
+  if (live) {
     await createNotification({ userId, type, actorId: actor.id, text, postId: '', conversationId: '', read: false, createdAt: Date.now() });
     return;
   }
@@ -2547,7 +2900,7 @@ async function sendSupportNotification(userId, actor, type, text) {
 }
 
 async function writeReportPatch(reportId, patch) {
-  if (firebaseReady) { await updateDoc(doc(db, 'reports', reportId), patch); return; }
+  if (live) { await sbUpdate('reports', reportId, patch); return; }
   mutate((s) => { const r = s.reports.find((x) => x.id === reportId); if (r) Object.assign(r, patch); });
 }
 
@@ -2574,7 +2927,7 @@ export async function adminDecideReport(reportId, decision, { reason = '', outco
     if (finalOutcome === 'content-removed') {
       if (rep.targetType === 'post') await deletePost(rep.targetId);
       else if (rep.targetType === 'message') {
-        if (firebaseReady) await deleteDoc(doc(db, 'messages', rep.targetId));
+        if (live) await sbDelete('messages', rep.targetId);
         else mutate((s) => { s.messages = s.messages.filter((m) => m.id !== rep.targetId); });
       }
     } else if (finalOutcome === 'user-warned') {
@@ -2654,8 +3007,7 @@ export async function adminSetReportAppeal(reportId, appealStatus, reason = '') 
 
 // User-side appeal (Support Inbox): the author of acted-on content
 // files ONE appeal against a decided report. Writes ONLY the appeal
-// object — the Firestore rule for reports pins exactly that for
-// non-staff updates.
+// object — the file_appeal() RPC pins exactly that server-side.
 export async function appealReport(reportId, text = '') {
   const user = me(); if (!user) throw new Error('Sign in to appeal.');
   const rep = findReport(reportId);
@@ -2664,12 +3016,21 @@ export async function appealReport(reportId, text = '') {
   if (!rep.decision || !rep.decision.outcome || rep.decision.outcome === 'none') throw new Error('There is no action on your content to appeal.');
   if (rep.appeal && rep.appeal.status && rep.appeal.status !== 'none') throw new Error('You have already appealed this decision.');
   const appeal = { status: 'requested', text: String(text || '').slice(0, 500), byId: user.id, byName: user.name || '', at: Date.now(), reason: '' };
+  if (live) {
+    // Non-staff have NO reports UPDATE policy by design — the appeal
+    // is filed through the file_appeal() RPC, which re-validates
+    // caller == target author, a real decision, and a not-yet-filed
+    // appeal server-side, then writes ONLY the appeal object. It
+    // returns the appeal it stored (same shape as the local one).
+    const filed = await sbRpc('file_appeal', { p_report_id: reportId, p_text: appeal.text });
+    return filed || appeal;
+  }
   await writeReportPatch(reportId, { appeal });
   return appeal;
 }
 
 export async function adminSetMaintenance(enabled) {
-  if (firebaseReady) { await setDoc(doc(db, 'config', 'app'), { maintenanceMode: enabled }, { merge: true }); }
+  if (live) { await sbUpsert('config', { id: 'app', maintenanceMode: enabled }); }
   else mutate((s) => { s.config.maintenanceMode = enabled; });
   await logAdminAction(enabled ? 'maintenance-on' : 'maintenance-off', { type: 'config', id: 'app', label: 'Maintenance mode' });
 }
@@ -2695,31 +3056,29 @@ function botUserProfile(bot) {
 async function ensureBotUserDoc(bot) {
   const existing = data().users.find((u) => u.id === bot.id);
   if (!existing) {
-    await setDoc(doc(db, 'users', bot.id), botUserProfile(bot));
+    await sbInsert('users', { id: bot.id, ...botUserProfile(bot) });
     return;
   }
   if (existing.name !== bot.name || existing.username !== bot.username || existing.avatar !== bot.avatar || existing.bio !== bot.bio) {
-    await updateDoc(doc(db, 'users', bot.id), { name: bot.name, username: bot.username, avatar: bot.avatar, bio: bot.bio });
+    await sbUpdate('users', bot.id, { name: bot.name, username: bot.username, avatar: bot.avatar, bio: bot.bio });
   }
 }
 
 export async function saveBot(bot) {
   const b = normaliseBot(bot);
   const existed = Boolean(b.id) && data().bots.some((x) => x.id === b.id);
-  if (firebaseReady) {
+  if (live) {
     const id = b.id || genId('bot');
     const saved = { ...b, id };
-    // The document id lives in the doc path, not the payload — and
-    // Firestore rejects undefined field values, so the id key must be
-    // OMITTED from the stored data, never set to undefined.
-    const { id: _omitId, ...botPayload } = saved;
-    await setDoc(doc(db, 'bots', id), botPayload, { merge: true });
+    // Postgres rows carry their id as a column (unlike Firestore doc
+    // paths), so the saved bot is upserted whole, id included.
+    await sbUpsert('bots', saved);
     // Preserve the REAL last-used provider/model stamps: recordBotBrain
     // maintains them after every generation, and stamping placeholder
     // values here made the Bot Center claim "template-fallback" for a
     // bot actually answering via a live provider.
     const prevBrain = data().botBrains?.[id] || {};
-    await setDoc(doc(db, 'botBrains', id), { botId: id, systemPrompt: saved.personality.systemPrompt, provider: prevBrain.provider || saved.provider || '', model: prevBrain.model || saved.model || '', updatedAt: Date.now() }, { merge: true });
+    await sbUpsert('botBrains', { id, botId: id, systemPrompt: saved.personality.systemPrompt, provider: prevBrain.provider || saved.provider || '', model: prevBrain.model || saved.model || '', updatedAt: Date.now() });
     // Best-effort: the live runner re-ensures the user doc every cycle,
     // so a hiccup here (e.g. rules not yet republished) must not break
     // saving the bot's configuration.
@@ -2750,11 +3109,11 @@ export async function saveBot(bot) {
 // so one missing doc cannot strand the rest. Audited as 'bot-delete'.
 export async function deleteBot(botId, reason = '') {
   const bot = data().bots.find((b) => b.id === botId);
-  if (firebaseReady) {
-    await deleteDoc(doc(db, 'bots', botId));
-    await deleteDoc(doc(db, 'botBrains', botId));
-    try { await deleteDoc(doc(db, 'botMemories', botId)); } catch { /* best-effort */ }
-    try { await deleteDoc(doc(db, 'users', botId)); } catch { /* best-effort */ }
+  if (live) {
+    await sbDelete('bots', botId);
+    await sbDelete('botBrains', botId);
+    try { await sbDelete('botMemories', botId); } catch { /* best-effort */ }
+    try { await sbDelete('users', botId); } catch { /* best-effort */ }
   } else {
     mutate((s) => {
       s.bots = s.bots.filter((b) => b.id !== botId);
@@ -2767,18 +3126,17 @@ export async function deleteBot(botId, reason = '') {
 }
 
 export async function setGlobalBotEnabled(enabled) {
-  if (firebaseReady) { await setDoc(doc(db, 'botSettings', 'global'), { enabled }, { merge: true }); }
+  if (live) { await sbUpsert('botSettings', { id: 'global', enabled }); }
   else mutate((s) => { s.botSettings.global.enabled = enabled; });
   await logAdminAction(enabled ? 'bots-enabled' : 'bots-stopped', { type: 'config', id: 'botSettings', label: 'Global bot kill switch' });
 }
 
 export async function addBotMemory(botId, text) {
   const entry = { id: genId('mem'), text, createdAt: Date.now(), updatedAt: Date.now(), pinned: false };
-  if (firebaseReady) {
-    const ref = doc(db, 'botMemories', botId);
-    const snap = await getDoc(ref);
-    const items = snap.exists() ? (snap.data().items || []) : [];
-    await setDoc(ref, { botId, items: [...items, entry] });
+  if (live) {
+    const row = await sbGet('botMemories', botId);
+    const items = row ? (row.items || []) : [];
+    await sbUpsert('botMemories', { id: botId, botId, items: [...items, entry] });
   } else {
     mutate((s) => { (s.botMemories[botId] = s.botMemories[botId] || []).push(entry); });
   }
@@ -2787,10 +3145,9 @@ export async function addBotMemory(botId, text) {
 }
 
 export async function deleteBotMemory(botId, memoryId) {
-  if (firebaseReady) {
-    const ref = doc(db, 'botMemories', botId);
-    const snap = await getDoc(ref);
-    if (snap.exists()) await setDoc(ref, { botId, items: (snap.data().items || []).filter((m) => m.id !== memoryId) });
+  if (live) {
+    const row = await sbGet('botMemories', botId);
+    if (row) await sbUpsert('botMemories', { id: botId, botId, items: (row.items || []).filter((m) => m.id !== memoryId) });
   } else {
     mutate((s) => { if (s.botMemories[botId]) s.botMemories[botId] = s.botMemories[botId].filter((m) => m.id !== memoryId); });
   }
@@ -2808,35 +3165,33 @@ export async function deleteBotMemory(botId, memoryId) {
 // -------------------------------------------------------------------------
 let botAdminDataLoadedFor = '';
 export async function loadBotAdminData(botId) {
-  if (!firebaseReady || !botId) return;
+  if (!live || !botId) return;
   const user = me();
   if (!user || !isAdminRole(user)) return; // brains/memories are admin-only reads
   if (botAdminDataLoadedFor === botId) return;
   botAdminDataLoadedFor = botId;
   const settle = async (p) => { try { return await p; } catch { return null; } };
-  const [brainSnap, memSnap, countersSnap, convSnap, msgSnap, decSnap] = await Promise.all([
-    settle(getDoc(doc(db, 'botBrains', botId))),
-    settle(getDoc(doc(db, 'botMemories', botId))),
-    settle(getDoc(doc(db, 'botSettings', 'counters'))),
-    settle(getDocs(query(collection(db, 'conversations'), where('participants', 'array-contains', botId), limit(50)))),
-    settle(getDocs(query(collection(db, 'messages'), where('participants', 'array-contains', botId), orderBy('createdAt', 'asc'), limit(500)))),
-    settle(getDoc(doc(db, 'botRunners', `decisions_${botId}`)))
+  const [brainRow, memRow, countersRow, convRows, msgRows, decRow] = await Promise.all([
+    settle(sbGet('botBrains', botId)),
+    settle(sbGet('botMemories', botId)),
+    settle(sbGet('botSettings', 'counters')),
+    settle(sbSelect('conversations', (q) => q.contains('participants', [botId]).limit(50))),
+    settle(sbSelect('messages', (q) => q.contains('participants', [botId]).order('createdAt', { ascending: true }).limit(500))),
+    settle(sbGet('botRunners', `decisions_${botId}`))
   ]);
   if (!remote) return;
-  if (decSnap?.exists()) remote.botDecisions[botId] = decSnap.data().items || [];
-  if (brainSnap?.exists()) remote.botBrains[botId] = { botId, ...normaliseTimeFields(brainSnap.data(), ['updatedAt']) };
-  if (memSnap?.exists()) remote.botMemories[botId] = memSnap.data().items || [];
-  if (countersSnap?.exists()) remote.botSettings.counters = botCountersForDay(countersSnap.data(), counterDayKey());
-  if (convSnap) {
+  if (decRow) remote.botDecisions[botId] = decRow.items || [];
+  if (brainRow) { const { id: _brainRowId, ...brainData } = brainRow; remote.botBrains[botId] = { botId, ...normaliseTimeFields(brainData, ['updatedAt']) }; }
+  if (memRow) remote.botMemories[botId] = memRow.items || [];
+  if (countersRow) remote.botSettings.counters = botCountersForDay(countersRow, counterDayKey());
+  if (convRows) {
     const counts = new Map();
     const lastAt = new Map();
-    for (const md of msgSnap?.docs || []) {
-      const m = md.data();
+    for (const m of msgRows || []) {
       counts.set(m.conversationId, (counts.get(m.conversationId) || 0) + 1);
       lastAt.set(m.conversationId, Math.max(lastAt.get(m.conversationId) || 0, tsToMs(m.createdAt) || 0));
     }
-    remote.botConvMeta[botId] = convSnap.docs
-      .map((cd) => ({ id: cd.id, ...cd.data() }))
+    remote.botConvMeta[botId] = convRows
       .filter((c) => !c.isGroup && (c.participants || []).length === 2)
       .map((c) => ({
         id: c.id,
@@ -2879,10 +3234,11 @@ export async function createAnnouncement({ title, body }) {
   }
   lastAnnouncementAt = nowMs;
   const ann = { title: cleanTitle, body: cleanBody, createdBy: actor.id, createdByName: actor.name || '', createdAt: nowMs, active: true };
-  if (firebaseReady) {
-    const ref = await addDoc(collection(db, 'announcements'), ann);
-    await logAdminAction('announcement-create', { type: 'announcement', id: ref.id, label: cleanTitle });
-    return { id: ref.id, ...ann };
+  if (live) {
+    const annId = genId('ann');
+    await sbInsert('announcements', { id: annId, ...ann });
+    await logAdminAction('announcement-create', { type: 'announcement', id: annId, label: cleanTitle });
+    return { id: annId, ...ann };
   }
   const saved = { id: genId('ann'), ...ann };
   mutate((s) => { if (!Array.isArray(s.announcements)) s.announcements = []; s.announcements.unshift(saved); });
@@ -2893,7 +3249,7 @@ export async function createAnnouncement({ title, body }) {
 export async function setAnnouncementActive(id, active) {
   requireAnnouncementAdmin();
   const ann = data().announcements.find((a) => a.id === id);
-  if (firebaseReady) await updateDoc(doc(db, 'announcements', id), { active: Boolean(active) });
+  if (live) await sbUpdate('announcements', id, { active: Boolean(active) });
   else mutate((s) => { const a = (s.announcements || []).find((x) => x.id === id); if (a) a.active = Boolean(active); });
   await logAdminAction(active ? 'announcement-activate' : 'announcement-deactivate', { type: 'announcement', id, label: ann?.title || id });
 }
@@ -2901,7 +3257,7 @@ export async function setAnnouncementActive(id, active) {
 export async function deleteAnnouncement(id, reason = '') {
   requireAnnouncementAdmin();
   const ann = data().announcements.find((a) => a.id === id);
-  if (firebaseReady) await deleteDoc(doc(db, 'announcements', id));
+  if (live) await sbDelete('announcements', id);
   else mutate((s) => { s.announcements = (s.announcements || []).filter((a) => a.id !== id); });
   await logAdminAction('announcement-delete', { type: 'announcement', id, label: ann?.title || id }, reason);
 }
@@ -2916,10 +3272,11 @@ export async function adminNotifyUser(userId, { title = '', body = '' } = {}) {
   const text = [String(title || '').trim(), String(body || '').trim()].filter(Boolean).join(' — ');
   if (!text) throw new Error('Write a message first.');
   const note = { userId, type: 'admin', actorId: actor.id, text, postId: '', conversationId: '', read: false, createdAt: Date.now() };
-  if (firebaseReady) {
-    const ref = await addDoc(collection(db, 'notifications'), note);
+  if (live) {
+    const noteId = genId('n');
+    await sbInsert('notifications', { id: noteId, ...note });
     await logAdminAction('notify-user', { type: 'user', id: userId, label: target.name });
-    return { id: ref.id, ...note };
+    return { id: noteId, ...note };
   }
   const saved = { id: genId('n'), ...note };
   mutate((s) => { s.notifications.unshift(saved); });
@@ -2964,25 +3321,25 @@ export async function adminSavePlatformSettings(patch = {}, reason = '') {
   }
   if (patch.aiPaidApproved !== undefined) clean.aiPaidApproved = Boolean(patch.aiPaidApproved);
   if (!Object.keys(clean).length) throw new Error('Nothing to save.');
-  if (firebaseReady) await setDoc(doc(db, 'config', 'app'), clean, { merge: true });
+  if (live) await sbUpsert('config', { id: 'app', ...clean });
   else mutate((s) => { s.config = { ...s.config, ...clean }; });
   await logAdminAction('settings-save', { type: 'config', id: 'app', label: Object.keys(clean).join(', ') }, reason);
   return clean;
 }
 
 // -------------------------------------------------------------------------
-// SYSTEM HEALTH (Pack C) — a one-shot Firestore connectivity probe:
+// SYSTEM HEALTH (Pack C) — a one-shot backend connectivity probe:
 // time a single lightweight read (config/app) and mirror the outcome
 // into the dataset for the Health page. Nothing is fabricated: a
 // failed probe reports the failure, and demo mode never probes (the
 // Health page labels demo as a local store instead).
 // -------------------------------------------------------------------------
 export async function probeFirestoreHealth() {
-  if (!firebaseReady) return null;
+  if (!live) return null;
   const started = Date.now();
   let probe;
   try {
-    await getDoc(doc(db, 'config', 'app'));
+    await sbGet('config', 'app');
     probe = { ok: true, ms: Date.now() - started, at: Date.now(), error: '' };
   } catch (err) {
     probe = { ok: false, ms: Date.now() - started, at: Date.now(), error: String(err?.code || err?.message || 'read failed') };
@@ -3013,13 +3370,13 @@ export async function probeFirestoreHealth() {
 // -------------------------------------------------------------------------
 let botSecretsLoaded = false;
 export async function loadBotSecrets() {
-  if (!firebaseReady || botSecretsLoaded) return;
+  if (!live || botSecretsLoaded) return;
   if (!canAccessBotSecrets(me())) return; // non-admins never read botSecrets
   botSecretsLoaded = true;
   try {
-    const snap = await getDoc(doc(db, 'botSecrets', 'config'));
+    const row = await sbGet('botSecrets', 'config');
     if (remote) {
-      const stored = snap.exists() ? snap.data() : {};
+      const stored = row || {};
       remote.botSecrets = {
         geminiApiKey: String(stored.geminiApiKey || ''),
         providers: stored.providers && typeof stored.providers === 'object' ? stored.providers : {}
@@ -3042,9 +3399,23 @@ export async function loadBotSecrets() {
 // provider's patch never clobbers another's), demo mode mutates the
 // local store. `applyLocal` performs the same change on a botSecrets
 // object (the remote mirror or the demo state's).
-async function patchBotSecrets(firestorePatch, applyLocal) {
-  if (firebaseReady) {
-    await setDoc(doc(db, 'botSecrets', 'config'), { ...firestorePatch, updatedAt: Date.now() }, { merge: true });
+async function patchBotSecrets(patchObj, applyLocal) {
+  if (live) {
+    // Firestore's setDoc merge DEEP-merged the providers map; a
+    // PostgREST upsert replaces the providers jsonb wholesale, so a
+    // provider patch is read-merged here first (per-provider shallow
+    // merge — the same granularity the deep merge produced). Other
+    // fields are plain column patches and need no read.
+    const row = { id: 'config', ...patchObj, updatedAt: Date.now() };
+    if (patchObj.providers) {
+      const current = await sbGet('botSecrets', 'config');
+      const merged = { ...(current?.providers || {}) };
+      for (const [pid, pPatch] of Object.entries(patchObj.providers)) {
+        merged[pid] = { ...(merged[pid] || {}), ...pPatch };
+      }
+      row.providers = merged;
+    }
+    await sbUpsert('botSecrets', row);
     botSecretsLoaded = true;
     if (remote) {
       remote.botSecrets ||= { geminiApiKey: '', providers: {} };
@@ -3161,7 +3532,7 @@ export async function testProviderConnection(providerId) {
   // the panel (and the router's cap guard) see nothing.
   recordAiUsage(entry.id, { ok: result.ok, usage: result.usage || null, status: result.ok ? 200 : 0, attempts: result.attempts || 1 });
   const health = { ok: result.ok, detail: result.detail, at: Date.now() };
-  if (firebaseReady) {
+  if (live) {
     if (remote) {
       (remote.providerHealth ||= {})[entry.id] = health;
       document.dispatchEvent(new CustomEvent('meetbook:data'));
@@ -3203,13 +3574,14 @@ function bumpAiUsage(usage, providerId, attempt) {
 }
 
 function recordAiUsage(providerId, attempt) {
-  if (firebaseReady) {
+  if (live) {
     if (!remote) return;
     remote.aiUsage = bumpAiUsage(remote.aiUsage, providerId, attempt);
     document.dispatchEvent(new CustomEvent('meetbook:data'));
-    setDoc(doc(db, 'botSecrets', 'config'), {
+    sbUpsert('botSecrets', {
+      id: 'config',
       aiUsage: { day: remote.aiUsage.day, providers: remote.aiUsage.providers }, updatedAt: Date.now()
-    }, { merge: true }).catch(() => { /* counters are bookkeeping — never fail a cycle */ });
+    }).catch(() => { /* counters are bookkeeping — never fail a cycle */ });
     return;
   }
   mutate((s) => { s.aiUsage = bumpAiUsage(s.aiUsage, providerId, attempt); });
@@ -3224,7 +3596,7 @@ function aiUsageTodayMap() {
 // same one saveBot uses). Live-mode botLogs are Functions-only per the
 // rules, so this is a no-op there.
 function logBotEvent(botId, level, message) {
-  if (firebaseReady) return;
+  if (live) return;
   mutate((s) => { s.botLogs.unshift({ id: genId('log'), botId, level, message, createdAt: Date.now() }); });
 }
 
@@ -3237,11 +3609,11 @@ function logBotEvent(botId, level, message) {
 // template output keeps the 'template-fallback' stamp.
 function recordBotBrain(bot, provider, model) {
   const stampedModel = model || (provider === 'template-fallback' ? 'template-fallback' : botModel(bot));
-  if (firebaseReady) {
-    setDoc(doc(db, 'botBrains', bot.id), {
-      botId: bot.id, systemPrompt: bot.personality.systemPrompt, provider,
+  if (live) {
+    sbUpsert('botBrains', {
+      id: bot.id, botId: bot.id, systemPrompt: bot.personality.systemPrompt, provider,
       model: stampedModel, updatedAt: Date.now()
-    }, { merge: true }).catch(() => { /* bookkeeping only */ });
+    }).catch(() => { /* bookkeeping only */ });
     return;
   }
   mutate((s) => {
@@ -3286,7 +3658,7 @@ async function generateBotText(bot, memories, context, templateText) {
 // In Firebase mode the real engine lives in Cloud Functions (botRunner);
 // this simulation is used only for demo mode so bot activity is visible.
 export async function runDemoBotCycle() {
-  if (firebaseReady) return { ran: false, reason: 'Bot engine runs in Cloud Functions when Firebase is configured.' };
+  if (live) return { ran: false, reason: 'Bot engine runs in Cloud Functions when Firebase is configured.' };
   const s = getState();
   if (!s.botSettings.global.enabled) return { ran: false, reason: 'Global bot kill switch is off.' };
   const results = [];
@@ -3396,7 +3768,7 @@ export async function runDemoBotCycle() {
 // (the user's message is the context, so a Bangla message earns a
 // Bangla reply); the personality template below is the silent fallback.
 export async function demoBotReply(botUserId, userText) {
-  if (firebaseReady) return null;
+  if (live) return null;
   const s = getState();
   const bot = s.bots.find((b) => b.id === botUserId);
   if (!bot || !bot.active || !s.botSettings.global.enabled) return null;
@@ -3434,7 +3806,13 @@ let botCycleInFlight = false;
 
 function setLiveRunnerState(patchObj) {
   if (!remote) return;
-  remote.botRunner = { live: true, active: Boolean(liveRunnerTimer), ...(remote.botRunner || {}), ...patchObj };
+  const next = { live: true, active: Boolean(liveRunnerTimer), ...(remote.botRunner || {}), ...patchObj };
+  // No-change writes stay silent: syncLiveBotRunner runs on every
+  // users delivery (presence heartbeats included), and an unconditional
+  // dispatch here would re-render the page on every heartbeat — the
+  // exact shake the presence discipline exists to prevent.
+  if (remote.botRunner && stableStringify(remote.botRunner) === stableStringify(next)) return;
+  remote.botRunner = next;
   document.dispatchEvent(new CustomEvent('meetbook:data'));
 }
 
@@ -3443,7 +3821,7 @@ export function botRunnerIsActive() {
 }
 
 export function startBotRunner() {
-  if (!firebaseReady || !isAdmin() || liveRunnerTimer) return botRunnerIsActive();
+  if (!live || !isAdmin() || liveRunnerTimer) return botRunnerIsActive();
   liveRunnerInitialTimer = setTimeout(() => { void runScheduledBotCycle(); }, BOT_RUNNER_INITIAL_DELAY_MS);
   liveRunnerTimer = setInterval(() => { void runScheduledBotCycle(); }, BOT_RUNNER_INTERVAL_MS);
   setLiveRunnerState({ active: true });
@@ -3459,7 +3837,7 @@ export function stopBotRunner() {
 // Called on every users snapshot: the runner exists exactly while the
 // signed-in user is an admin.
 function syncLiveBotRunner() {
-  if (!firebaseReady) return;
+  if (!live) return;
   if (isAdmin()) startBotRunner();
   else stopBotRunner();
 }
@@ -3468,21 +3846,22 @@ function syncLiveBotRunner() {
 // collection) so two admin tabs don't both post for the same window —
 // the same duplicate-task protection the Functions engine uses.
 async function runScheduledBotCycle() {
-  if (!firebaseReady || !isAdmin()) return;
+  if (!live || !isAdmin()) return;
   try {
     const windowKey = Math.floor(Date.now() / BOT_RUNNER_INTERVAL_MS);
-    const ref = doc(db, 'botRunners', `autocycle_${windowKey}`);
-    // Atomic claim via transaction: the old get-then-set let two admin
-    // tabs both observe "not claimed" and both run the window. The
-    // GitHub Actions runner claims the same window doc the same way,
-    // so browser and runner can never run a cycle over each other.
-    const claimed = await runTransaction(db, async (tx) => {
-      const snap = await tx.get(ref);
-      if (snap.exists()) return false;
-      tx.set(ref, { kind: 'live-autocycle', window: windowKey, by: currentUid(), createdAt: Date.now(), status: 'claimed' });
-      return true;
-    });
-    if (!claimed) return; // another session already ran this window
+    // Atomic claim via insert-if-absent: PostgREST has no client
+    // transaction, so the claim is a single upsert with
+    // ignoreDuplicates — exactly one session's insert lands a row and
+    // returns it; every other session's returns an empty result. (The
+    // old get-then-set let two admin tabs both observe "not claimed"
+    // and both run the window.) The GitHub Actions runner claims the
+    // same window row the same way, so browser and runner can never
+    // run a cycle over each other.
+    const { data: claimedRows, error: claimError } = await supabase.from('botRunners')
+      .upsert({ id: `autocycle_${windowKey}`, kind: 'live-autocycle', window: windowKey, by: currentUid(), createdAt: Date.now(), status: 'claimed' }, { onConflict: 'id', ignoreDuplicates: true })
+      .select();
+    if (claimError) throw claimError;
+    if (!claimedRows?.length) return; // another session already ran this window
   } catch { return; /* cannot claim — skip this window quietly */ }
   await runLiveBotCycle();
 }
@@ -3490,8 +3869,8 @@ async function runScheduledBotCycle() {
 async function loadLiveBotCounters() {
   const day = counterDayKey();
   try {
-    const snap = await getDoc(doc(db, 'botSettings', 'counters'));
-    if (snap.exists()) return { day, counters: botCountersForDay(snap.data(), day) };
+    const row = await sbGet('botSettings', 'counters');
+    if (row) return { day, counters: botCountersForDay(row, day) };
   } catch { /* fall through: a fresh day of counters */ }
   return { day, counters: {} };
 }
@@ -3501,7 +3880,7 @@ async function loadLiveBotCounters() {
 // it cannot hold live records on Spark). Capped at 50 entries per bot;
 // best-effort: a failed write never fails the cycle.
 async function persistBotDecisions(list) {
-  if (!firebaseReady || !list?.length) return;
+  if (!live || !list?.length) return;
   const byBot = new Map();
   for (const dcn of list) {
     if (!byBot.has(dcn.botId)) byBot.set(dcn.botId, []);
@@ -3509,53 +3888,60 @@ async function persistBotDecisions(list) {
   }
   for (const [botId, entries] of byBot) {
     try {
-      const ref = doc(db, 'botRunners', `decisions_${botId}`);
-      const snap = await getDoc(ref);
-      let items = snap.exists() ? (snap.data().items || []) : [];
+      const rowId = `decisions_${botId}`;
+      const row = await sbGet('botRunners', rowId);
+      let items = row ? (row.items || []) : [];
       for (const e of entries) items = appendBotDecision(items, e);
-      await setDoc(ref, { botId, items, updatedAt: Date.now() }, { merge: true });
+      await sbUpsert('botRunners', { id: rowId, botId, items, updatedAt: Date.now() });
       if (remote) remote.botDecisions[botId] = items;
     } catch { /* best-effort */ }
   }
 }
 
 async function saveLiveBotCounters(day, counters) {
-  // merge: true — the counters map deep-merges per bot, so a cycle
-  // never wipes another writer's increments for OTHER bots (the whole
-  // doc used to be overwritten, last writer wins).
-  try { await setDoc(doc(db, 'botSettings', 'counters'), { day, counters, updatedAt: Date.now() }, { merge: true }); } catch { /* best-effort */ }
+  // The counters map merges per bot, so a cycle never wipes another
+  // writer's increments for OTHER bots (a naive whole-row overwrite
+  // would be last-writer-wins): read the stored row and merge this
+  // cycle's counters over it — same-day only; a stale-day row is
+  // replaced wholesale, matching botCountersForDay's reset semantics.
+  try {
+    const current = await sbGet('botSettings', 'counters');
+    const merged = current && current.day === day ? { ...(current.counters || {}), ...counters } : counters;
+    await sbUpsert('botSettings', { id: 'counters', day, counters: merged, updatedAt: Date.now() });
+  } catch { /* best-effort */ }
 }
 
 async function loadLiveBotMemories(botId) {
   try {
-    const snap = await getDoc(doc(db, 'botMemories', botId));
-    if (snap.exists()) return snap.data().items || [];
+    const row = await sbGet('botMemories', botId);
+    if (row) return row.items || [];
   } catch { /* fall through to the mirrored copy */ }
   return data().botMemories[botId] || [];
 }
 
-// Find this bot's unreplied 1-1 conversations straight from Firestore:
-// the admin's mirrored state only contains the ADMIN's own chats, so
-// the runner queries for the bot (the conversations/messages read
-// rules allow admins). Latest message per conversation decides — a
-// conversation whose latest message is the human's is unreplied.
+// Find this bot's unreplied 1-1 conversations straight from the
+// server: the admin's mirrored state only contains the ADMIN's own
+// chats, so the runner queries for the bot (the conversations/messages
+// read policies allow admins). Latest message per conversation
+// decides — a conversation whose latest message is the human's is
+// unreplied.
 async function findLiveReplyTargets(bot) {
-  const convSnap = await getDocs(query(collection(db, 'conversations'), where('participants', 'array-contains', bot.id), limit(50)));
-  const convs = convSnap.docs.map((d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) })).slice(0, 20);
+  const convRows = await sbSelect('conversations', (q) => q.contains('participants', [bot.id]).limit(50));
+  const convs = convRows.map((row) => normaliseTimeFields(row, ['createdAt'])).slice(0, 20);
   const latestByConv = new Map();
   for (const conv of convs) {
     if (conv.isGroup) continue;
-    const msgSnap = await getDocs(query(collection(db, 'messages'), where('conversationId', '==', conv.id), orderBy('createdAt', 'desc'), limit(1)));
-    const latest = msgSnap.docs[0];
-    latestByConv.set(conv.id, latest ? { id: latest.id, ...normaliseTimeFields(latest.data(), ['createdAt']) } : null);
+    const msgRows = await sbSelect('messages', (q) => q.eq('conversationId', conv.id).order('createdAt', { ascending: false }).limit(1));
+    const latest = msgRows[0];
+    latestByConv.set(conv.id, latest ? normaliseTimeFields(latest, ['createdAt']) : null);
   }
   return findBotReplyTargets(convs, latestByConv, bot.id);
 }
 
 async function latestLiveMessage(conversationId) {
-  const snap = await getDocs(query(collection(db, 'messages'), where('conversationId', '==', conversationId), orderBy('createdAt', 'desc'), limit(1)));
-  const d = snap.docs[0];
-  return d ? { id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) } : null;
+  const rows = await sbSelect('messages', (q) => q.eq('conversationId', conversationId).order('createdAt', { ascending: false }).limit(1));
+  const d = rows[0];
+  return d ? normaliseTimeFields(d, ['createdAt']) : null;
 }
 
 // One live bot cycle: for every active bot, first answer at most one
@@ -3564,7 +3950,7 @@ async function latestLiveMessage(conversationId) {
 // the same counters + kill switch as the demo cycle and the Functions
 // engine. Returns the demo cycle's { ran, results } shape.
 export async function runLiveBotCycle() {
-  if (!firebaseReady) return { ran: false, reason: 'The live bot runner needs Firebase mode.' };
+  if (!live) return { ran: false, reason: 'The live bot runner needs Firebase mode.' };
   if (!isAdmin()) return { ran: false, reason: 'Only admins can run bot cycles.' };
   if (botCycleInFlight) return { ran: false, reason: 'A bot cycle is already running.' };
   if (data().botSettings.global.enabled === false) {
@@ -3630,7 +4016,8 @@ export async function runLiveBotCycle() {
             // one message in a vacuum.
             const threadMsgs = (data().messages || []).filter((m) => m.conversationId === target.conversationId).slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
             const gen = await generateBotText(bot, memories, { kind: 'message', text: fresh.text, thread: threadContextText(threadMsgs, bot.id) }, templateBotMessageReply(bot, fresh.text));
-            await addDoc(collection(db, 'messages'), {
+            await sbInsert('messages', {
+              id: genId('m'),
               conversationId: target.conversationId, participants: [...target.participants],
               senderId: bot.id, text: gen.text, image: '', audio: '',
               createdAt: Date.now(), status: 'sent', readBy: [bot.id]
@@ -3645,7 +4032,7 @@ export async function runLiveBotCycle() {
               read: false, createdAt: Date.now()
             });
             const updatedMemories = memoryFromConversation(memories, fresh.text, gen.text);
-            try { await setDoc(doc(db, 'botMemories', bot.id), { botId: bot.id, items: updatedMemories }); memories = updatedMemories; } catch { /* memory is best-effort */ }
+            try { await sbUpsert('botMemories', { id: bot.id, botId: bot.id, items: updatedMemories }); memories = updatedMemories; } catch { /* memory is best-effort */ }
             actions += 1;
             acted = true;
             results.push({ bot: bot.name, action: 'message' });
@@ -3683,18 +4070,19 @@ export async function runLiveBotCycle() {
           // denormalized via postAudience (public -> audienceIds []),
           // so the provable feed listeners pick the post up.
           const audience = postAudience({ visibility: 'public', authorFriendIds: friendIdsFromData(bot.id), authorCloseFriendIds: [] });
-          await addDoc(collection(db, 'posts'), {
+          await sbInsert('posts', {
+            id: genId('p'),
             authorId: bot.id, text: gen.text, image: '',
             visibility: audience.visibility, audienceIds: audience.audienceIds,
-            createdAt: serverTimestamp(), editedAt: 0,
+            createdAt: Date.now(), editedAt: 0,
             likes: [], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [],
             groupId: '', pageId: '', pageName: '', pageAvatar: '',
-            poll: null, location: '', feeling: '', pinned: false, generatedBy: gen.provider
+            poll: null, location: '', feeling: '', pinned: false
           });
           c.postsToday += 1;
           c.lastActionAt = Date.now();
           const actMem = memoryFromActivity(memories, bot, { kind: 'post', text: gen.text });
-          if (actMem !== memories) { try { await setDoc(doc(db, 'botMemories', bot.id), { botId: bot.id, items: actMem }); memories = actMem; } catch { /* best-effort */ } }
+          if (actMem !== memories) { try { await sbUpsert('botMemories', { id: bot.id, botId: bot.id, items: actMem }); memories = actMem; } catch { /* best-effort */ } }
           actions += 1;
           acted = true;
           results.push({ bot: bot.name, action: 'post' });
@@ -3712,21 +4100,21 @@ export async function runLiveBotCycle() {
           if (replyTarget) {
             const hostPost = replyTarget.post;
             const hostComment = replyTarget.comment;
-            const blockSnap = await getDoc(doc(db, 'blocks', `${hostComment.authorId}_${bot.id}`));
-            if (blockSnap.exists()) {
+            const blockRow = await sbGet('blocks', `${hostComment.authorId}_${bot.id}`);
+            if (blockRow) {
               results.push({ bot: bot.name, action: 'none', reason: 'comment author blocked this bot' });
             } else {
               const gen = await generateBotText(bot, memories, { kind: 'comment', text: hostComment.text }, generateTemplateComment(bot));
-              const postSnap = await getDoc(doc(db, 'posts', hostPost.id));
-              const freshComments = postSnap.exists() ? (postSnap.data().comments || []) : (hostPost.comments || []);
+              const postRow = await sbGet('posts', hostPost.id);
+              const freshComments = postRow ? (postRow.comments || []) : (hostPost.comments || []);
               const host = freshComments.find((cm) => cm.id === hostComment.id);
               if (host) {
                 host.replies = [...(host.replies || []), { id: genId('c'), authorId: bot.id, text: gen.text, createdAt: Date.now() }];
-                await updateDoc(doc(db, 'posts', hostPost.id), { comments: freshComments });
+                await sbUpdate('posts', hostPost.id, { comments: freshComments });
                 c.commentsToday += 1;
                 c.lastActionAt = Date.now();
                 const actMem = memoryFromActivity(memories, bot, { kind: 'comment', text: hostPost.text });
-          if (actMem !== memories) { try { await setDoc(doc(db, 'botMemories', bot.id), { botId: bot.id, items: actMem }); memories = actMem; } catch { /* best-effort */ } }
+          if (actMem !== memories) { try { await sbUpsert('botMemories', { id: bot.id, botId: bot.id, items: actMem }); memories = actMem; } catch { /* best-effort */ } }
           if (!botIds.has(hostComment.authorId)) {
                   await createNotification({
                     userId: hostComment.authorId, type: 'comment', actorId: bot.id,
@@ -3747,19 +4135,19 @@ export async function runLiveBotCycle() {
           const target = pickBotCommentTarget(candidates, bot);
           if (!target) results.push({ bot: bot.name, action: 'none', reason: 'no fresh post to comment on' });
           if (target) {
-            const blockSnap = await getDoc(doc(db, 'blocks', `${target.authorId}_${bot.id}`));
-            if (blockSnap.exists()) {
+            const blockRow = await sbGet('blocks', `${target.authorId}_${bot.id}`);
+            if (blockRow) {
               results.push({ bot: bot.name, action: 'none', reason: 'post author blocked this bot' });
             } else {
               const gen = await generateBotText(bot, memories, { kind: 'comment', text: target.text }, generateTemplateComment(bot));
-              const postSnap = await getDoc(doc(db, 'posts', target.id));
-              const freshComments = postSnap.exists() ? (postSnap.data().comments || []) : (target.comments || []);
+              const postRow = await sbGet('posts', target.id);
+              const freshComments = postRow ? (postRow.comments || []) : (target.comments || []);
               const comment = { id: genId('c'), authorId: bot.id, text: gen.text, createdAt: Date.now(), replies: [] };
-              await updateDoc(doc(db, 'posts', target.id), { comments: [...freshComments, comment] });
+              await sbUpdate('posts', target.id, { comments: [...freshComments, comment] });
               c.commentsToday += 1;
               c.lastActionAt = Date.now();
               const actMem = memoryFromActivity(memories, bot, { kind: 'comment', text: target.text });
-          if (actMem !== memories) { try { await setDoc(doc(db, 'botMemories', bot.id), { botId: bot.id, items: actMem }); memories = actMem; } catch { /* best-effort */ } }
+          if (actMem !== memories) { try { await sbUpsert('botMemories', { id: bot.id, botId: bot.id, items: actMem }); memories = actMem; } catch { /* best-effort */ } }
           await createNotification({
                 userId: target.authorId, type: 'comment', actorId: bot.id,
                 text: `${bot.name} commented on your post.`, postId: target.id, conversationId: '',
@@ -3778,7 +4166,7 @@ export async function runLiveBotCycle() {
           // (the admin-signed runner can READ every post).
           const target = (data().posts || []).find((p) => p.visibility === 'public' && !p.groupId && !p.pageId && p.authorId !== bot.id && !(p.likes || []).includes(bot.id));
           if (target) {
-            await updateDoc(doc(db, 'posts', target.id), { likes: arrayUnion(bot.id) });
+            await sbUpdate('posts', target.id, { likes: [...(target.likes || []), bot.id] });
             c.likesToday += 1;
             c.lastActionAt = Date.now();
             actions += 1;
@@ -3815,7 +4203,7 @@ export async function runLiveBotCycle() {
 // The Bot panel's run button: demo mode keeps the local simulation,
 // live mode runs the Spark runner above.
 export async function runBotCycle() {
-  if (!firebaseReady) return runDemoBotCycle();
+  if (!live) return runDemoBotCycle();
   return runLiveBotCycle();
 }
 
