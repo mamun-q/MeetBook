@@ -100,3 +100,35 @@ describe('L1/L2 like does not re-render the page', () => {
     expect(api.data().posts.find((p) => p.id === 'post1').likes).toContain('human2');
   });
 });
+
+describe('P1-P3 presence heartbeats do not re-render the page', () => {
+  it('a lastSeen/online-only user change refreshes the mirror silently', async () => {
+    await settle();
+    dataEvents = 0;
+    fake.seed('users', 'human2', { ...HUMAN2, online: true, lastSeen: 1700000500000 });
+    await settle();
+    expect(dataEvents).toBe(0);
+    const u2 = api.data().users.find((u) => u.id === 'human2');
+    expect(u2.lastSeen).toBe(1700000500000);
+    expect(u2.online).toBe(true);
+  });
+
+  it('a real profile change still emits', async () => {
+    await settle();
+    dataEvents = 0;
+    fake.seed('users', 'human2', { ...HUMAN2, online: true, lastSeen: 1700000500000, name: 'Ayesha K.' });
+    await settle();
+    expect(dataEvents).toBeGreaterThan(0);
+    expect(api.data().users.find((u) => u.id === 'human2').name).toBe('Ayesha K.');
+  });
+
+  it('setOnline throttles repeat heartbeat writes (2 min) but the first write lands', async () => {
+    api.setOnline('human2', true);
+    await settle();
+    const first = fake.get('users', 'human2').lastSeen;
+    expect(typeof first).toBe('number');
+    api.setOnline('human2', true);
+    await settle();
+    expect(fake.get('users', 'human2').lastSeen).toBe(first);
+  });
+});

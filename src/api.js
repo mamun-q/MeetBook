@@ -417,7 +417,20 @@ function startRemoteSync() {
   // timeAgo() directly renders a 1970s date. (Stories/events mappers
   // below predate the helper and call tsToMs inline — same effect.)
   const mapUser = (d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt', 'lastSeen']) });
-  listen(query(collection(db, 'users'), limit(300)), (snap) => { patch((r) => { r.users = snap.docs.map(mapUser); }); void loadBotSecrets(); void loadAdminStats(); syncLiveBotRunner(); });
+  listen(query(collection(db, 'users'), limit(300)), (snap) => {
+    const mapped = snap.docs.map(mapUser);
+    // Presence heartbeats (lastSeen/online) land here every minute for
+    // every online user. If NOTHING else changed, refresh the mirror
+    // silently — a full emit re-renders the whole page, and constant
+    // repaints are what made the feed visibly shake on phones.
+    const stripPresence = (u) => { const c = { ...u }; delete c.lastSeen; delete c.online; return c; };
+    const prevUsers = remote.users || [];
+    const presenceOnly = prevUsers.length > 0 && prevUsers.length === mapped.length
+      && mapped.every((u) => { const p = prevUsers.find((x) => x.id === u.id); return p && stableStringify(stripPresence(p)) === stableStringify(stripPresence(u)); });
+    if (presenceOnly) { remote.users = mapped; return; }
+    patch((r) => { r.users = mapped; });
+    void loadBotSecrets(); void loadAdminStats(); syncLiveBotRunner();
+  });
   // Posts: three provable listeners merged by id (see header note).
   // Comment/reply timestamps are normalised too — they are written as
   // client-side ms today, but a Timestamp shape must never leak through.
@@ -723,12 +736,20 @@ export async function uploadImage(file, path) {
   return compressImageToDataUrl(file);
 }
 
+const presenceWriteAt = new Map();
 export function setOnline(userId, online) {
   // Every presence write also stamps lastSeen: the online rail treats a
   // user as online only when the flag is set AND lastSeen is fresh
   // (older docs without lastSeen fall back to the flag alone).
-  if (firebaseReady) { updateDoc(doc(db, 'users', userId), { online, lastSeen: Date.now() }).catch(() => {}); return; }
-  mutate((s) => { const u = s.users.find((x) => x.id === userId); if (u) { u.online = online; u.lastSeen = Date.now(); } });
+  // Heartbeat calls arrive every 60s; writing every one churns a
+  // Firestore write plus a users snapshot on every connected client.
+  // The rail treats lastSeen as fresh for 10 minutes, so a 2-minute
+  // write throttle is invisible to it. Going offline is never throttled.
+  const now = Date.now();
+  if (online && now - (presenceWriteAt.get(userId) || 0) < 120_000) return;
+  presenceWriteAt.set(userId, now);
+  if (firebaseReady) { updateDoc(doc(db, 'users', userId), { online, lastSeen: now }).catch(() => {}); return; }
+  mutate((s) => { const u = s.users.find((x) => x.id === userId); if (u) { u.online = online; u.lastSeen = now; } });
 }
 
 export function updateSettings(userId, settingsPatch) {
