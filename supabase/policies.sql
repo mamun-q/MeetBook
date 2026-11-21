@@ -3,6 +3,11 @@
 -- Phase 1b deliverable. Apply AFTER schema.sql (which creates the
 -- tables, the SECURITY DEFINER helper functions and enables RLS on
 -- every table — RLS is deliberately NOT re-enabled here).
+-- (Fix 2026-11-22, from the first live run: three membership tests
+-- — posts_insert group check, messages_insert conversation checks —
+-- compared text against the text[] ROWS of a subquery, which Postgres
+-- rejects ("operator does not exist: text = text[]"); they are now
+-- EXISTS(...) tests against the array's elements.)
 --
 -- Spec: RLS_NOTES.md. Ground truth: firestore.rules. Every policy
 -- block is header-commented with the one-line Firestore guarantee it
@@ -228,8 +233,10 @@ create policy posts_insert on public.posts
         "authorId" = (select auth.uid())::text
         and (
           "groupId" = ''
-          or (select auth.uid())::text = any (
-               select g.members from public.groups g where g.id = "groupId")
+          or exists (
+               select 1 from public.groups g
+               where g.id = "groupId"
+                 and (select auth.uid())::text = any (g.members))
         )
       )
       or (
@@ -792,17 +799,19 @@ create policy messages_insert on public.messages
       (
         "senderId" = (select auth.uid())::text
         and (select auth.uid())::text = any (participants)
-        and (select auth.uid())::text = any (
-              select c.participants from public.conversations c
-              where c.id = "conversationId")
+        and exists (
+              select 1 from public.conversations c
+              where c.id = "conversationId"
+                and (select auth.uid())::text = any (c.participants))
       )
       or (
         public.is_admin()
         and public.is_bot_user("senderId")
         and "senderId" = any (participants)
-        and "senderId" = any (
-              select c.participants from public.conversations c
-              where c.id = "conversationId")
+        and exists (
+              select 1 from public.conversations c
+              where c.id = "conversationId"
+                and "senderId" = any (c.participants))
       )
     )
   );
