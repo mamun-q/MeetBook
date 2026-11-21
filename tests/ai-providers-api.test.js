@@ -97,7 +97,14 @@ describe('demo cycle with a Groq-backed bot', () => {
     const nova = store.getState().bots.find((b) => b.id === 'bot_nova');
     await api.saveBot({ ...nova, provider: 'groq', model: '' });
     const fetchFn = stubGroqFetch();
-    const r = await api.runDemoBotCycle();
+    // Pin the Decision Engine v2 rng so the cycle picks the post action.
+    const rngSpy = vi.spyOn(Math, 'random').mockReturnValue(0.05);
+    let r;
+    try {
+      r = await api.runDemoBotCycle();
+    } finally {
+      rngSpy.mockRestore();
+    }
     expect(r.ran).toBe(true);
     const post = store.getState().posts.find((p) => p.authorId === 'bot_nova');
     expect(post.text).toContain(GROQ_TEXT);

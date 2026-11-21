@@ -92,7 +92,16 @@ describe('live bot runner (Spark)', () => {
 
   it('runs a cycle: Gemini post + chat reply, counters, bot user doc, brain', async () => {
     const fetchFn = stubFetchOk();
-    const r = await api.runBotCycle();
+    // Decision Engine v2 picks among open actions by personality
+    // weight — pin the rng so this cycle deterministically picks the
+    // post action (roll 0.05 lands in the post band).
+    const rngSpy = vi.spyOn(Math, 'random').mockReturnValue(0.05);
+    let r;
+    try {
+      r = await api.runBotCycle();
+    } finally {
+      rngSpy.mockRestore();
+    }
     expect(r.ran).toBe(true);
     const actions = r.results.filter((x) => x.bot === 'Nova').map((x) => x.action);
     expect(actions).toContain('message');
@@ -150,7 +159,14 @@ describe('live bot runner (Spark)', () => {
   it('Gemini failure -> template text is still posted', async () => {
     fake.remove('botSettings', 'counters'); // fresh counters: interval + limits reset
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
-    const r = await api.runBotCycle();
+    // Pin the Decision Engine v2 rng so the cycle picks the post action.
+    const rngSpy = vi.spyOn(Math, 'random').mockReturnValue(0.05);
+    let r;
+    try {
+      r = await api.runBotCycle();
+    } finally {
+      rngSpy.mockRestore();
+    }
     expect(r.ran).toBe(true);
     const botPosts = fake.all('posts').filter((p) => p.authorId === 'bot_nova');
     const newest = botPosts[botPosts.length - 1];

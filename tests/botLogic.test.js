@@ -4,7 +4,8 @@ import {
   generateTemplateComment, decideBotAction, memoryFromConversation, DEFAULT_BOT_LIMITS,
   templateBotMessageReply, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay,
   botAlreadyCommented, pickBotCommentTarget, normaliseBotText, isDuplicateBotText,
-  freshTemplatePost, freshTemplateComment
+  freshTemplatePost, freshTemplateComment,
+  textSimilarity, isNearDuplicateBotText, interestRelevance, threadContextText
 } from '../src/botLogic.js';
 
 const nova = {
@@ -62,12 +63,30 @@ describe('decideBotAction', () => {
     expect(decideBotAction(nova, {}, false).action).toBe('none');
     expect(decideBotAction({ ...nova, active: false }, {}, true).action).toBe('none');
   });
-  it('walks post -> comment -> like -> message as limits fill', () => {
-    expect(decideBotAction(nova, { postsToday: 0 }).action).toBe('post');
-    expect(decideBotAction(nova, { postsToday: 2, commentsToday: 0 }).action).toBe('comment');
-    expect(decideBotAction(nova, { postsToday: 2, commentsToday: 2, likesToday: 0 }).action).toBe('like');
+  it('falls back to message when only message capacity remains; none when all full', () => {
     expect(decideBotAction(nova, { postsToday: 2, commentsToday: 2, likesToday: 2, messagesToday: 0 }).action).toBe('message');
     expect(decideBotAction(nova, { postsToday: 2, commentsToday: 2, likesToday: 2, messagesToday: 1 }).action).toBe('none');
+  });
+  it('chooses among open actions by personality weight (rng-stubbed)', () => {
+    const rolls = (vals) => { let i = 0; return () => vals[Math.min(i++, vals.length - 1)]; };
+    // nova weights: post 3, comment 4 (curious), like 2 — total 9.
+    expect(decideBotAction(nova, {}, true, Date.now(), rolls([0.05])).action).toBe('post');
+    expect(decideBotAction(nova, {}, true, Date.now(), rolls([0.5])).action).toBe('comment');
+    expect(decideBotAction(nova, {}, true, Date.now(), rolls([0.95])).action).toBe('like');
+    // an action at its cap is never chosen (wait roll passes, pick roll low)
+    expect(decideBotAction(nova, { postsToday: 2 }, true, Date.now(), rolls([0.99, 0.05])).action).toBe('comment');
+  });
+  it('can decide to WAIT once it has acted today — calm bots wait more', () => {
+    const rolls = (vals) => { let i = 0; return () => vals[Math.min(i++, vals.length - 1)]; };
+    const waited = decideBotAction(nova, { postsToday: 1 }, true, Date.now(), rolls([0.01]));
+    expect(waited.action).toBe('none');
+    expect(waited.reason).toContain('wait');
+    // sage (calm) has a higher wait chance: a 0.2 roll waits for sage…
+    expect(decideBotAction(sage, { postsToday: 1 }, true, Date.now(), rolls([0.2])).action).toBe('none');
+    // …but nova acts on the same roll, then picks by weight.
+    expect(decideBotAction(nova, { postsToday: 1 }, true, Date.now(), rolls([0.2, 0.05])).action).toBe('post');
+    // a bot that has not acted today never waits
+    expect(decideBotAction(sage, {}, true, Date.now(), rolls([0.01, 0.05])).action).not.toBe('none');
   });
   it('honours the minimum interval between actions', () => {
     const bot = { ...nova, limits: { ...nova.limits, minIntervalMs: 60_000 } };
@@ -196,5 +215,55 @@ describe('anti-repetition guards (Audit #3)', () => {
     expect(new Set(all).size).toBe(4);
     expect(freshTemplateComment(sage, all)).toBeNull();
     expect(freshTemplateComment(sage, [])).toBeTruthy();
+  });
+});
+
+describe('Master Vision Phase 1: similarity, relevance, thread context, memory dedup', () => {
+  it('textSimilarity scores identical text 1 and unrelated text 0', () => {
+    expect(textSimilarity('I love space science', 'I love space science')).toBe(1);
+    expect(textSimilarity('I love space science', 'cooking tasty pasta recipes')).toBe(0);
+    const s = textSimilarity('I love space and science today', 'I love space and science');
+    expect(s).toBeGreaterThan(0.5);
+    expect(s).toBeLessThan(1);
+  });
+  it('isNearDuplicateBotText catches reworded repeats, passes fresh text', () => {
+    const recent = ['Thinking about space today. What has everyone else been up to?'];
+    expect(isNearDuplicateBotText('Thinking about space today — what has everyone else been up to lately?', recent)).toBe(true);
+    expect(isNearDuplicateBotText('Just tried a new pasta recipe with basil and garlic', recent)).toBe(false);
+  });
+  it('interestRelevance scores interest mentions', () => {
+    expect(interestRelevance(nova, 'A post about space exploration')).toBe(0.5);
+    expect(interestRelevance(nova, 'Grandma cooking recipes')).toBe(0);
+    expect(interestRelevance(nova, 'space and science news')).toBe(1);
+  });
+  it('pickBotCommentTarget prefers an interest-matching post when given the bot', () => {
+    const posts = [
+      { id: 'p1', authorId: 'u1', text: 'My garden tomatoes are finally ripe', comments: [] },
+      { id: 'p2', authorId: 'u2', text: 'New telescope photo of a space nebula', comments: [] }
+    ];
+    expect(pickBotCommentTarget(posts, nova)?.id).toBe('p2');
+    expect(pickBotCommentTarget(posts, 'bot_nova')?.id).toBe('p1'); // id-only: feed order
+  });
+  it('threadContextText formats the recent thread, newest last, skipping empties', () => {
+    const msgs = [
+      { senderId: 'u1', text: 'hi nova' },
+      { senderId: 'bot_nova', text: 'hello! ask me about space' },
+      { senderId: 'u1', text: 'what is a nebula?' },
+      { senderId: 'u1', text: '' }
+    ];
+    const ctx = threadContextText(msgs, 'bot_nova');
+    expect(ctx).toContain('Them: hi nova');
+    expect(ctx).toContain('You: hello! ask me about space');
+    expect(ctx.endsWith('Them: what is a nebula?')).toBe(true);
+  });
+  it('memoryFromConversation dedupes near-identical notes and stamps a category', () => {
+    const first = memoryFromConversation([], 'tell me about space please', 'Space is vast and beautiful', 1000);
+    expect(first).toHaveLength(1);
+    expect(first[0].category).toBe('conversation');
+    const second = memoryFromConversation(first, 'tell me about space please', 'Space is vast and beautiful', 2000);
+    expect(second).toHaveLength(1);
+    expect(second[0].updatedAt).toBe(2000);
+    const third = memoryFromConversation(second, 'how do I bake bread at home', 'Mix flour water yeast', 3000);
+    expect(third).toHaveLength(2);
   });
 });

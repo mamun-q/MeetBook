@@ -25,7 +25,7 @@ import {
   normaliseBot, findBotReplyTargets, decideBotAction,
   templateBotMessageReply, generateTemplatePost, generateTemplateComment,
   emptyBotCounters, counterDayKey, botCountersForDay, memoryFromConversation,
-  pickBotCommentTarget, isDuplicateBotText, freshTemplatePost
+  pickBotCommentTarget, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost
 } from '../src/botLogic.js';
 import {
   resolveAiConfig, generateRouted, normaliseUsageMap, usageTotals,
@@ -199,7 +199,11 @@ async function main() {
         const target = targets[0];
         const fresh = await latestMessage(target.conversationId);
         if (fresh && fresh.senderId === target.humanId) {
-          const gen = await generateBotText(bot, memories, { kind: 'message', text: fresh.text }, templateBotMessageReply(bot, fresh.text), secretsDoc, platformConfig);
+          // Short-term memory: recent thread context (single-field
+          // query + client sort — no composite index needed).
+          const threadSnap = await getDocs(query(collection(db, 'messages'), where('conversationId', '==', target.conversationId), limit(50)));
+          const threadMsgs = threadSnap.docs.map((d) => d.data()).sort((a, b) => (a.createdAt?.toMillis?.() ?? a.createdAt ?? 0) - (b.createdAt?.toMillis?.() ?? b.createdAt ?? 0));
+          const gen = await generateBotText(bot, memories, { kind: 'message', text: fresh.text, thread: threadContextText(threadMsgs, bot.id) }, templateBotMessageReply(bot, fresh.text), secretsDoc, platformConfig);
           await addDoc(collection(db, 'messages'), {
             conversationId: target.conversationId, participants: [...target.participants],
             senderId: bot.id, text: gen.text, image: '', audio: '',
@@ -227,9 +231,14 @@ async function main() {
       const decision = decideBotAction(bot, c, true);
       if (decision.action === 'post') {
         const ownSnap = await getDocs(query(collection(db, 'posts'), where('authorId', '==', bot.id), limit(10)));
-        const recentTexts = ownSnap.docs.map((d) => d.data().text);
+        // Cross-bot anti-duplicate: also compare against OTHER bots'
+        // recent posts (Master Vision: ecosystem-wide uniqueness).
+        const botIds = new Set(bots.map((b) => b.id));
+        const recentSnap = await getDocs(query(collection(db, 'posts'), orderBy('createdAt', 'desc'), limit(30)));
+        const crossTexts = recentSnap.docs.map((d) => d.data()).filter((p) => p.authorId !== bot.id && botIds.has(p.authorId)).slice(0, 10).map((p) => p.text);
+        const recentTexts = [...ownSnap.docs.map((d) => d.data().text), ...crossTexts];
         let gen = await generateBotText(bot, memories, { kind: 'post' }, generateTemplatePost(bot), secretsDoc, platformConfig);
-        if (isDuplicateBotText(gen.text, recentTexts)) {
+        if (isNearDuplicateBotText(gen.text, recentTexts)) {
           // Repeated a recent post — swap in a fresh template once;
           // if every variant repeats, skip the post entirely.
           const fresh = freshTemplatePost(bot, recentTexts);
@@ -259,7 +268,7 @@ async function main() {
         // One comment per post, ever: no fallback to a post the bot
         // already commented on (that fallback stacked repeat comments
         // onto the same post).
-        const target = pickBotCommentTarget(candidates, bot.id);
+        const target = pickBotCommentTarget(candidates, bot);
         if (target) {
           const blockSnap = await getDoc(doc(db, 'blocks', `${target.authorId}_${bot.id}`));
           if (!blockSnap.exists()) {

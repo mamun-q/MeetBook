@@ -8,7 +8,7 @@ import {
 } from './store.js';
 import { firebaseReady, auth, db, storage, googleProvider } from './firebase.js';
 import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme, canEditMessage, chatPollVote, VANISH_TTL_MS } from './utils.js';
-import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, isDuplicateBotText, freshTemplatePost } from './botLogic.js';
+import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost } from './botLogic.js';
 import { canAccessBotSecrets, botModel } from './gemini.js';
 import { providerById, resolveAiConfig, generateRouted, testProvider as testAiProvider, getLastRoutedFailure, resetLastRoutedFailure, anyProviderConfigured, dhakaDayKey, normaliseUsageMap, usageTotals } from './aiProviders.js';
 import { isCloudinaryConfigured, uploadToCloudinary, uploadFileToCloudinary } from './cloudinary.js';
@@ -3151,13 +3151,19 @@ export async function runDemoBotCycle() {
     const entry = { bot, counters, action: decision.action, gen: null, targetId: '' };
     if (decision.action === 'post') {
       entry.gen = await generateBotText(bot, s.botMemories[bot.id] || [], { kind: 'post' }, generateTemplatePost(bot));
-      const recentTexts = s.posts.filter((p) => p.authorId === bot.id).slice(0, 10).map((p) => p.text);
-      if (entry.gen && isDuplicateBotText(entry.gen.text, recentTexts)) {
+      // Anti-duplicate set: this bot's recent posts AND other bots'
+      // recent posts (Master Vision: compare across the ecosystem).
+      const botIds = new Set(s.bots.map((b) => b.id));
+      const recentTexts = [
+        ...s.posts.filter((p) => p.authorId === bot.id).slice(0, 10),
+        ...s.posts.filter((p) => p.authorId !== bot.id && botIds.has(p.authorId)).slice(0, 10)
+      ].map((p) => p.text);
+      if (entry.gen && isNearDuplicateBotText(entry.gen.text, recentTexts)) {
         const fresh = freshTemplatePost(bot, recentTexts);
         entry.gen = fresh ? { ...entry.gen, text: fresh, provider: 'template' } : null;
       }
     } else if (decision.action === 'comment') {
-      const target = pickBotCommentTarget(s.posts, bot.id);
+      const target = pickBotCommentTarget(s.posts, bot);
       if (target) {
         entry.targetId = target.id;
         entry.gen = await generateBotText(bot, s.botMemories[bot.id] || [], { kind: 'comment', text: target.text }, generateTemplateComment(bot));
@@ -3410,7 +3416,11 @@ export async function runLiveBotCycle() {
           // cycles (or a fast human) never produce a double reply.
           const fresh = await latestLiveMessage(target.conversationId);
           if (fresh && fresh.senderId === target.humanId) {
-            const gen = await generateBotText(bot, memories, { kind: 'message', text: fresh.text }, templateBotMessageReply(bot, fresh.text));
+            // Short-term memory: the recent thread rides along so the
+            // reply continues the conversation instead of answering
+            // one message in a vacuum.
+            const threadMsgs = (data().messages || []).filter((m) => m.conversationId === target.conversationId).slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+            const gen = await generateBotText(bot, memories, { kind: 'message', text: fresh.text, thread: threadContextText(threadMsgs, bot.id) }, templateBotMessageReply(bot, fresh.text));
             await addDoc(collection(db, 'messages'), {
               conversationId: target.conversationId, participants: [...target.participants],
               senderId: bot.id, text: gen.text, image: '', audio: '',
@@ -3440,9 +3450,18 @@ export async function runLiveBotCycle() {
         // --- autonomous action (post / comment / like) ---
         const decision = decideBotAction(bot, c, true);
         if (decision.action === 'post') {
-          const recentTexts = (data().posts || []).filter((p) => p.authorId === bot.id).slice(0, 10).map((p) => p.text);
+          // Anti-duplicate set: this bot's recent posts AND other
+          // bots' recent posts (Master Vision cross-bot comparison).
+          const botIds = new Set([
+            ...(data().users || []).filter((u) => u.isBot).map((u) => u.id),
+            ...(data().bots || []).map((b) => b.id)
+          ]);
+          const recentTexts = [
+            ...(data().posts || []).filter((p) => p.authorId === bot.id).slice(0, 10),
+            ...(data().posts || []).filter((p) => p.authorId !== bot.id && botIds.has(p.authorId)).slice(0, 10)
+          ].map((p) => p.text);
           let gen = await generateBotText(bot, memories, { kind: 'post' }, generateTemplatePost(bot));
-          if (isDuplicateBotText(gen.text, recentTexts)) {
+          if (isNearDuplicateBotText(gen.text, recentTexts)) {
             // The provider (or the random template) repeated one of
             // the bot's recent posts — swap in a fresh template once;
             // if every variant repeats, skip the post entirely.
@@ -3474,7 +3493,7 @@ export async function runLiveBotCycle() {
           // One comment per post, ever: no fallback to a post the bot
           // already commented on (that fallback is what stacked
           // repeat comments onto the same post).
-          const target = pickBotCommentTarget(candidates, bot.id);
+          const target = pickBotCommentTarget(candidates, bot);
           if (!target) results.push({ bot: bot.name, action: 'none', reason: 'no fresh post to comment on' });
           if (target) {
             const blockSnap = await getDoc(doc(db, 'blocks', `${target.authorId}_${bot.id}`));

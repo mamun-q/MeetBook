@@ -45,6 +45,7 @@ export function buildGeminiPrompt(bot, memories = [], context = {}) {
     'Your own memories:', memoryText || '(none)',
     `Task: write a short ${kind === 'message' ? 'message reply' : kind} for a social network. You are clearly an AI bot; never claim to be human. Keep it under 60 words.`,
     'Reply in the same language as the context: if the context is in Bangla, reply in Bangla; if it is in English, reply in English.',
+    context?.thread ? `Recent conversation (oldest first — continue it naturally, do not repeat yourself):\n${context.thread}` : '',
     context?.text ? `Context: ${context.text}` : ''
   ].filter(Boolean).join('\n');
 }

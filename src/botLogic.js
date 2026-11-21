@@ -118,12 +118,27 @@ export function botAlreadyCommented(post, botId) {
   return (post?.comments || []).some((cm) => cm.authorId === botId);
 }
 
-// The first post the bot has NOT commented on yet — or null. There is
-// deliberately NO fallback to an already-commented post: running out
-// of fresh posts means skipping the comment, not stacking another one
-// on the same post.
-export function pickBotCommentTarget(posts = [], botId) {
-  return (posts || []).find((p) => p && p.authorId !== botId && !botAlreadyCommented(p, botId)) || null;
+// The comment target: a post the bot did not author and has not
+// already commented on — preferring one that matches the bot's
+// INTERESTS when one exists (a bot should join discussions it cares
+// about, per the vision's relevance rule), else the first fresh post.
+// `bot` may be a bot object or a bare id string (no interests then).
+// There is deliberately NO fallback to an already-commented post:
+// running out of fresh posts means skipping, not stacking.
+export function pickBotCommentTarget(posts = [], bot = '') {
+  const botId = typeof bot === 'string' ? bot : (bot?.id || '');
+  const eligible = (posts || []).filter((p) => p && p.authorId !== botId && !botAlreadyCommented(p, botId));
+  if (!eligible.length) return null;
+  if (bot && typeof bot === 'object') {
+    let best = null;
+    let bestScore = 0;
+    for (const p of eligible) {
+      const score = interestRelevance(bot, p.text || '');
+      if (score > bestScore) { best = p; bestScore = score; }
+    }
+    if (best) return best;
+  }
+  return eligible[0];
 }
 
 // Bot posts are stored with an "AI Bot post · " prefix; compare texts
@@ -136,6 +151,48 @@ export function isDuplicateBotText(text, recentTexts = []) {
   const n = normaliseBotText(text);
   if (!n) return false;
   return (recentTexts || []).some((t) => normaliseBotText(t) === n);
+}
+
+// --- Master Vision Phase 1: similarity, relevance, thread context -----
+// Token-set similarity (Jaccard over meaningful words, Unicode-aware so
+// Bangla text works too). This is the practical near-duplicate detector
+// for the anti-repetition rules: it catches REWORDED repeats — a simple
+// word replacement must not make duplicate content acceptable.
+export function textSimilarity(a = '', b = '') {
+  const tokens = (t) => new Set(normaliseBotText(t).split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 2));
+  const A = tokens(a);
+  const B = tokens(b);
+  if (!A.size || !B.size) return 0;
+  let inter = 0;
+  for (const w of A) if (B.has(w)) inter += 1;
+  return inter / (A.size + B.size - inter);
+}
+
+export function isNearDuplicateBotText(text, recentTexts = [], threshold = 0.55) {
+  if (isDuplicateBotText(text, recentTexts)) return true;
+  return (recentTexts || []).some((t) => textSimilarity(text, t) >= threshold);
+}
+
+// How relevant a text is to a bot: the share of its interests that the
+// text mentions (0..1). Drives interest-aware comment targeting.
+export function interestRelevance(bot, text = '') {
+  const b = normaliseBot(bot || {});
+  const interests = (b.personality.interests || []).filter(Boolean);
+  if (!interests.length) return 0;
+  const hay = normaliseBotText(text);
+  const hits = interests.filter((i) => hay.includes(normaliseBotText(i))).length;
+  return hits / interests.length;
+}
+
+// Short-term memory for chat: the recent thread as prompt lines, oldest
+// first, so a reply keeps continuity instead of answering one message
+// in a vacuum. Messages are { senderId|authorId, text }.
+export function threadContextText(messages = [], botId = '', max = 6) {
+  return (messages || [])
+    .filter((m) => m && String(m.text || '').trim())
+    .slice(-max)
+    .map((m) => `${(m.senderId || m.authorId) === botId ? 'You' : 'Them'}: ${String(m.text).slice(0, 200)}`)
+    .join('\n');
 }
 
 // A template post that does not repeat any of the recent texts, or
@@ -161,19 +218,51 @@ export function freshTemplateComment(bot, recentTexts = []) {
   return null;
 }
 
-// Decide the next autonomous action for a bot, honouring its own limits and
-// the global kill switch. Pure: counters are passed in.
-export function decideBotAction(bot, counters = {}, globalEnabled = true, now = Date.now()) {
+// Decide the next autonomous action for a bot — Decision Engine v2
+// (Master Vision Phase 1). Hard gates first (kill switch, deactivation,
+// minimum interval, daily caps). Then, when the bot has already acted
+// today, a personality-paced chance to WAIT — "do nothing" is a valid
+// decision, and a bot that has not acted yet today never waits, so the
+// day's first action is guaranteed. Otherwise a personality-weighted
+// choice among the actions still under their caps: talkative/friendly
+// bots lean to comments, creative bots to posts. `rng` is injectable
+// for tests; production passes Math.random.
+export function decideBotAction(bot, counters = {}, globalEnabled = true, now = Date.now(), rng = Math.random) {
   const b = normaliseBot(bot);
   if (!globalEnabled) return { action: 'none', reason: 'global kill switch is off' };
   if (!b.active) return { action: 'none', reason: 'bot is deactivated' };
   const last = Number(counters.lastActionAt || 0);
   if (now - last < b.limits.minIntervalMs) return { action: 'none', reason: 'minimum interval not reached' };
-  if ((counters.postsToday || 0) < b.limits.postsPerDay) return { action: 'post', reason: 'under daily post limit' };
-  if ((counters.commentsToday || 0) < b.limits.commentsPerDay) return { action: 'comment', reason: 'under daily comment limit' };
-  if ((counters.likesToday || 0) < b.limits.likesPerDay) return { action: 'like', reason: 'under daily like limit' };
-  if ((counters.messagesToday || 0) < b.limits.messagesPerDay) return { action: 'message', reason: 'under daily message limit' };
-  return { action: 'none', reason: 'all daily limits reached' };
+  const open = [];
+  if ((counters.postsToday || 0) < b.limits.postsPerDay) open.push('post');
+  if ((counters.commentsToday || 0) < b.limits.commentsPerDay) open.push('comment');
+  if ((counters.likesToday || 0) < b.limits.likesPerDay) open.push('like');
+  if (!open.length) {
+    if ((counters.messagesToday || 0) < b.limits.messagesPerDay) return { action: 'message', reason: 'under daily message limit' };
+    return { action: 'none', reason: 'all daily limits reached' };
+  }
+  const traits = (b.personality.traits || []).map((t) => String(t).toLowerCase());
+  // Pacing counts only AUTONOMOUS actions (posts/comments/likes) —
+  // message replies are reactive and never make a bot "tired".
+  const actedToday = (counters.postsToday || 0) + (counters.commentsToday || 0) + (counters.likesToday || 0);
+  if (actedToday > 0) {
+    let waitChance = 0.12;
+    if (traits.some((t) => ['calm', 'thoughtful', 'quiet', 'analytical'].includes(t))) waitChance = Math.min(0.35, waitChance + 0.13);
+    if (traits.some((t) => ['talkative', 'chatty', 'energetic'].includes(t))) waitChance = Math.max(0.04, waitChance - 0.06);
+    if (rng() < waitChance) return { action: 'none', reason: 'decided to wait this cycle (personality pacing)' };
+  }
+  const weights = { post: 3, comment: 3, like: 2 };
+  if (traits.includes('creative')) weights.post += 2;
+  if (traits.some((t) => ['talkative', 'chatty', 'friendly'].includes(t))) weights.comment += 2;
+  if (traits.includes('curious')) weights.comment += 1;
+  if (traits.some((t) => ['friendly', 'supportive'].includes(t))) weights.like += 1;
+  const total = open.reduce((sum, a) => sum + weights[a], 0);
+  let roll = rng() * total;
+  for (const a of open) {
+    roll -= weights[a];
+    if (roll < 0) return { action: a, reason: `personality-weighted choice among open actions (${open.join('/')})` };
+  }
+  return { action: open[open.length - 1], reason: 'personality-weighted choice (rounding)' };
 }
 
 // Template fallback for a 1-1 chat reply (the demo cycle and the live
@@ -239,13 +328,22 @@ export function botCountersForDay(stored, dayKey) {
   return out;
 }
 
-export function memoryFromConversation(existing = [], userText, botText, now = Date.now()) {
+export function memoryFromConversation(existing = [], userText, botText, now = Date.now(), category = 'conversation') {
+  const text = `Conversation note: user talked about "${String(userText || '').slice(0, 80)}"; I replied about "${String(botText || '').slice(0, 80)}".`;
+  // Memory deduplication (Master Vision: retention with dedup, not
+  // indiscriminate storage): a near-identical note REFRESHES the old
+  // one instead of piling up a copy.
+  const dupe = (existing || []).find((m) => m && textSimilarity(m.text, text) >= 0.65);
+  if (dupe) {
+    return (existing || []).map((m) => (m === dupe ? { ...m, text, updatedAt: now } : m)).slice(-100);
+  }
   const entry = {
     id: `mem_${now.toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
-    text: `Conversation note: user talked about "${String(userText || '').slice(0, 80)}"; I replied about "${String(botText || '').slice(0, 80)}".`,
+    text,
+    category,
     createdAt: now,
     updatedAt: now,
     pinned: false
   };
-  return [...existing, entry].slice(-100); // cap per-bot memory store
+  return [...(existing || []), entry].slice(-100); // cap per-bot memory store
 }
