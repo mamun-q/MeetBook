@@ -16,6 +16,12 @@ function colMap(name) {
   return collections.get(name);
 }
 
+function snapJson(snap) {
+  return snap.docs
+    ? JSON.stringify(snap.docs.map((d) => [d.id, d.data()]))
+    : JSON.stringify([snap.id, snap.data()]);
+}
+
 function scheduleFlush(colName) {
   if (flushScheduled) return;
   flushScheduled = true;
@@ -23,7 +29,14 @@ function scheduleFlush(colName) {
     flushScheduled = false;
     for (const l of [...listeners]) {
       if (l.col !== colName) continue;
-      try { l.cb(snapshotFor(l)); } catch { /* listener errors are the app's problem */ }
+      const snap = snapshotFor(l);
+      // Firestore only delivers a snapshot when the listener's result
+      // actually changed — mirror that, so writes outside a query's
+      // result set (e.g. someone else's notification) don't re-fire it.
+      const json = snapJson(snap);
+      if (l.lastJson === json) continue;
+      l.lastJson = json;
+      try { l.cb(snap); } catch { /* listener errors are the app's problem */ }
     }
   });
 }
@@ -155,7 +168,11 @@ export async function getCountFromServer(q) {
 export function onSnapshot(ref, cb, errCb) {
   const l = { col: ref.__col, docId: ref.__id || null, constraints: ref.__constraints || [], cb, errCb };
   listeners.add(l);
-  queueMicrotask(() => { try { cb(snapshotFor(l)); } catch { /* ignore */ } });
+  queueMicrotask(() => {
+    const snap = snapshotFor(l);
+    l.lastJson = snapJson(snap);
+    try { cb(snap); } catch { /* ignore */ }
+  });
   return () => listeners.delete(l);
 }
 

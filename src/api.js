@@ -44,6 +44,16 @@ let localEchoPosts = [];
 // and the server copy side by side until the next listener event.
 let remergePosts = null;
 
+// Canonical JSON (object keys sorted at every depth) so two mapped
+// copies of the same Firestore document compare equal regardless of
+// the key order the document was written with.
+function stableStringify(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const keys = Object.keys(value).filter((k) => value[k] !== undefined).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
+}
+
 function emitData() {
   document.dispatchEvent(new CustomEvent('meetbook:data'));
 }
@@ -53,12 +63,15 @@ function emitData() {
 // so the optimistic change survives merges until the next snapshot
 // replaces it with server truth. Returns the post (or null when the
 // post is not mirrored / not in live mode).
-function patchRemotePost(postId, apply) {
+// opts.silent skips the emit: engagement actions (like/react/save/poll)
+// patch silently and main.js refreshes just that post's card in place —
+// a full-page re-render per tap reads as a screen shake on phones.
+function patchRemotePost(postId, apply, opts = {}) {
   if (!firebaseReady || !remote) return null;
   const post = remote.posts.find((p) => p.id === postId);
   if (!post) return null;
   apply(post);
-  emitData();
+  if (!opts.silent) emitData();
   return post;
 }
 
@@ -424,14 +437,39 @@ function startRemoteSync() {
   let ownPosts = [];
   let publicPosts = [];
   let audiencePosts = [];
-  const mergePosts = () => patch((r) => {
+  const mergePosts = () => {
     // Dedupe by id across the three listeners (a public post by a
     // friend matches two of them) plus the optimistic echo list; the
     // server copies come last so they replace their echoes.
     const delivered = new Set([...publicPosts, ...audiencePosts, ...ownPosts].map((p) => p.id));
     localEchoPosts = localEchoPosts.filter((p) => !delivered.has(p.id));
-    r.posts = mergePostLists(localEchoPosts, publicPosts, audiencePosts, ownPosts);
-  });
+    const next = mergePostLists(localEchoPosts, publicPosts, audiencePosts, ownPosts);
+    // Echo suppression: a snapshot that changes nothing — e.g. the
+    // server confirming my own like, which the optimistic patch
+    // already mirrored — must not emit: every emit is a full-page
+    // re-render, and on phones that rebuild reads as a screen shake.
+    // (Canonical stringify: key order must not defeat the compare.)
+    const prev = remote.posts || [];
+    const prevById = new Map(prev.map((p) => [p.id, p]));
+    // The three listeners deliver at slightly different moments: while
+    // one still holds a stale copy of a post, another may already hold
+    // the fresh one. If any copy matches the mirror, the mirror is
+    // consistent with a fresh snapshot — adopt the matching copy, so
+    // a slow listener can never revert an optimistic like mid-flight.
+    const copiesOf = (id) => [...localEchoPosts, ...publicPosts, ...audiencePosts, ...ownPosts].filter((p) => p && p.id === id);
+    const reconciled = next.map((p) => {
+      const current = prevById.get(p.id);
+      if (!current) return p;
+      if (stableStringify(p) === stableStringify(current)) return p;
+      // Skew case: another listener's copy already matches the mirror
+      // — adopt THAT copy (never the mirror object itself, so the
+      // mirror entry always stays a real list member that optimistic
+      // patches can mutate in place).
+      return copiesOf(p.id).find((c) => stableStringify(c) === stableStringify(current)) || p;
+    });
+    if (prev.length === reconciled.length && reconciled.every((p, i) => prev[i].id === p.id && stableStringify(prev[i]) === stableStringify(p))) return;
+    patch((r) => { r.posts = reconciled; });
+  };
   remergePosts = mergePosts;
   listen(query(collection(db, 'posts'), where('visibility', '==', 'public'), orderBy('createdAt', 'desc'), limit(100)),
     (snap) => { publicPosts = snap.docs.map(mapPost); mergePosts(); },
@@ -815,10 +853,10 @@ export async function toggleLike(postId) {
     // the same frame as the tap; roll back if the write fails.
     const applyLike = (p) => { p.likes = has ? (p.likes || []).filter((id) => id !== user.id) : [...(p.likes || []), user.id]; };
     const undoLike = (p) => { p.likes = has ? [...(p.likes || []), user.id] : (p.likes || []).filter((id) => id !== user.id); };
-    patchRemotePost(postId, applyLike);
+    patchRemotePost(postId, applyLike, { silent: true });
     try {
       await updateDoc(doc(db, 'posts', postId), { likes: has ? arrayRemove(user.id) : arrayUnion(user.id) });
-    } catch (err) { patchRemotePost(postId, undoLike); throw err; }
+    } catch (err) { patchRemotePost(postId, undoLike, { silent: true }); throw err; }
     if (!has && post) { try { await createNotification({ userId: post.authorId, type: 'like', actorId: user.id, text: `${user.name} liked your post.`, postId, conversationId: '', read: false, createdAt: Date.now() }); } catch { /* the like itself already succeeded */ } }
     return;
   }
@@ -837,10 +875,10 @@ export async function toggleReaction(postId, emoji) {
     const prevReactions = post ? { ...(post.reactions || {}) } : null;
     const reactions = { ...(post?.reactions || {}) };
     if (reactions[user.id] === emoji) delete reactions[user.id]; else reactions[user.id] = emoji;
-    patchRemotePost(postId, (p) => { p.reactions = reactions; });
+    patchRemotePost(postId, (p) => { p.reactions = reactions; }, { silent: true });
     try {
       await updateDoc(doc(db, 'posts', postId), { reactions });
-    } catch (err) { if (prevReactions) patchRemotePost(postId, (p) => { p.reactions = prevReactions; }); throw err; }
+    } catch (err) { if (prevReactions) patchRemotePost(postId, (p) => { p.reactions = prevReactions; }, { silent: true }); throw err; }
     return;
   }
   mutate((s) => {
@@ -858,10 +896,10 @@ export async function toggleSave(postId) {
     const has = post?.savedBy?.includes(user.id);
     const applySave = (p) => { p.savedBy = has ? (p.savedBy || []).filter((id) => id !== user.id) : [...(p.savedBy || []), user.id]; };
     const undoSave = (p) => { p.savedBy = has ? [...(p.savedBy || []), user.id] : (p.savedBy || []).filter((id) => id !== user.id); };
-    patchRemotePost(postId, applySave);
+    patchRemotePost(postId, applySave, { silent: true });
     try {
       await updateDoc(doc(db, 'posts', postId), { savedBy: has ? arrayRemove(user.id) : arrayUnion(user.id) });
-    } catch (err) { patchRemotePost(postId, undoSave); throw err; }
+    } catch (err) { patchRemotePost(postId, undoSave, { silent: true }); throw err; }
     return;
   }
   mutate((s) => {
@@ -883,10 +921,10 @@ export async function votePoll(postId, optionId) {
   const votes = castPollVote(post.poll, user.id, optionId);
   if (firebaseReady) {
     const prevPoll = post.poll;
-    patchRemotePost(postId, (p) => { p.poll = { options: prevPoll.options, votes }; });
+    patchRemotePost(postId, (p) => { p.poll = { options: prevPoll.options, votes }; }, { silent: true });
     try {
       await updateDoc(doc(db, 'posts', postId), { poll: { options: post.poll.options, votes } });
-    } catch (err) { patchRemotePost(postId, (p) => { p.poll = prevPoll; }); throw err; }
+    } catch (err) { patchRemotePost(postId, (p) => { p.poll = prevPoll; }, { silent: true }); throw err; }
     return;
   }
   mutate((s) => {

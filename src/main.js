@@ -5,7 +5,7 @@ import { firebaseReady, firebaseConfig } from './firebase.js';
 import { subscribe as storeSubscribe, mutate as demoMutate } from './store.js';
 import { setLocale, t } from './i18n.js';
 import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError, messageSnippet, focusMovesWithinForm, rsvpToastKey } from './utils.js';
-import { toast, clearToasts, openModal, closeModal, confirmModal, adminActionModal, avatarHtml } from './components.js';
+import { toast, clearToasts, openModal, closeModal, confirmModal, adminActionModal, avatarHtml, postCardHtml } from './components.js';
 import { providerById } from './aiProviders.js';
 import { cldImg } from './cloudinary.js';
 import * as V from './views.js';
@@ -599,6 +599,54 @@ async function handle(promise, successMsg) {
   }
 }
 
+// Engagement actions (like / react / save / poll vote) refresh ONLY the
+// tapped post card, in place. A full render() rebuilds the whole page —
+// and with the optimistic patch, handle() and the Firestore echo each
+// rendering too, one tap used to mean three full rebuilds, which on a
+// phone reads as the screen shaking. The api now patches the mirror
+// silently for these actions and the posts listener suppresses
+// no-change echoes, so this local refresh is the only paint.
+function refreshPostCard(postId) {
+  const old = document.querySelector(`article.post-card[data-post="${CSS.escape(postId)}"]`);
+  const d = api.data(); const user = me();
+  const post = d.posts.find((p) => p.id === postId);
+  if (!old || !post || !user) { render(); return; }
+  // Carry over anything typed into the card's comment/reply boxes and
+  // any open reply forms — the swap must never eat a draft.
+  const drafts = new Map(); const openReplies = new Set();
+  old.querySelectorAll('form').forEach((f) => {
+    const key = f.dataset.commentForm ? `c:${f.dataset.commentForm}` : f.dataset.replyForm ? `r:${f.dataset.replyForm}` : '';
+    const input = f.querySelector('input[name="text"]');
+    if (key && input && input.value) drafts.set(key, input.value);
+    if (f.dataset.replyForm && !f.classList.contains('hidden')) openReplies.add(f.dataset.replyForm);
+  });
+  const tpl = document.createElement('template');
+  tpl.innerHTML = postCardHtml(post, V.viewCtx(d, user)).trim();
+  const fresh = tpl.content.firstElementChild;
+  if (!fresh) { render(); return; }
+  old.replaceWith(fresh);
+  fresh.querySelectorAll('form').forEach((f) => {
+    const key = f.dataset.commentForm ? `c:${f.dataset.commentForm}` : f.dataset.replyForm ? `r:${f.dataset.replyForm}` : '';
+    const input = f.querySelector('input[name="text"]');
+    if (key && input && drafts.has(key)) input.value = drafts.get(key);
+    if (f.dataset.replyForm && openReplies.has(f.dataset.replyForm)) f.classList.remove('hidden');
+  });
+}
+
+async function engage(promise, postId, successMsg) {
+  refreshPostCard(postId); // the mirror is already patched optimistically — paint now
+  try {
+    const r = await promise;
+    if (successMsg) toast(successMsg, 'success');
+    refreshPostCard(postId);
+    return r;
+  } catch (err) {
+    toast(err.message || 'Something went wrong.', 'error');
+    refreshPostCard(postId); // the api rolled the mirror back — show the true state
+    return null;
+  }
+}
+
 function fileFrom(form, name) {
   const input = form.querySelector(`input[name="${name}"]`);
   return input?.files?.[0] || null;
@@ -895,13 +943,13 @@ document.addEventListener('click', async (e) => {
       await handle(api.resetPassword(email), 'Password reset email sent (check your inbox).');
       break;
     }
-    case 'like': await handle(api.toggleLike(postId)); break;
-    case 'poll-vote': await handle(api.votePoll(postId, actEl.dataset.option)); break;
+    case 'like': await engage(api.toggleLike(postId), postId); break;
+    case 'poll-vote': await engage(api.votePoll(postId, actEl.dataset.option), postId); break;
     case 'toggle-pin': { const pinned = await handle(api.togglePinPost(postId)); if (pinned !== null) toast(pinned ? 'Pinned as announcement.' : 'Announcement unpinned.', 'success'); break; }
     case 'dismiss-memories': V.uiState.memoriesDismissed = true; render(); break;
-    case 'react': await handle(api.toggleReaction(postId, actEl.dataset.emoji)); break;
+    case 'react': await engage(api.toggleReaction(postId, actEl.dataset.emoji), postId); break;
     case 'share': await handle(api.sharePost(postId), 'Post shared to your timeline.'); break;
-    case 'save-post': document.getElementById(`menu-${postId}`)?.classList.add('hidden'); await handle(api.toggleSave(postId), 'Saved list updated.'); break;
+    case 'save-post': document.getElementById(`menu-${postId}`)?.classList.add('hidden'); await engage(api.toggleSave(postId), postId, 'Saved list updated.'); break;
     case 'focus-comment': postEl?.querySelector('.comment-form input')?.focus(); break;
     case 'edit-post': {
       const post = d.posts.find((p) => p.id === postId);
