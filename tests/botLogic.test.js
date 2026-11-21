@@ -108,7 +108,9 @@ describe('templateBotMessageReply', () => {
   it('riffs on a mentioned interest', () => {
     const text = templateBotMessageReply(nova, 'tell me about space please');
     expect(text).toContain('space');
-    expect(text).toContain('AI bot');
+    // Natural Presence: the template reply no longer announces the bot
+    // as an AI unprompted.
+    expect(text).not.toContain('AI bot');
   });
   it('falls back to an introduction naming the bot and its topics', () => {
     const text = templateBotMessageReply(sage, 'hello there');

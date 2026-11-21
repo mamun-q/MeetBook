@@ -178,7 +178,8 @@ describe('live bot runner (Spark)', () => {
     const botPosts = fake.all('posts').filter((p) => p.authorId === 'bot_nova');
     const newest = botPosts[botPosts.length - 1];
     expect(newest.generatedBy).toBe('template-fallback');
-    expect(newest.text).toContain('AI Bot post ·');
+    // Natural Presence: bot posts are stored raw — no "AI Bot post ·" stamp.
+    expect(newest.text).not.toContain('AI Bot post ·');
     expect(newest.text).not.toContain(GEMINI_TEXT);
     await settle();
     expect(fake.get('botBrains', 'bot_nova').provider).toBe('template-fallback');

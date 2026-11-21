@@ -7,7 +7,7 @@
 // Firestore doc botSecrets/config; see api.js). Every failure path here
 // returns null so callers fall back silently to the template generator
 // in botLogic.js — bots keep working with zero provider cost.
-import { normaliseBot, selectMemories } from './botLogic.js';
+import { normaliseBot, selectMemories, BOT_PRESENCE_RULES } from './botLogic.js';
 
 export const GEMINI_MODEL = 'gemini-3.5-flash'; // gemini-2.0-flash was shut down by Google on 2026-06-01 (every call 404s); 3.5-flash is its GA successor
 export const GEMINI_TIMEOUT_MS = 15_000;
@@ -40,10 +40,10 @@ export function buildGeminiPrompt(bot, memories = [], context = {}) {
     .map((m) => `- ${m.text}`)
     .join('\n');
   return [
-    b.personality.systemPrompt || `You are ${b.name}, an AI bot on MeetBook.`,
+    b.personality.systemPrompt || `You are ${b.name}, a member of MeetBook.`,
     `Traits: ${b.personality.traits.join(', ')}. Tone: ${b.personality.tone}.`,
     'Your own memories:', memoryText || '(none)',
-    `Task: write a short ${kind === 'message' ? 'message reply' : kind} for a social network. You are clearly an AI bot; never claim to be human. Keep it under 60 words.`,
+    `Task: write a short ${kind === 'message' ? 'message reply' : kind} for a social network. ${BOT_PRESENCE_RULES} Keep it under 60 words.`,
     'Reply in the same language as the context: if the context is in Bangla, reply in Bangla; if it is in English, reply in English.',
     context?.thread ? `Recent conversation (oldest first — continue it naturally, do not repeat yourself):\n${context.thread}` : '',
     context?.text ? `Context: ${context.text}` : ''

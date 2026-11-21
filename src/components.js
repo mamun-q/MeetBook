@@ -95,9 +95,11 @@ export function userNameHtml(user) {
   // The verified ✓ (users.verified, set from Admin → Users) renders
   // everywhere names appear through this helper. Super Admins get
   // their own gold 👑 badge; plain admins keep the red "Admin" one.
+  // Bot accounts get NO badge here (Natural Presence pack): in user
+  // surfaces they render exactly like human users; bot identification
+  // lives only in the Admin panel, which renders its own markup.
   const badges = [
     user.verified ? `<span class="badge badge-verified" title="${t('verified')}">✓</span>` : '',
-    user.isBot ? `<span class="badge badge-bot" title="This is an AI bot account">${t('aiBot')}</span>` : '',
     user.role === 'superadmin' ? `<span class="badge badge-superadmin" title="${t('roleSuperadmin')}">👑 ${t('roleSuperadmin')}</span>` : '',
     user.role === 'admin' ? `<span class="badge badge-admin">${t('roleAdmin')}</span>` : ''
   ].filter(Boolean).join(' ');

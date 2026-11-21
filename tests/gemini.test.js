@@ -20,10 +20,15 @@ describe('buildGeminiPrompt (mirrors functions/botEngine.js gemini provider)', (
     expect(prompt).toContain('telescopes and exoplanets');
     expect(prompt).toContain('আমার নতুন টেলিস্কোপ কিনেছি!');
   });
-  it('states the task, the never-human rule, the word cap and the language rule', () => {
+  it('states the task, the natural-presence + direct-question honesty rules, the word cap and the language rule', () => {
     const prompt = buildGeminiPrompt(nova, memories, { kind: 'message', text: 'hello there' });
     expect(prompt).toContain('message reply');
-    expect(prompt).toContain('never claim to be human');
+    // Natural Presence: no unprompted AI announcement is instructed…
+    expect(prompt).toContain('Do NOT announce or volunteer that you are an AI');
+    expect(prompt).not.toContain('clearly an AI bot');
+    // …but a direct human/bot/AI question must get the honest answer.
+    expect(prompt).toContain('DIRECTLY asks whether you are human');
+    expect(prompt).toContain('Never claim to be human when directly asked');
     expect(prompt).toContain('under 60 words');
     expect(prompt).toContain('Bangla');
     expect(prompt).toContain('same language as the context');

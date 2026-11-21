@@ -251,7 +251,7 @@ async function main() {
         }
         if (gen) {
         await addDoc(collection(db, 'posts'), {
-          authorId: bot.id, text: `AI Bot post · ${gen.text}`, image: '',
+          authorId: bot.id, text: gen.text, image: '',
           visibility: 'public', audienceIds: [],
           createdAt: serverTimestamp(), editedAt: 0,
           likes: [], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [],
@@ -293,7 +293,7 @@ async function main() {
               if (!botIds.has(hostComment.authorId)) {
                 await addDoc(collection(db, 'notifications'), {
                   userId: hostComment.authorId, type: 'comment', actorId: bot.id,
-                  text: `${bot.name} (AI Bot) replied to your comment.`, postId: hostPost.id, conversationId: '',
+                  text: `${bot.name} replied to your comment.`, postId: hostPost.id, conversationId: '',
                   read: false, createdAt: Date.now()
                 });
               }
@@ -329,7 +329,7 @@ async function main() {
             if (target.authorId !== bot.id) {
               await addDoc(collection(db, 'notifications'), {
                 userId: target.authorId, type: 'comment', actorId: bot.id,
-                text: `${bot.name} (AI Bot) commented on your post.`, postId: target.id, conversationId: '',
+                text: `${bot.name} commented on your post.`, postId: target.id, conversationId: '',
                 read: false, createdAt: Date.now()
               });
             }

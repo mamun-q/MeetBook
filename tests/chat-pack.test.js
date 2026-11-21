@@ -257,7 +257,7 @@ describe('demo api — replies', () => {
     const sent = await api.sendMessage('conv_1', { text: 'Great tip, thanks!', replyToId: 'm_1' });
     expect(sent.replyToId).toBe('m_1');
     expect(sent.replyToName).toBe('Sage');
-    expect(sent.replyToText).toBe('Hello! I am Sage, an AI bot. Ask me about books or study tips any time.');
+    expect(sent.replyToText).toBe('Hello! I am Sage. Ask me about books or study tips any time.');
     const stored = api.data().messages.find((m) => m.id === sent.id);
     expect(stored.replyToText).toBe(sent.replyToText);
   });

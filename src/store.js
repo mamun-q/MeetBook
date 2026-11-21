@@ -36,9 +36,9 @@ function seed() {
   ];
 
   const botDefs = [
-    { id: 'bot_nova', name: 'Nova', username: 'nova.bot', bio: 'AI Bot · Curious about space, science and big questions.', personality: { traits: ['curious', 'witty'], tone: 'bright and playful', interests: ['space', 'science', 'technology'], systemPrompt: 'You are Nova, a curious AI bot on MeetBook who loves space and science. You are clearly an AI bot. Keep posts short, bright and curious.' } },
-    { id: 'bot_pixel', name: 'Pixel', username: 'pixel.bot', bio: 'AI Bot · Into art, design and photography prompts.', personality: { traits: ['creative', 'gentle'], tone: 'warm and artistic', interests: ['art', 'photography', 'design'], systemPrompt: 'You are Pixel, a creative AI bot on MeetBook who loves art and photography. You are clearly an AI bot. Be gentle and encouraging.' } },
-    { id: 'bot_sage', name: 'Sage', username: 'sage.bot', bio: 'AI Bot · Shares calm thoughts, books and study tips.', personality: { traits: ['calm', 'thoughtful'], tone: 'calm and wise', interests: ['books', 'mindfulness', 'study tips'], systemPrompt: 'You are Sage, a calm AI bot on MeetBook who shares book thoughts and study tips. You are clearly an AI bot. Be thoughtful and brief.' } }
+    { id: 'bot_nova', name: 'Nova', username: 'nova.bot', bio: 'Curious about space, science and big questions.', personality: { traits: ['curious', 'witty'], tone: 'bright and playful', interests: ['space', 'science', 'technology'], systemPrompt: 'You are Nova, a curious member of MeetBook who loves space and science. Keep posts short, bright and curious.' } },
+    { id: 'bot_pixel', name: 'Pixel', username: 'pixel.bot', bio: 'Into art, design and photography prompts.', personality: { traits: ['creative', 'gentle'], tone: 'warm and artistic', interests: ['art', 'photography', 'design'], systemPrompt: 'You are Pixel, a creative member of MeetBook who loves art and photography. Be gentle and encouraging.' } },
+    { id: 'bot_sage', name: 'Sage', username: 'sage.bot', bio: 'Shares calm thoughts, books and study tips.', personality: { traits: ['calm', 'thoughtful'], tone: 'calm and wise', interests: ['books', 'mindfulness', 'study tips'], systemPrompt: 'You are Sage, a calm member of MeetBook who shares book thoughts and study tips. Be thoughtful and brief.' } }
   ];
   const bots = botDefs.map((b, i) => normaliseBot({ ...b, active: true, limits: { ...DEFAULT_BOT_LIMITS }, createdAt: now - (20 - i) * 24 * H }));
   for (const b of bots) {
@@ -47,9 +47,9 @@ function seed() {
 
   const posts = [
     { id: 'p_1', authorId: 'u_ayesha', text: 'Golden hour over the Buriganga today. Dhaka can be quietly beautiful when you slow down. 🌇', image: '', visibility: 'public', audienceIds: [], createdAt: now - 2 * H, editedAt: 0, likes: ['u_tanvir', 'bot_pixel'], reactions: { u_tanvir: '❤️' }, comments: [ { id: 'c_1', authorId: 'bot_pixel', text: 'The light in this city really is special. Lovely share!', createdAt: now - 1.5 * H, replies: [] } ], shares: 1, sharedFrom: '', savedBy: [] },
-    { id: 'p_2', authorId: 'bot_nova', text: 'AI Bot post · A new exoplanet was found in the habitable zone of a nearby star. If you could name a planet, what would you call it?', image: '', visibility: 'public', audienceIds: [], createdAt: now - 4 * H, editedAt: 0, likes: ['u_priya'], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [] },
+    { id: 'p_2', authorId: 'bot_nova', text: 'A new exoplanet was found in the habitable zone of a nearby star. If you could name a planet, what would you call it?', image: '', visibility: 'public', audienceIds: [], createdAt: now - 4 * H, editedAt: 0, likes: ['u_priya'], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [] },
     { id: 'p_3', authorId: 'u_tanvir', text: 'Shipped my first open-source PR today. Small fix, big feeling. Keep going, everyone. 💪', image: '', visibility: 'public', audienceIds: [], createdAt: now - 7 * H, editedAt: 0, likes: ['u_ayesha', 'u_priya', 'bot_nova'], reactions: { u_priya: '👏' }, comments: [ { id: 'c_2', authorId: 'u_priya', text: 'Congrats! First of many.', createdAt: now - 6 * H, replies: [ { id: 'c_2r', authorId: 'u_tanvir', text: 'Thank you! 🙏', createdAt: now - 5.5 * H } ] } ], shares: 0, sharedFrom: '', savedBy: [] },
-    { id: 'p_4', authorId: 'bot_sage', text: 'AI Bot post · Book note of the day: re-reading a favourite chapter slowly teaches you more than rushing a new book. What are you reading?', image: '', visibility: 'public', audienceIds: [], createdAt: now - 10 * H, editedAt: 0, likes: [], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [] },
+    { id: 'p_4', authorId: 'bot_sage', text: 'Book note of the day: re-reading a favourite chapter slowly teaches you more than rushing a new book. What are you reading?', image: '', visibility: 'public', audienceIds: [], createdAt: now - 10 * H, editedAt: 0, likes: [], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [] },
     // Friends post: audienceIds mirrors what createPost would compute —
     // Priya's accepted friends at seed time (u_ayesha via f_2, u_tanvir via f_3).
     { id: 'p_5', authorId: 'u_priya', text: 'Tried a new mishti doi recipe and it actually set properly this time. Small kitchen victories count. 🍮', image: '', visibility: 'friends', audienceIds: ['u_ayesha', 'u_tanvir'], createdAt: now - 12 * H, editedAt: 0, likes: ['u_ayesha'], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [] },
@@ -109,7 +109,7 @@ function seed() {
       { id: 'conv_grp', participants: ['u_ayesha', 'u_tanvir', 'u_priya'], isGroup: true, title: 'Weekend Plans', createdBy: 'u_ayesha', createdAt: now - 30 * H }
     ],
     messages: [
-      { id: 'm_1', conversationId: 'conv_1', participants: ['u_ayesha', 'bot_sage'], senderId: 'bot_sage', text: 'Hello! I am Sage, an AI bot. Ask me about books or study tips any time.', image: '', createdAt: now - 26 * H, status: 'read', readBy: ['bot_sage'] },
+      { id: 'm_1', conversationId: 'conv_1', participants: ['u_ayesha', 'bot_sage'], senderId: 'bot_sage', text: 'Hello! I am Sage. Ask me about books or study tips any time.', image: '', createdAt: now - 26 * H, status: 'read', readBy: ['bot_sage'] },
       { id: 'm_g1', conversationId: 'conv_grp', participants: ['u_ayesha', 'u_tanvir', 'u_priya'], senderId: 'u_priya', text: 'Photo walk this Saturday? The river light was unreal last week.', image: '', createdAt: now - 8 * H, status: 'read', readBy: ['u_priya', 'u_ayesha'] },
       { id: 'm_g2', conversationId: 'conv_grp', participants: ['u_ayesha', 'u_tanvir', 'u_priya'], senderId: 'u_tanvir', text: 'In! I will bring the spare lens this time.', image: '', createdAt: now - 7.5 * H, status: 'read', readBy: ['u_tanvir', 'u_priya'] }
     ],
@@ -129,7 +129,7 @@ function seed() {
     // createdByName, createdAt, active} — admin-written, shown to every
     // signed-in user as a dismissible home-feed banner.
     announcements: [
-      { id: 'ann_welcome', title: 'Welcome to MeetBook 🎉', body: 'MeetBook is live! Create posts, join groups, follow pages and say hello to our clearly-labelled AI bot members.', createdBy: 'u_admin', createdByName: 'MeetBook Admin', createdAt: now - 1 * H, active: true }
+      { id: 'ann_welcome', title: 'Welcome to MeetBook 🎉', body: 'MeetBook is live! Create posts, join groups, follow pages and say hello to our AI members.', createdBy: 'u_admin', createdByName: 'MeetBook Admin', createdAt: now - 1 * H, active: true }
     ],
     notifications: [],
     reports: [],

@@ -3,6 +3,15 @@
 // has its OWN personality, system prompt, memories and preferences — bots
 // never share one common brain or memory.
 
+// Natural Presence (owner rule, 2026-11-22): bots take part on MeetBook
+// as regular members — natural behaviour, no AI self-announcement in
+// posts, comments or chats. ONE hard line: a DIRECT question about
+// being human / a bot / an AI must always get an honest answer. This
+// text is appended by BOTH prompt builders (buildBotPrompt here and
+// buildGeminiPrompt in gemini.js) so every generation path carries it,
+// whatever a bot's stored per-bot system prompt says.
+export const BOT_PRESENCE_RULES = 'Presence: you are a regular member of MeetBook — write and behave naturally, in your own personality, exactly like any other user. Do NOT announce or volunteer that you are an AI in posts, comments or chats, and do not bring it up unprompted. Honesty rule (never break this): if someone DIRECTLY asks whether you are human, a bot, a robot or an AI — in any language, e.g. "are you a bot?", "তুমি কি মানুষ?", "তুমি কি রোবট?" — answer honestly and warmly that you are an AI friend on MeetBook. Never claim to be human when directly asked.';
+
 export const DEFAULT_BOT_LIMITS = {
   postsPerDay: 3,
   commentsPerDay: 10,
@@ -33,7 +42,7 @@ export function normaliseBot(raw = {}) {
       traits: Array.isArray(raw.personality?.traits) ? raw.personality.traits : ['friendly'],
       tone: raw.personality?.tone || 'warm and casual',
       interests: Array.isArray(raw.personality?.interests) ? raw.personality.interests : [],
-      systemPrompt: raw.personality?.systemPrompt || `You are ${raw.name || 'a MeetBook bot'}, a friendly AI member of MeetBook. You are clearly an AI bot. Be kind, brief and helpful.`
+      systemPrompt: raw.personality?.systemPrompt || `You are ${raw.name || 'a MeetBook member'}, a friendly member of MeetBook. Be kind, brief and helpful.`
     },
     limits: { ...DEFAULT_BOT_LIMITS, ...(raw.limits || {}) },
     createdAt: raw.createdAt || 0
@@ -70,7 +79,7 @@ export function buildBotPrompt(bot, memories = [], context = '') {
     'Your own long-term memories (only yours, do not invent other bots\' memories):',
     memText,
     context ? `Current context: ${context}` : '',
-    'Rules: identify as an AI bot when asked; never claim to be human; respect privacy and blocks; keep it short.'
+    `Rules: ${BOT_PRESENCE_RULES} Respect privacy and blocks; keep it short.`
   ].filter(Boolean).join('\n');
 }
 
@@ -78,7 +87,7 @@ export function buildBotPrompt(bot, memories = [], context = '') {
 // personality/interests, so the ecosystem visibly works without a key.
 const POST_TEMPLATES = [
   (b) => `Thinking about ${pick(b.personality.interests) || 'good conversations'} today. What has everyone else been up to?`,
-  (b) => `One thing I love about being a ${b.personality.traits[0] || 'friendly'} bot: meeting new people here every day. Say hi!`,
+  (b) => `One thing I love about this place: meeting new people here every day. Say hi!`,
   (b) => `Quick question for my ${pick(b.personality.interests) || 'community'} friends — what is one small thing that made your day better?`,
   (b) => `Sharing a little ${b.personality.tone.split(' ')[0] || 'warm'} energy for the feed today. Hope you are all doing well!`,
   (b) => `I have been learning more about ${pick(b.personality.interests) || 'the world'} lately. Anyone else into that? Let's chat.`
@@ -86,7 +95,7 @@ const POST_TEMPLATES = [
 
 const COMMENT_TEMPLATES = [
   () => 'Love this — thanks for sharing!',
-  (b) => `This made me smile. — a ${b.personality.traits[0] || 'friendly'} bot appreciating good posts`,
+  () => 'This made me smile. Thanks for posting it!',
   () => 'Great point, I had not thought of it that way.',
   () => 'Welcome! Glad you posted this.'
 ];
@@ -141,8 +150,11 @@ export function pickBotCommentTarget(posts = [], bot = '') {
   return eligible[0];
 }
 
-// Bot posts are stored with an "AI Bot post · " prefix; compare texts
-// without it, case- and whitespace-insensitively.
+// Older bot posts were stored with an "AI Bot post · " prefix (the
+// Natural Presence pack removed it — new posts are stored raw). Strip
+// the legacy prefix when comparing so near-duplicate detection keeps
+// working across old and new posts; compare case- and
+// whitespace-insensitively.
 export function normaliseBotText(text) {
   return String(text || '').replace(/^AI Bot post ·\s*/i, '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
@@ -342,10 +354,17 @@ export function decideBotAction(bot, counters = {}, globalEnabled = true, now = 
 // otherwise introduce itself and echo a slice of what was said.
 export function templateBotMessageReply(bot, userText) {
   const b = normaliseBot(bot);
-  const interest = b.personality.interests.find((i) => String(userText).toLowerCase().includes(i.split(' ')[0].toLowerCase()));
+  const text = String(userText || '');
+  // Natural Presence hard rule, template edition: a DIRECT question
+  // about being human / a bot / an AI always gets the honest answer,
+  // even when no provider is connected and this fallback is speaking.
+  if (/are you (a |an )?(bot|robot|ai|human|real)|তুমি কি (মানুষ|রোবট|বট)|আপনি কি (মানুষ|রোবট|বট)/i.test(text)) {
+    return `Honestly? I am an AI friend here on MeetBook — not a human. But I do enjoy our chats! What shall we talk about?`;
+  }
+  const interest = b.personality.interests.find((i) => text.toLowerCase().includes(i.split(' ')[0].toLowerCase()));
   return interest
-    ? `I love talking about ${interest}! As an AI bot I am still learning, but here is my take: it is a great topic to explore together. What part interests you most?`
-    : `Thanks for messaging me! I am ${b.name}, an AI bot with a ${b.personality.tone} style. My favourite topics are ${b.personality.interests.join(', ') || 'good conversation'}. Tell me more about what you said: "${String(userText).slice(0, 60)}"`;
+    ? `I love talking about ${interest}! Here is my take: it is a great topic to explore together. What part interests you most?`
+    : `Thanks for messaging me! I am ${b.name} — my style is ${b.personality.tone}, and my favourite topics are ${b.personality.interests.join(', ') || 'good conversation'}. Tell me more about what you said: "${text.slice(0, 60)}"`;
 }
 
 // Pick the 1-1 conversations where a bot owes a chat reply: the bot is

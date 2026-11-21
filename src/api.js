@@ -3338,7 +3338,7 @@ export async function runDemoBotCycle() {
       const { bot, counters } = entry;
       if (entry.action === 'post' && entry.gen) {
         const text = entry.gen.text;
-        st.posts.unshift({ id: genId('p'), authorId: bot.id, text: `AI Bot post · ${text}`, image: '', visibility: 'public', audienceIds: [], createdAt: Date.now(), editedAt: 0, likes: [], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [], groupId: '', pageId: '', pageName: '', pageAvatar: '', generatedBy: entry.gen.provider });
+        st.posts.unshift({ id: genId('p'), authorId: bot.id, text, image: '', visibility: 'public', audienceIds: [], createdAt: Date.now(), editedAt: 0, likes: [], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [], groupId: '', pageId: '', pageName: '', pageAvatar: '', generatedBy: entry.gen.provider });
         counters.postsToday += 1;
         st.botMemories[bot.id] = memoryFromActivity(st.botMemories[bot.id] || [], bot, { kind: 'post', text });
         st.botActivities.unshift({ id: genId('act'), botId: bot.id, action: 'post', detail: text.slice(0, 90), createdAt: Date.now(), status: 'ok' });
@@ -3354,7 +3354,7 @@ export async function runDemoBotCycle() {
             st.botActivities.unshift({ id: genId('act'), botId: bot.id, action: 'comment', detail: text.slice(0, 90), createdAt: Date.now(), status: 'ok' });
             const author = st.users.find((u) => u.id === entry.replyTo.authorId);
             if (author && !author.isBot) {
-              st.notifications.unshift({ id: genId('n'), userId: author.id, type: 'comment', actorId: bot.id, text: `${bot.name} (AI Bot) replied to your comment.`, postId: hostPost.id, conversationId: '', read: false, createdAt: Date.now() });
+              st.notifications.unshift({ id: genId('n'), userId: author.id, type: 'comment', actorId: bot.id, text: `${bot.name} replied to your comment.`, postId: hostPost.id, conversationId: '', read: false, createdAt: Date.now() });
             }
           }
         } else {
@@ -3366,7 +3366,7 @@ export async function runDemoBotCycle() {
             st.botActivities.unshift({ id: genId('act'), botId: bot.id, action: 'comment', detail: text.slice(0, 90), createdAt: Date.now(), status: 'ok' });
             const author = st.users.find((u) => u.id === target.authorId);
             if (author && !author.isBot) {
-              st.notifications.unshift({ id: genId('n'), userId: author.id, type: 'comment', actorId: bot.id, text: `${bot.name} (AI Bot) commented on your post.`, postId: target.id, conversationId: '', read: false, createdAt: Date.now() });
+              st.notifications.unshift({ id: genId('n'), userId: author.id, type: 'comment', actorId: bot.id, text: `${bot.name} commented on your post.`, postId: target.id, conversationId: '', read: false, createdAt: Date.now() });
             }
           }
         }
@@ -3684,7 +3684,7 @@ export async function runLiveBotCycle() {
           // so the provable feed listeners pick the post up.
           const audience = postAudience({ visibility: 'public', authorFriendIds: friendIdsFromData(bot.id), authorCloseFriendIds: [] });
           await addDoc(collection(db, 'posts'), {
-            authorId: bot.id, text: `AI Bot post · ${gen.text}`, image: '',
+            authorId: bot.id, text: gen.text, image: '',
             visibility: audience.visibility, audienceIds: audience.audienceIds,
             createdAt: serverTimestamp(), editedAt: 0,
             likes: [], reactions: {}, comments: [], shares: 0, sharedFrom: '', savedBy: [],
@@ -3730,7 +3730,7 @@ export async function runLiveBotCycle() {
           if (!botIds.has(hostComment.authorId)) {
                   await createNotification({
                     userId: hostComment.authorId, type: 'comment', actorId: bot.id,
-                    text: `${bot.name} (AI Bot) replied to your comment.`, postId: hostPost.id, conversationId: '',
+                    text: `${bot.name} replied to your comment.`, postId: hostPost.id, conversationId: '',
                     read: false, createdAt: Date.now()
                   });
                 }
@@ -3762,7 +3762,7 @@ export async function runLiveBotCycle() {
           if (actMem !== memories) { try { await setDoc(doc(db, 'botMemories', bot.id), { botId: bot.id, items: actMem }); memories = actMem; } catch { /* best-effort */ } }
           await createNotification({
                 userId: target.authorId, type: 'comment', actorId: bot.id,
-                text: `${bot.name} (AI Bot) commented on your post.`, postId: target.id, conversationId: '',
+                text: `${bot.name} commented on your post.`, postId: target.id, conversationId: '',
                 read: false, createdAt: Date.now()
               });
               actions += 1;
