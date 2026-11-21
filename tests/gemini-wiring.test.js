@@ -49,7 +49,15 @@ describe('Gemini free wiring (demo-mode generation path)', () => {
     await api.saveGeminiApiKey('TEST_KEY_123');
     expect(api.data().botSecrets.geminiApiKey).toBe('TEST_KEY_123');
     const fetchFn = stubFetchOk();
-    const r = await api.runDemoBotCycle();
+    // Decision Engine v2 picks by personality weight — pin the rng so
+    // the cycle deterministically chooses the post action.
+    const rngSpy = vi.spyOn(Math, 'random').mockReturnValue(0.05);
+    let r;
+    try {
+      r = await api.runDemoBotCycle();
+    } finally {
+      rngSpy.mockRestore();
+    }
     expect(r.ran).toBe(true);
     expect(fetchFn).toHaveBeenCalled();
     const botPost = store.getState().posts.find((p) => p.authorId === 'bot_nova');
@@ -69,7 +77,17 @@ describe('Gemini free wiring (demo-mode generation path)', () => {
   it('falls back to template text (and logs a warning) when Gemini fails', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
     const before = store.getState().posts.length;
-    const r = await api.runDemoBotCycle();
+    // Pin the Decision Engine v2 rng: pass the pacing roll, then land
+    // in the post band, so Nova's action is deterministically a post.
+    const seq = [0.99, 0.05];
+    let rollIdx = 0;
+    const rngSpy = vi.spyOn(Math, 'random').mockImplementation(() => seq[rollIdx++ % seq.length]);
+    let r;
+    try {
+      r = await api.runDemoBotCycle();
+    } finally {
+      rngSpy.mockRestore();
+    }
     expect(r.ran).toBe(true);
     const posts = store.getState().posts;
     expect(posts.length).toBeGreaterThan(before);
