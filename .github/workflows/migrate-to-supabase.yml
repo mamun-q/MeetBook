@@ -1,0 +1,35 @@
+name: Migrate Firestore to Supabase (one-off)
+
+# One-off Phase 5 migration: dumps every Firestore collection using the
+# MeetBook Official admin login (RUNNER_EMAIL/RUNNER_PASSWORD), then imports
+# it into Supabase with the one-off service key (SUPABASE_SERVICE_KEY).
+# OFFICIAL_PASSWORD / TEST_PASSWORD reuse the existing RUNNER_PASSWORD /
+# QA_PASSWORD secrets. The service key is used ONLY by this workflow run
+# and is never printed. Delete this workflow after the migration is done.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: npm ci || npm install
+      - name: Export Firestore
+        env:
+          RUNNER_EMAIL: ${{ secrets.RUNNER_EMAIL }}
+          RUNNER_PASSWORD: ${{ secrets.RUNNER_PASSWORD }}
+        run: node runner/export-firestore.mjs
+      - name: Import to Supabase
+        env:
+          SUPABASE_URL: https://ouyuijpxhhvtnxnvavza.supabase.co
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          OFFICIAL_PASSWORD: ${{ secrets.RUNNER_PASSWORD }}
+          TEST_PASSWORD: ${{ secrets.QA_PASSWORD }}
+        run: node runner/import-to-supabase.mjs
