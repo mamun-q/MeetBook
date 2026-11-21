@@ -221,6 +221,7 @@ export function render() {
     case 'page': body = V.pageView(d, user, seg[1] || ''); break;
     case 'messages': body = V.messagesView(d, user, seg[1] || ''); setTimeout(setupThread, 30); break;
     case 'notifications': body = V.notificationsView(d, user); break;
+    case 'support': body = V.supportInboxView(d, user); break;
     case 'profile': body = V.profileView(d, user, seg[1] || user.id); break;
     case 'search': body = V.searchView(d, user, query.get('q') || ''); break;
     case 'saved': body = V.savedView(d, user); break;
@@ -1084,6 +1085,7 @@ document.addEventListener('click', async (e) => {
       else if (actEl.dataset.group) location.hash = `#/group/${actEl.dataset.group}`;
       else if (actEl.dataset.page) location.hash = `#/page/${actEl.dataset.page}`;
       else if (actEl.dataset.event) location.hash = '#/events';
+      else if (n && ['report_decision', 'moderation_notice', 'appeal_decision', 'warning'].includes(n.type)) location.hash = '#/support';
       else if (n?.type === 'friend_request') location.hash = '#/friends';
       else if ((n?.type === 'follow' || n?.type === 'friend_accept') && actEl.dataset.actor) location.hash = `#/profile/${actEl.dataset.actor}`;
       else if (n && (n.type === 'group_join' || n.type === 'group_request' || n.type === 'group_request_result')) location.hash = '#/groups';
@@ -1190,6 +1192,16 @@ document.addEventListener('click', async (e) => {
       const appealStatus = actEl.dataset.appeal;
       const r = await adminActionModal({ title: `${t('appealLabel')} — ${appealStatus}`, body: t('appealNoRestore'), confirmLabel: t('appealLabel'), danger: false });
       if (r) await handle(api.adminSetReportAppeal(actEl.dataset.id, appealStatus, r.reason), 'Appeal updated.');
+      break;
+    }
+    // ---- Support Inbox (user side): the author of acted-on content
+    // files their one appeal; api.appealReport re-checks ownership,
+    // decision state and the one-appeal rule.
+    case 'support-appeal-open': {
+      const rep = (d.reports || []).find((x) => x.id === actEl.dataset.id) || (d.supportReports || []).find((x) => x.id === actEl.dataset.id);
+      if (!rep) break;
+      const modal = openModal(V.supportAppealFormHtml(rep));
+      modal.querySelector('[data-close]').onclick = closeModal;
       break;
     }
     // ---- Content moderation (Pack B): delete post/comment with a
@@ -1326,6 +1338,11 @@ document.addEventListener('submit', async (e) => {
       outcome: String(fd.get('outcome') || 'none'),
       reason: String(fd.get('reason') || '').trim()
     }), 'Report resolved.');
+    if (r !== null) closeModal();
+    return;
+  }
+  if (form.id === 'support-appeal-form') {
+    const r = await handle(api.appealReport(form.dataset.id, String(fd.get('text') || '').trim()), 'Appeal sent — our team will review it.');
     if (r !== null) closeModal();
     return;
   }

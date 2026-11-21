@@ -471,11 +471,29 @@ service cloud.firestore {
     // 'escalated' via the update branch. The Pack B fields (category,
     // decision, appeal, evidence) ride the same branches — no other
     // field is pinned, so they need no rule change.
+    // Support Inbox (2026-11-21): a signed-in user may also READ a
+    // report they filed (reporterId) or one about their own content
+    // (targetAuthorId, stamped onto the report at creation) — the
+    // inbox runs exactly those two single-field queries — and may
+    // UPDATE only the appeal object on such a report: only after a
+    // decision that took action on their content, only from appeal
+    // status 'none' to their own 'requested' (one appeal per decision,
+    // no other field may change).
     match /reports/{id} {
-      allow read: if isModerator();
+      allow read: if isModerator()
+        || (signedIn() && resource.data.reporterId == request.auth.uid)
+        || (signedIn() && resource.data.targetAuthorId == request.auth.uid);
       allow create: if signedIn() && request.resource.data.reporterId == request.auth.uid
         && request.resource.data.status == 'pending';
-      allow update: if isModerator();
+      allow update: if isModerator()
+        || (signedIn()
+          && resource.data.targetAuthorId == request.auth.uid
+          && resource.data.decision != null
+          && resource.data.decision.outcome != 'none'
+          && resource.data.appeal.status == 'none'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['appeal'])
+          && request.resource.data.appeal.status == 'requested'
+          && request.resource.data.appeal.byId == request.auth.uid);
       allow delete: if isAdmin();
     }
 

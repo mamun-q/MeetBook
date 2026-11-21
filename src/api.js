@@ -138,7 +138,7 @@ export function isAdmin(user = me()) {
 function blankRemote() {
   return {
     users: [], sessionUid: '', posts: [], stories: [], groups: [], pages: [], friendships: [], blocks: [],
-    conversations: [], messages: [], notifications: [], reports: [], adminLogs: [], events: [], reviews: [], groupRequests: [],
+    conversations: [], messages: [], notifications: [], reports: [], supportReports: [], adminLogs: [], events: [], reviews: [], groupRequests: [],
     bots: [], botBrains: {}, botMemories: {}, botActivities: [], botLogs: [], botDecisions: {},
     announcements: [], // Pack C: platform announcements (admin-written, all read)
     botConvMeta: {}, // Pack C: per-bot conversation metadata (loadBotAdminData)
@@ -599,6 +599,24 @@ function startRemoteSync() {
       () => { /* listener rejected — leave the mirrored set untouched */ });
     listen(query(collection(db, 'groupRequests'), where('groupOwnerId', '==', remoteUid)),
       (snap) => { ownedGroupRequests = snap.docs.map(mapGroupRequest); mergeGroupRequests(); },
+      () => { /* listener rejected — leave the mirrored set untouched */ });
+    // Support Inbox: two provable listeners merged by id — reports I
+    // filed (reporterId == me) and reports about my content
+    // (targetAuthorId == me, stamped at creation). The staff-wide
+    // reports listener below stays moderator-only under the rules.
+    let myFiledReports = [];
+    let myNoticeReports = [];
+    const mergeSupportReports = () => patch((r) => {
+      const byIdMap = new Map();
+      for (const x of [...myFiledReports, ...myNoticeReports]) byIdMap.set(x.id, x);
+      r.supportReports = [...byIdMap.values()];
+    });
+    const mapSupportReport = (d) => ({ id: d.id, ...normaliseTimeFields(d.data(), ['createdAt']) });
+    listen(query(collection(db, 'reports'), where('reporterId', '==', remoteUid)),
+      (snap) => { myFiledReports = snap.docs.map(mapSupportReport); mergeSupportReports(); },
+      () => { /* listener rejected — leave the mirrored set untouched */ });
+    listen(query(collection(db, 'reports'), where('targetAuthorId', '==', remoteUid)),
+      (snap) => { myNoticeReports = snap.docs.map(mapSupportReport); mergeSupportReports(); },
       () => { /* listener rejected — leave the mirrored set untouched */ });
     listen(query(collection(db, 'friendships'), where('from', '==', remoteUid)),
       (snap) => { friendshipsFrom = snap.docs.map(mapFriendship); mergeFriendships(); },
@@ -1106,6 +1124,12 @@ export async function reportContent(targetType, targetId, reason, opts = {}) {
       conversationId: msg?.conversationId || ''
     };
   }
+  // Stamp the content author onto the report itself: the author's
+  // Support Inbox finds it with a single-field query, and the stamp
+  // must happen NOW — content removal is a hard delete, so by the
+  // time a decision lands the post/message doc no longer exists to
+  // derive the author from.
+  report.targetAuthorId = reportTargetUserId(report) || '';
   if (firebaseReady) { await addDoc(collection(db, 'reports'), report); return report; }
   let saved = null;
   mutate((s) => { saved = { id: genId('rep'), ...report }; s.reports.unshift(saved); });
@@ -2453,12 +2477,37 @@ async function sendModerationWarning(userId, actor, reason) {
 // The user a report decision acts on: the reported user themselves, the
 // author of a reported post, or the sender of a reported message
 // (from the evidence snapshot — never by reading the conversation).
+// The author stamped at creation wins: after a hard delete the target
+// document is gone and derivation would return ''.
 function reportTargetUserId(rep) {
   if (!rep) return '';
+  if (rep.targetAuthorId) return rep.targetAuthorId;
   if (rep.targetType === 'user') return rep.targetId;
   if (rep.targetType === 'post') return data().posts.find((p) => p.id === rep.targetId)?.authorId || '';
   if (rep.targetType === 'message') return rep.evidence?.senderId || '';
   return '';
+}
+
+// Staff read the full reports mirror; ordinary users only ever hold
+// their Support Inbox slice (supportReports). Decision/appeal code
+// looks in both so it works for whoever is signed in.
+function findReport(reportId) {
+  const d = data();
+  return (d.reports || []).find((r) => r.id === reportId)
+    || (d.supportReports || []).find((r) => r.id === reportId)
+    || null;
+}
+
+// Support Inbox doorbell: same dual-mode pattern as moderation
+// warnings — live writes go through createNotification (which also
+// suppresses self-notifications), demo through the store's notify().
+async function sendSupportNotification(userId, actor, type, text) {
+  if (!userId || userId === actor.id) return;
+  if (firebaseReady) {
+    await createNotification({ userId, type, actorId: actor.id, text, postId: '', conversationId: '', read: false, createdAt: Date.now() });
+    return;
+  }
+  notify(userId, type, actor.id, text);
 }
 
 async function writeReportPatch(reportId, patch) {
@@ -2477,10 +2526,14 @@ async function writeReportPatch(reportId, patch) {
 export async function adminDecideReport(reportId, decision, { reason = '', outcome = 'none' } = {}) {
   const actor = me();
   if (!actor || !canModerate(actor)) throw new Error('Moderators only.');
-  const rep = data().reports.find((r) => r.id === reportId);
+  const rep = findReport(reportId);
   if (!rep) throw new Error('Report not found.');
   if (!['review', 'resolve', 'reject', 'escalate'].includes(decision)) throw new Error('Unknown decision.');
   const finalOutcome = decision === 'resolve' && ['content-removed', 'user-warned', 'user-suspended'].includes(outcome) ? outcome : 'none';
+  // Capture the content author BEFORE any side effect runs: a
+  // 'content-removed' outcome hard-deletes the target, after which
+  // the author can no longer be derived from it.
+  const targetAuthorId = reportTargetUserId(rep);
   if (decision === 'resolve') {
     if (finalOutcome === 'content-removed') {
       if (rep.targetType === 'post') await deletePost(rep.targetId);
@@ -2499,23 +2552,72 @@ export async function adminDecideReport(reportId, decision, { reason = '', outco
   }
   const status = { review: 'review', resolve: 'resolved', reject: 'rejected', escalate: 'escalated' }[decision];
   const record = { byId: actor.id, byName: actor.name || '', at: Date.now(), reason: String(reason || ''), outcome: finalOutcome, action: decision };
-  await writeReportPatch(reportId, { status, decision: record });
+  const patch = { status, decision: record };
+  // Backfill the author stamp on reports filed before it existed, so
+  // the author's Support Inbox picks the decision up.
+  if (targetAuthorId && !rep.targetAuthorId) patch.targetAuthorId = targetAuthorId;
+  await writeReportPatch(reportId, patch);
   await logAdminAction(`report-${decision}`, { type: 'report', id: reportId, label: `${rep.targetType}: ${truncate(rep.reason || '', 60)}` }, reason);
+  // Support Inbox doorbells on FINAL decisions only (review/escalate
+  // are interim): the reporter always hears the outcome; the content
+  // author hears it when action was taken on their content (the
+  // user-warned outcome already sends its own warning notification,
+  // which now routes to the Support Inbox too). Best-effort — the
+  // decision itself is already saved and audited above.
+  if (decision === 'resolve' || decision === 'reject') {
+    const reporterText = decision === 'reject'
+      ? 'We reviewed your report and found no violation of the community guidelines. Details are in your Support Inbox.'
+      : finalOutcome !== 'none'
+        ? 'We reviewed your report and took action. Details are in your Support Inbox.'
+        : 'We reviewed your report and closed it with no further action. Details are in your Support Inbox.';
+    try { await sendSupportNotification(rep.reporterId, actor, 'report_decision', reporterText); } catch { /* doorbell only */ }
+    if (decision === 'resolve' && finalOutcome === 'content-removed') {
+      try { await sendSupportNotification(targetAuthorId, actor, 'moderation_notice', 'A moderator removed your content after reviewing a report. See your Support Inbox for details and appeal options.'); } catch { /* doorbell only */ }
+    } else if (decision === 'resolve' && finalOutcome === 'user-suspended') {
+      try { await sendSupportNotification(targetAuthorId, actor, 'moderation_notice', 'Your account was suspended after a moderation review. See your Support Inbox for details and appeal options.'); } catch { /* doorbell only */ }
+    }
+  }
   return { status, decision: record };
 }
 
 // Set a report's appeal status ('requested' | 'accepted' | 'declined' |
 // 'none'). Accepting an appeal does NOT restore removed content — the
-// UI says so; restoration is a separate manual act.
+// UI says so; restoration is a separate manual act. The user's own
+// appeal text (filed from the Support Inbox) is preserved across the
+// staff decision, and a user-filed appeal that gets decided rings the
+// author's Support Inbox doorbell.
 export async function adminSetReportAppeal(reportId, appealStatus, reason = '') {
   const actor = me();
   if (!actor || !canModerate(actor)) throw new Error('Moderators only.');
-  const rep = data().reports.find((r) => r.id === reportId);
+  const rep = findReport(reportId);
   if (!rep) throw new Error('Report not found.');
   if (!['requested', 'accepted', 'declined', 'none'].includes(appealStatus)) throw new Error('Unknown appeal status.');
-  const appeal = { status: appealStatus, byId: actor.id, byName: actor.name || '', at: Date.now(), reason: String(reason || '') };
+  const wasUserAppeal = rep.appeal?.status === 'requested' && rep.appeal?.byId && rep.appeal.byId !== actor.id;
+  const appeal = { status: appealStatus, byId: actor.id, byName: actor.name || '', at: Date.now(), reason: String(reason || ''), text: rep.appeal?.text || '' };
   await writeReportPatch(reportId, { appeal });
   await logAdminAction('report-appeal', { type: 'report', id: reportId, label: `${rep.targetType}: ${truncate(rep.reason || '', 60)}` }, reason || appealStatus);
+  if (wasUserAppeal && (appealStatus === 'accepted' || appealStatus === 'declined')) {
+    const text = appealStatus === 'accepted'
+      ? 'Your appeal was accepted. Note: removed content is not restored automatically.'
+      : 'Your appeal was reviewed and declined. Details are in your Support Inbox.';
+    try { await sendSupportNotification(reportTargetUserId(rep), actor, 'appeal_decision', text); } catch { /* doorbell only */ }
+  }
+  return appeal;
+}
+
+// User-side appeal (Support Inbox): the author of acted-on content
+// files ONE appeal against a decided report. Writes ONLY the appeal
+// object — the Firestore rule for reports pins exactly that for
+// non-staff updates.
+export async function appealReport(reportId, text = '') {
+  const user = me(); if (!user) throw new Error('Sign in to appeal.');
+  const rep = findReport(reportId);
+  if (!rep) throw new Error('Report not found.');
+  if (reportTargetUserId(rep) !== user.id) throw new Error('You can only appeal decisions about your own content.');
+  if (!rep.decision || !rep.decision.outcome || rep.decision.outcome === 'none') throw new Error('There is no action on your content to appeal.');
+  if (rep.appeal && rep.appeal.status && rep.appeal.status !== 'none') throw new Error('You have already appealed this decision.');
+  const appeal = { status: 'requested', text: String(text || '').slice(0, 500), byId: user.id, byName: user.name || '', at: Date.now(), reason: '' };
+  await writeReportPatch(reportId, { appeal });
   return appeal;
 }
 

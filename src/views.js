@@ -1101,7 +1101,7 @@ export function notificationsView(d, meUser) {
   const byId = usersById(d);
   const sorted = d.notifications.filter((n) => n.userId === meUser.id).sort((a, b) => b.createdAt - a.createdAt);
   const mine = collapseDuplicateNotifications(sorted);
-  const icons = { friend_request: '👥', friend_accept: '✅', like: '❤️', comment: '💬', reply: '↩️', message: '✉️', mention: '@', share: '🔁', follow: '➕', group_join: '🏘️', page_follow: '📄', group_request: '📥', group_request_result: '🏘️', event_rsvp: '📅' };
+  const icons = { friend_request: '👥', friend_accept: '✅', like: '❤️', comment: '💬', reply: '↩️', message: '✉️', mention: '@', share: '🔁', follow: '➕', group_join: '🏘️', page_follow: '📄', group_request: '📥', group_request_result: '🏘️', event_rsvp: '📅', report_decision: '🚩', moderation_notice: '⚖️', appeal_decision: '✉️', warning: '⚠️' };
   return `<div class="page narrow">
     <div class="row"><h2 class="grow">🔔 ${t('notifications')}</h2><button class="btn btn-ghost btn-sm" data-act="notif-read-all">${t('markAllRead')}</button></div>
     ${mine.map((n) => `<button class="card notif ${n.read ? '' : 'unread'}" data-act="notif-open" data-id="${n.id}" data-post="${n.postId || ''}" data-conv="${n.conversationId || ''}" data-actor="${n.actorId || ''}" data-group="${n.groupId || ''}" data-page="${n.pageId || ''}" data-event="${n.eventId || ''}">
@@ -1183,6 +1183,11 @@ export function settingsView(d, meUser, prefs) {
         <button class="btn btn-ghost" data-act="change-password">✉️ ${t('sendResetEmail')}</button>
         <button class="btn btn-ghost settings-logout" data-act="logout">🚪 ${t('logout')}</button>
       </div>
+    </div>
+    <div class="card stack">
+      <h3>📩 ${t('supportInbox')}</h3>
+      <p class="muted">${t('supportInboxHelp')}</p>
+      <div><a class="btn btn-ghost btn-sm" href="#/support">${t('supportOpenInbox')}</a></div>
     </div>
     <div class="card stack">
       <h3>${t('settingsAppearance')}</h3>
@@ -1534,9 +1539,9 @@ export function reportsView(d, meUser, filters = {}) {
   const byId = usersById(d);
   const statusF = filters.status || 'all';
   const all = [...(d.reports || [])].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-  const counts = { all: all.length, pending: 0, review: 0, resolved: 0, rejected: 0, escalated: 0 };
-  for (const r of all) counts[reportStatus(r)] += 1;
-  const list = statusF === 'all' ? all : all.filter((r) => reportStatus(r) === statusF);
+  const counts = { all: all.length, pending: 0, review: 0, resolved: 0, rejected: 0, escalated: 0, appeals: 0 };
+  for (const r of all) { counts[reportStatus(r)] += 1; if (r.appeal?.status === 'requested') counts.appeals += 1; }
+  const list = statusF === 'all' ? all : statusF === 'appeals' ? all.filter((r) => r.appeal?.status === 'requested') : all.filter((r) => reportStatus(r) === statusF);
   const tabLink = (key, label) => `<a class="btn ${statusF === key ? 'btn-primary' : 'btn-ghost'} btn-sm" href="#/admin/reports?status=${key}">${label} (${key === 'all' ? counts.all : counts[key] || 0})</a>`;
   const statusBadge = (st) => `<span class="badge ${st === 'pending' || st === 'escalated' ? 'badge-warn' : st === 'resolved' ? 'badge-ok' : st === 'rejected' ? 'badge-danger' : ''}">${escapeHtml(reportStatusLabel(st))}</span>`;
   const targetHtml = (r) => {
@@ -1571,6 +1576,7 @@ export function reportsView(d, meUser, filters = {}) {
       <p class="small"><b>${t('reportedByLabel')}:</b> ${reporter ? `<a href="#/profile/${reporter.id}">${escapeHtml(reporter.name)}</a>` : escapeHtml(r.reporterId || '')} · <b>${t('reportReasonLabel')}</b> ${escapeHtml(r.reason || '')}</p>
       ${r.targetType === 'message' && r.evidence ? `<div class="evidence-box"><span class="muted small">🔒 ${t('evidenceLabel')}</span><blockquote>${escapeHtml(r.evidence.text || '')}</blockquote></div>` : ''}
       ${dec ? `<p class="small muted">⚖️ ${t('decisionByLabel')}: <b>${escapeHtml(reportOutcomeLabel(dec.outcome || 'none'))}</b> · ${escapeHtml(dec.byName || '')} · ${timeAgo(dec.at)}${dec.reason ? ` · “${escapeHtml(dec.reason)}”` : ''}</p>` : ''}
+      ${r.appeal?.text ? `<div class="evidence-box"><span class="muted small">✉️ ${t('supportAppealYourText')}</span><blockquote>${escapeHtml(r.appeal.text)}</blockquote></div>` : ''}
       <div class="row gap-sm wrap">
         <span class="small"><b>${t('appealLabel')}:</b> ${escapeHtml(appealStatusLabel(appeal))}</span>
         ${appeal === 'accepted' ? `<span class="muted small">${t('appealNoRestore')}</span>` : ''}
@@ -1595,8 +1601,115 @@ export function reportsView(d, meUser, filters = {}) {
       ${tabLink('resolved', t('reportStatusResolved'))}
       ${tabLink('rejected', t('reportStatusRejected'))}
       ${tabLink('escalated', t('reportStatusEscalated'))}
+      ${tabLink('appeals', t('appealsTab'))}
     </div>
     <div class="stack">${list.map(card).join('') || `<div class="card empty-state"><p class="muted">${t('noContentFound')}</p></div>`}</div>`;
+}
+
+// ------------------------------------------------------- SUPPORT INBOX
+// #/support — the user-side mirror of the Reports Center (modelled on
+// Facebook's Support Inbox). Two sections over the same report docs:
+// "My reports" (filed by me, with the moderator's decision) and "My
+// notices" (decisions that took action on MY content, each with a
+// one-shot appeal). Live mode feeds it from remote.supportReports
+// (two provable per-user listeners); demo mode reads the full store —
+// either way the view unions both lists and filters by identity.
+export function supportTargetAuthorId(d, r) {
+  if (!r) return '';
+  if (r.targetAuthorId) return r.targetAuthorId;
+  if (r.targetType === 'user') return r.targetId || '';
+  if (r.targetType === 'message') return r.evidence?.senderId || '';
+  if (r.targetType === 'post') return (d.posts || []).find((p) => p.id === r.targetId)?.authorId || '';
+  return '';
+}
+
+function supportTargetHtml(d, r, byId) {
+  const author = byId[supportTargetAuthorId(d, r)];
+  const authorBit = author ? ` · ${escapeHtml(author.name)}` : '';
+  if (r.targetType === 'post') {
+    const p = (d.posts || []).find((x) => x.id === r.targetId);
+    return `${t('statPosts')}${authorBit}${p?.text ? ` — “${escapeHtml(truncate(p.text, 80))}”` : ''}`;
+  }
+  if (r.targetType === 'message') {
+    return `${t('messages')}${authorBit}${r.evidence?.text ? ` — “${escapeHtml(truncate(r.evidence.text, 80))}”` : ''}`;
+  }
+  if (r.targetType === 'user') {
+    const u = byId[r.targetId];
+    return `${t('roleUser')} · ${u ? escapeHtml(u.name) : escapeHtml(r.targetId || '')}`;
+  }
+  return `${escapeHtml(r.targetType)}${authorBit}`;
+}
+
+// The one-line verdict a reporter sees: interim states stay "awaiting"
+// even though a decision record exists for review/escalate.
+export function supportDecisionSummary(r) {
+  const st = reportStatus(r);
+  if (st === 'resolved') return r.decision?.outcome && r.decision.outcome !== 'none' ? t('supportActionTaken') : t('supportClosedNoAction');
+  if (st === 'rejected') return t('supportNoViolation');
+  return t('supportAwaiting');
+}
+
+export function supportAppealFormHtml(report) {
+  return `<h3>✉️ ${t('supportAppealTitle')}</h3>
+  <form id="support-appeal-form" data-id="${escapeHtml(report.id)}" class="stack">
+    <p class="muted small">${t('appealNoRestore')}</p>
+    <label>${t('supportAppealTextLabel')}<textarea name="text" rows="4" maxlength="500" placeholder="${t('supportAppealTextLabel')}"></textarea></label>
+    <div class="row gap end"><button class="btn btn-ghost" type="button" data-close>${t('cancel')}</button><button class="btn btn-primary" type="submit">${t('supportAppealSubmit')}</button></div>
+  </form>`;
+}
+
+export function supportInboxView(d, meUser) {
+  const byId = usersById(d);
+  const pool = new Map();
+  for (const r of [...(d.reports || []), ...(d.supportReports || [])]) if (r && r.id) pool.set(r.id, r);
+  const all = [...pool.values()];
+  const myReports = all.filter((r) => r.reporterId === meUser.id)
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const myNotices = all.filter((r) => supportTargetAuthorId(d, r) === meUser.id && r.decision?.outcome && r.decision.outcome !== 'none')
+    .sort((a, b) => (b.decision?.at || 0) - (a.decision?.at || 0));
+  const statusBadge = (st) => `<span class="badge ${st === 'pending' || st === 'escalated' ? 'badge-warn' : st === 'resolved' ? 'badge-ok' : st === 'rejected' ? 'badge-danger' : ''}">${escapeHtml(reportStatusLabel(st))}</span>`;
+  const reportCard = (r) => {
+    const st = reportStatus(r);
+    const dec = r.decision || null;
+    return `<div class="card stack support-card">
+      <div class="row gap-sm wrap">
+        ${statusBadge(st)}
+        <span class="badge">${escapeHtml(reportCategoryLabel(reportCategory(r)))}</span>
+        <span class="grow"><b>${t('targetLabel')}:</b> ${supportTargetHtml(d, r, byId)}</span>
+        <span class="muted small">${timeAgo(r.createdAt)}</span>
+      </div>
+      <p class="small"><b>${t('reportReasonLabel')}</b> ${escapeHtml(r.reason || '')}</p>
+      <p class="small">⚖️ <b>${escapeHtml(supportDecisionSummary(r))}</b>${dec && (st === 'resolved' || st === 'rejected') ? ` · ${timeAgo(dec.at)}${dec.reason ? ` · “${escapeHtml(dec.reason)}”` : ''}` : ''}</p>
+    </div>`;
+  };
+  const appealBlock = (r) => {
+    const a = r.appeal || { status: 'none' };
+    if (a.status === 'requested') return `<p class="small">✉️ <b>${t('appealRequested')}</b>${a.text ? `<br/><span class="muted">“${escapeHtml(a.text)}”</span>` : ''}<br/><span class="muted">${t('supportAppealPendingNote')}</span></p>`;
+    if (a.status === 'accepted') return `<p class="small">✅ <b>${t('appealAccepted')}</b>${a.reason ? ` · “${escapeHtml(a.reason)}”` : ''}<br/><span class="muted">${t('appealNoRestore')}</span></p>`;
+    if (a.status === 'declined') return `<p class="small">✖ <b>${t('appealDeclined')}</b>${a.reason ? ` · “${escapeHtml(a.reason)}”` : ''}</p>`;
+    return `<div class="row gap-sm wrap"><button class="btn btn-primary btn-sm" data-act="support-appeal-open" data-id="${r.id}">✉️ ${t('supportAppealButton')}</button><span class="muted small">${t('supportAppealOnce')}</span></div>`;
+  };
+  const noticeCard = (r) => {
+    const dec = r.decision;
+    return `<div class="card stack support-card">
+      <div class="row gap-sm wrap">
+        <span class="badge badge-warn">${escapeHtml(reportOutcomeLabel(dec.outcome))}</span>
+        <span class="grow"><b>${t('targetLabel')}:</b> ${supportTargetHtml(d, r, byId)}</span>
+        <span class="muted small">${timeAgo(dec.at)}</span>
+      </div>
+      ${dec.reason ? `<p class="small"><b>${t('decisionByLabel')}:</b> “${escapeHtml(dec.reason)}”</p>` : ''}
+      ${appealBlock(r)}
+    </div>`;
+  };
+  return `<div class="page narrow">
+    <h2>📩 ${t('supportInbox')}</h2>
+    <h3>🚩 ${t('supportMyReports')}</h3>
+    <p class="muted small">${t('supportReportsIntro')}</p>
+    <div class="stack">${myReports.map(reportCard).join('') || emptyState('🚩', t('supportNoReports'))}</div>
+    <h3>⚖️ ${t('supportMyNotices')}</h3>
+    <p class="muted small">${t('supportNoticesIntro')}</p>
+    <div class="stack">${myNotices.map(noticeCard).join('') || emptyState('⚖️', t('supportNoNotices'))}</div>
+  </div>`;
 }
 
 // #/admin/users — User Management (Pack A). All rows come from the
