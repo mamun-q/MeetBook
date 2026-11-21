@@ -1,0 +1,45 @@
+name: Export Firestore (Phase 5 migration)
+
+# One-off Phase 5 migration export: dumps every Firestore collection
+# to firestore-export.json via runner/export-firestore.mjs, signed in
+# as the shared MeetBook Official admin account (the same
+# RUNNER_EMAIL / RUNNER_PASSWORD secrets the bot runner uses).
+# Manual dispatch ONLY — never scheduled.
+#
+# ⚠️ The artifact contains ALL user data plus the live AI provider
+# keys from botSecrets/config. Retention is kept short (7 days);
+# delete the artifact as soon as the import is verified.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: export-firestore
+  cancel-in-progress: false
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install
+        run: npm ci || npm install
+      - name: Export Firestore
+        env:
+          TZ: Asia/Dhaka
+          RUNNER_EMAIL: ${{ secrets.RUNNER_EMAIL }}
+          RUNNER_PASSWORD: ${{ secrets.RUNNER_PASSWORD }}
+        run: node runner/export-firestore.mjs
+      - name: Upload export artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firestore-export
+          path: firestore-export.json
+          retention-days: 7
+          if-no-files-found: error
