@@ -1,6 +1,8 @@
 -- =====================================================================
 -- MeetBook — Postgres schema for the Firebase → Supabase migration
--- Phase 1 deliverable (design only; nothing here has been run yet).
+-- Phase 1 deliverable. (Ordering fix 2026-11-22: the RLS helper
+-- functions sit AFTER the tables they reference — Postgres refuses a
+-- function whose return type is a table that does not exist yet.)
 --
 -- Source of truth for shapes: src/api.js write paths, src/utils.js
 -- normalise* functions, src/botLogic.js, firestore.rules.
@@ -64,66 +66,6 @@
 -- =====================================================================
 
 begin;
-
--- ---------------------------------------------------------------------
--- RLS helper functions (used by the policies specified in RLS_NOTES.md)
--- These mirror the firestore.rules helpers one-for-one. They are
--- SECURITY DEFINER so they can read public.users from inside a policy
--- ON public.users without recursing through that table's own RLS;
--- they only ever expose the CALLER's own role/status, or a boolean
--- about a target bot row. `stable` + the (select auth.uid()) pattern
--- keeps them cheap under the planner.
--- ---------------------------------------------------------------------
-create or replace function public.caller_user()
-returns public.users
-language sql stable security definer set search_path = public
-as $$
-  select u from public.users u where u.id = (select auth.uid())::text
-$$;
-
-create or replace function public.caller_role()
-returns text
-language sql stable security definer set search_path = public
-as $$
-  select coalesce((select u.role from public.users u
-                   where u.id = (select auth.uid())::text), 'user')
-$$;
-
-create or replace function public.is_admin()
-returns boolean language sql stable security definer set search_path = public
-as $$ select public.caller_role() in ('admin', 'superadmin') $$;
-
-create or replace function public.is_superadmin()
-returns boolean language sql stable security definer set search_path = public
-as $$ select public.caller_role() = 'superadmin' $$;
-
-create or replace function public.is_moderator()
-returns boolean language sql stable security definer set search_path = public
-as $$ select public.caller_role() in ('moderator', 'admin', 'superadmin') $$;
-
--- firestore.rules writerStatusOk(): the writer's own status is absent
--- or 'active'. Suspended/banned writers are refused at create time.
-create or replace function public.writer_status_ok()
-returns boolean language sql stable security definer set search_path = public
-as $$
-  select coalesce((select u.status from public.users u
-                   where u.id = (select auth.uid())::text), 'active') = 'active'
-$$;
-
--- firestore.rules isBotUser(uid): target account exists and is a bot.
-create or replace function public.is_bot_user(target_id text)
-returns boolean language sql stable security definer set search_path = public
-as $$
-  select coalesce((select u."isBot" from public.users u where u.id = target_id), false)
-$$;
-
--- config/app.registrationOpen with the rules' exists() guard: a
--- missing row (or null flag) means registration is OPEN.
-create or replace function public.registration_open()
-returns boolean language sql stable security definer set search_path = public
-as $$
-  select coalesce((select c."registrationOpen" from public.config c where c.id = 'app'), true)
-$$;
 
 -- =====================================================================
 -- users — Firestore: users/{uid}
@@ -690,6 +632,67 @@ create table public.config (
   "aiPaidApproved"  boolean not null default false,
   extra             jsonb not null default '{}'::jsonb
 );
+
+-- ---------------------------------------------------------------------
+-- RLS helper functions (used by the policies specified in RLS_NOTES.md)
+-- These mirror the firestore.rules helpers one-for-one. They are
+-- SECURITY DEFINER so they can read public.users from inside a policy
+-- ON public.users without recursing through that table's own RLS;
+-- they only ever expose the CALLER's own role/status, or a boolean
+-- about a target bot row. `stable` + the (select auth.uid()) pattern
+-- keeps them cheap under the planner.
+-- ---------------------------------------------------------------------
+create or replace function public.caller_user()
+returns public.users
+language sql stable security definer set search_path = public
+as $$
+  select u from public.users u where u.id = (select auth.uid())::text
+$$;
+
+create or replace function public.caller_role()
+returns text
+language sql stable security definer set search_path = public
+as $$
+  select coalesce((select u.role from public.users u
+                   where u.id = (select auth.uid())::text), 'user')
+$$;
+
+create or replace function public.is_admin()
+returns boolean language sql stable security definer set search_path = public
+as $$ select public.caller_role() in ('admin', 'superadmin') $$;
+
+create or replace function public.is_superadmin()
+returns boolean language sql stable security definer set search_path = public
+as $$ select public.caller_role() = 'superadmin' $$;
+
+create or replace function public.is_moderator()
+returns boolean language sql stable security definer set search_path = public
+as $$ select public.caller_role() in ('moderator', 'admin', 'superadmin') $$;
+
+-- firestore.rules writerStatusOk(): the writer's own status is absent
+-- or 'active'. Suspended/banned writers are refused at create time.
+create or replace function public.writer_status_ok()
+returns boolean language sql stable security definer set search_path = public
+as $$
+  select coalesce((select u.status from public.users u
+                   where u.id = (select auth.uid())::text), 'active') = 'active'
+$$;
+
+-- firestore.rules isBotUser(uid): target account exists and is a bot.
+create or replace function public.is_bot_user(target_id text)
+returns boolean language sql stable security definer set search_path = public
+as $$
+  select coalesce((select u."isBot" from public.users u where u.id = target_id), false)
+$$;
+
+-- config/app.registrationOpen with the rules' exists() guard: a
+-- missing row (or null flag) means registration is OPEN.
+create or replace function public.registration_open()
+returns boolean language sql stable security definer set search_path = public
+as $$
+  select coalesce((select c."registrationOpen" from public.config c where c.id = 'app'), true)
+$$;
+
 
 -- =====================================================================
 -- Enable RLS on everything (policies: see RLS_NOTES.md — they land as
