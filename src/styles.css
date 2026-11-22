@@ -122,7 +122,12 @@ h2 > .ic, h3 > .ic, h4 > .ic { vertical-align: -0.18em; }
 .topnav-link .ic { width: 20px; height: 20px; }
 .rail-item .ic { width: 20px; height: 20px; }
 .intro-icon .ic { width: 18px; height: 18px; }
-.badge-verified .ic { width: 1.15em; height: 1.15em; }
+/* Verified seal (Professional Pack): brand-blue filled badge-check,
+   ~15px, centred on the name's line. inline-flex + flex:none so flex
+   rows never squeeze it out while the name truncates (mobile-first). */
+.verified-badge { display: inline-flex; align-items: center; flex: none; color: var(--brand); vertical-align: middle; margin-left: .3em; }
+.verified-badge .ic { width: 15px; height: 15px; }
+h2 .verified-badge .ic { width: 19px; height: 19px; }
 .badge-superadmin .ic { width: 1em; height: 1em; }
 .admin-nav-icon .ic { width: 20px; height: 20px; vertical-align: -0.3em; }
 .story-plus .ic { width: 14px; height: 14px; }
@@ -402,7 +407,9 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 
 /* admin */
 .badge-danger { background: #fde8e8; color: var(--danger); }
-.badge-verified { background: var(--brand); color: #fff; border-radius: 50%; width: 1.4em; height: 1.4em; padding: 0; display: inline-grid; place-items: center; font-size: .62rem; }
+/* (The old .badge-verified blue-disc treatment was replaced by the
+   .verified-badge seal above; the class name remains as an alias on
+   the same span for older packs' hooks.) */
 .nav-badge.static { position: static; }
 /* Super Admin shell (Pack A): premium dark sidebar + content column.
    The sidebar stays dark in both app themes (enterprise-console look);

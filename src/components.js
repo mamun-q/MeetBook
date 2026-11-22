@@ -89,28 +89,64 @@ export function avatarHtml(user, size = 40) {
   return `<span class="avatar avatar-fallback" style="width:${size}px;height:${size}px;background:${avatarColor(user.username || user.name)}" aria-hidden="true">${escapeHtml(initials(user.name))}</span>`;
 }
 
+// Verified badge predicate (Professional Pack, 2026-11-22): the blue
+// seal is DERIVED, never stored per-render — staff roles (superadmin /
+// admin: MeetBook Official, Limon) are always verified, and the
+// Admin-granted users.verified flag keeps working alongside. Bots use
+// role 'bot', so they earn the seal only if one is ever made staff.
+export function isVerifiedUser(user) {
+  if (!user) return false;
+  return user.role === 'superadmin' || user.role === 'admin' || user.verified === true;
+}
+
+// The seal markup itself (no leading space): a brand-blue filled
+// badge-check with a white check, announced as "Verified / যাচাইকৃত"
+// via the existing i18n key. 'badge-verified' is kept as a legacy
+// alias class — older packs' tests and styles keyed off it.
+function verifiedBadgeSpan() {
+  const label = t('verified');
+  return `<span class="verified-badge badge-verified" role="img" aria-label="${label}" title="${label}">${iconFill('badge-check')}</span>`;
+}
+
 export function userNameHtml(user) {
   if (!user) return '<span class="muted">Unknown user</span>';
   // Badges are joined with explicit spaces — concatenated badge spans
   // with nothing between them render (and extract) as one run-on word.
-  // The verified check (users.verified, set from Admin → Users) renders
-  // everywhere names appear through this helper. Super Admins get
-  // their own gold crown badge; plain admins keep the red "Admin" one.
-  // Bot accounts get NO badge here (Natural Presence pack): in user
-  // surfaces they render exactly like human users; bot identification
-  // lives only in the Admin panel, which renders its own markup.
+  // The verified seal renders everywhere names appear through this
+  // helper. Super Admins get their own gold crown badge; plain admins
+  // keep the red "Admin" one. Bot accounts get NO bot badge here
+  // (Natural Presence pack): in user surfaces they render exactly
+  // like human users; bot identification lives only in the Admin
+  // panel, which renders its own markup.
   const badges = [
-    user.verified ? `<span class="badge badge-verified" title="${t('verified')}">${icon('check')}</span>` : '',
+    isVerifiedUser(user) ? verifiedBadgeSpan() : '',
     user.role === 'superadmin' ? `<span class="badge badge-superadmin" title="${t('roleSuperadmin')}">${iconFill('crown')} ${t('roleSuperadmin')}</span>` : '',
     user.role === 'admin' ? `<span class="badge badge-admin">${t('roleAdmin')}</span>` : ''
   ].filter(Boolean).join(' ');
   return `<span class="user-name">${escapeHtml(user.name)}${badges ? ` ${badges}` : ''}</span>`;
 }
 
-// Small verified-check badge for the hand-rolled name markup in
-// comment threads (kept in step with userNameHtml's verified treatment).
+// Small verified seal for the hand-rolled name markup outside
+// userNameHtml (comment threads, list rows, headers): leading space
+// included, empty string when the user is not verified. The name at
+// the call site stays escaped; this appends static markup after it.
 export function verifiedBadgeHtml(user) {
-  return user?.verified ? ` <span class="badge badge-verified" title="${t('verified')}">${icon('check')}</span>` : '';
+  return isVerifiedUser(user) ? ` ${verifiedBadgeSpan()}` : '';
+}
+
+// A page is verified when its OWNER is a verified (staff) user — the
+// MeetBook Official page qualifies through MeetBook Official. The
+// Official page's id is the fallback for post snapshots that carry no
+// ownerId (their page row was not loaded).
+export const OFFICIAL_PAGE_ID = 'pg_mwqysd5x_4exnh02';
+export function isVerifiedPage(page, usersById = {}) {
+  if (!page) return false;
+  if (page.ownerId) return isVerifiedUser(usersById[page.ownerId]);
+  return page.id === OFFICIAL_PAGE_ID;
+}
+
+export function pageVerifiedBadgeHtml(page, usersById = {}) {
+  return isVerifiedPage(page, usersById) ? ` ${verifiedBadgeSpan()}` : '';
 }
 
 export function postCardHtml(post, ctx) {
@@ -155,7 +191,7 @@ export function postCardHtml(post, ctx) {
   const feelSuffix = feelBits.length ? ` <span class="post-feeling">— ${feelBits.join(' ')}</span>` : '';
   const authorBlock = page
     ? `<a href="#/page/${escapeHtml(page.id)}" class="row gap-sm">${avatarHtml({ name: page.name, username: page.name, avatar: page.avatar }, 44)}<span>
-        <span class="user-name">${escapeHtml(page.name)} <span class="badge">${t('pageLabel')}</span></span><br/>
+        <span class="user-name">${escapeHtml(page.name)}${pageVerifiedBadgeHtml(page, usersById)} <span class="badge">${t('pageLabel')}</span></span><br/>
         <span class="muted small">${escapeHtml(page.category || t('pageLabel'))} · ${timeAgo(post.createdAt)} · ${visIcon}${post.editedAt ? ' · edited' : ''}</span>
       </span></a>`
     : `<a href="#/profile/${escapeHtml(post.authorId)}" class="row gap-sm">${avatarHtml(author, 44)}<span>

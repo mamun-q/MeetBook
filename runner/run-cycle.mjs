@@ -58,8 +58,19 @@ function sbError(error, context) {
   return err;
 }
 
+// Same users-column rule as src/api.js (keep in sync): the
+// email-exposure lockdown grants SELECT on users column-by-column
+// (all but email), and under column-only grants PostgREST rejects
+// select=* — and RETURNING * on writes — with 42501. Users reads and
+// write-returning selects therefore name the granted columns
+// explicitly (exactly the list in
+// supabase/fix-user-email-exposure.sql section 2).
+const USER_PUBLIC_COLUMNS = 'id,name,username,bio,avatar,cover,work,education,"currentCity",hometown,relationship,website,nickname,dob,gender,role,"isBot","botId",status,verified,online,"lastSeen","createdAt",followers,following,"closeFriends",settings';
+const readColumnsFor = (table) => (table === 'users' ? USER_PUBLIC_COLUMNS : '*');
+const returningColumnsFor = (table) => (table === 'users' ? USER_PUBLIC_COLUMNS : undefined);
+
 async function sbSelect(table, build) {
-  let q = supabase.from(table).select('*');
+  let q = supabase.from(table).select(readColumnsFor(table));
   if (build) q = build(q);
   const { data, error } = await q;
   if (error) throw sbError(error, table);
@@ -67,13 +78,13 @@ async function sbSelect(table, build) {
 }
 
 async function sbGet(table, id) {
-  const { data, error } = await supabase.from(table).select('*').eq('id', id).maybeSingle();
+  const { data, error } = await supabase.from(table).select(readColumnsFor(table)).eq('id', id).maybeSingle();
   if (error) throw sbError(error, table);
   return data || null;
 }
 
 async function sbInsert(table, row) {
-  const { data, error } = await supabase.from(table).insert(row).select();
+  const { data, error } = await supabase.from(table).insert(row).select(returningColumnsFor(table));
   if (error) throw sbError(error, table);
   return data?.[0] || row;
 }
@@ -82,13 +93,13 @@ async function sbInsert(table, row) {
 // columns survive — the Postgres equivalent of Firestore's
 // setDoc(..., { merge: true }).
 async function sbUpsert(table, row, opts = {}) {
-  const { data, error } = await supabase.from(table).upsert(row, opts).select();
+  const { data, error } = await supabase.from(table).upsert(row, opts).select(returningColumnsFor(table));
   if (error) throw sbError(error, table);
   return data?.[0] || row;
 }
 
 async function sbUpdate(table, id, patch) {
-  const { data, error } = await supabase.from(table).update(patch).eq('id', id).select();
+  const { data, error } = await supabase.from(table).update(patch).eq('id', id).select(returningColumnsFor(table));
   if (error) throw sbError(error, table);
   return data?.[0] || null;
 }

@@ -85,6 +85,64 @@ const unknownColumnError = (table, col) => ({
   error: { code: 'PGRST204', message: `Could not find the '${col}' column of '${table}' in the schema cache` }
 });
 
+// Post-lockdown users reads (supabase/fix-user-email-exposure.sql):
+// the SQL revokes table-level SELECT on users from `authenticated`
+// and re-grants it column-by-column — every column EXCEPT email.
+// Under column-only grants PostgREST does NOT quietly omit the
+// ungranted column from select=*: the request fails outright with
+// 42501 "permission denied for table users" (verified live — it
+// briefly broke every users read when the app still used select=*).
+// The same applies to a write's RETURNING * (Postgres needs SELECT
+// privilege on every returned column) and to naming `email` (or any
+// ungranted column) explicitly. The fake models exactly that for
+// this one table: an explicit granted-column list succeeds and
+// returns rows projected to those columns, so `email` never reaches
+// the app; writes WITHOUT a chained .select() are unaffected
+// (INSERT/UPDATE privileges are untouched by the SQL); and the
+// SECURITY DEFINER admin_user_emails() RPC below still reads the
+// stored addresses, exactly like production.
+const USERS_GRANTED_COLUMNS = new Set([
+  'id', 'name', 'username', 'bio', 'avatar', 'cover', 'work', 'education',
+  'currentCity', 'hometown', 'relationship', 'website', 'nickname',
+  'dob', 'gender', 'role', 'isBot', 'botId', 'status', 'verified',
+  'online', 'lastSeen', 'createdAt', 'followers', 'following',
+  'closeFriends', 'settings'
+]);
+const usersPermissionError = () => ({
+  data: null,
+  error: {
+    code: '42501',
+    message: 'permission denied for table users',
+    hint: 'Grant the required privileges to the current role with: GRANT SELECT ON public.users TO authenticated'
+  }
+});
+
+// Parse a PostgREST select list ('id,name,"currentCity"') into bare
+// column names; null for '*' — and for an absent list, which
+// supabase-js also sends as '*'.
+function parseSelectColumns(cols) {
+  if (cols == null) return null;
+  const s = String(cols).trim();
+  if (!s || s === '*') return null;
+  return s.split(',').map((p) => p.trim().replace(/^"|"$/g, '')).filter(Boolean);
+}
+
+// The 42501 the lockdown produces for a users read, or null when the
+// requested columns are exactly within the granted set.
+function usersReadViolation(cols) {
+  const list = parseSelectColumns(cols);
+  if (!list) return usersPermissionError(); // select=* / RETURNING *
+  if (list.some((c) => !USERS_GRANTED_COLUMNS.has(c))) return usersPermissionError();
+  return null;
+}
+
+function projectUsersRow(row, cols) {
+  const list = parseSelectColumns(cols) || [];
+  const out = {};
+  for (const c of list) if (c in row) out[c] = row[c];
+  return out;
+}
+
 class Builder {
   constructor(table) {
     this.table = table;
@@ -98,7 +156,8 @@ class Builder {
     this.singleMode = null;
     this.returning = false;
   }
-  select(_cols, opts) {
+  select(cols, opts) {
+    this.selectCols = cols;
     if (opts?.count) this.countHead = true;
     // A .select() chained AFTER a write op is PostgREST's RETURNING:
     // Postgres then applies the table's SELECT policy to the rows
@@ -121,6 +180,21 @@ class Builder {
   then(resolve, reject) { return this.execute().then(resolve, reject); }
   async execute() {
     const map = tableMap(this.table);
+    // Users lockdown (see USERS_GRANTED_COLUMNS): validate the read
+    // side of this statement BEFORE anything is written — a real
+    // failed statement persists nothing. Reads are plain selects and
+    // the RETURNING clause of writes; a write with no chained
+    // .select() reads nothing and is always allowed.
+    let usersProjection = null;
+    if (this.table === 'users') {
+      const readsRows = this.op === 'select'
+        || ((this.op === 'insert' || this.op === 'update' || this.op === 'upsert') && this.returning);
+      if (readsRows) {
+        const violation = usersReadViolation(this.selectCols);
+        if (violation) return violation;
+        usersProjection = this.selectCols;
+      }
+    }
     if (this.table === 'groupRequests') {
       for (const f of this.filters) {
         if (!GROUP_REQUESTS_COLUMNS.has(f.col)) return unknownColumnError(this.table, f.col);
@@ -164,7 +238,7 @@ class Builder {
         out.push(structuredClone(stored));
       }
       scheduleFlush();
-      return { data: out, error: null };
+      return { data: usersProjection ? out.map((r) => projectUsersRow(r, usersProjection)) : out, error: null };
     }
     if (this.op === 'update') {
       assertNoUndefined(this.payload, '');
@@ -176,7 +250,7 @@ class Builder {
         out.push(structuredClone(next));
       }
       scheduleFlush();
-      return { data: out, error: null };
+      return { data: usersProjection ? out.map((r) => projectUsersRow(r, usersProjection)) : out, error: null };
     }
     if (this.op === 'delete') {
       for (const [id, row] of [...map.entries()]) {
@@ -198,6 +272,7 @@ class Builder {
     }
     if (this.limitN != null) rows = rows.slice(0, this.limitN);
     if (this.countHead) return { data: null, error: null, count: total };
+    if (usersProjection) rows = rows.map((r) => projectUsersRow(r, usersProjection));
     if (this.singleMode === 'single') {
       if (rows.length !== 1) return { data: null, error: { code: 'PGRST116', message: 'JSON object requested, multiple (or no) rows returned' } };
       return { data: structuredClone(rows[0]), error: null };
@@ -447,6 +522,9 @@ export const fakeControl = {
   remove(col, id) { tableMap(col).delete(id); scheduleFlush(); },
   failRpc(name) { rpcFailures.add(name); },
   clearRpcFailures() { rpcFailures.clear(); },
+  // The lockdown grant list this fake enforces on users reads, so a
+  // test can pin it to supabase/fix-user-email-exposure.sql exactly.
+  usersGrantedColumns: [...USERS_GRANTED_COLUMNS],
   setRpcEmails(map) { rpcEmailOverrides = map; },
   reset() {
     tables.clear();

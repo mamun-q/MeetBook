@@ -6,7 +6,7 @@ import { botModel } from './gemini.js';
 import { cldImg } from './cloudinary.js';
 import { AI_PROVIDERS, providerById, resolveAiConfig, usageTotals } from './aiProviders.js';
 import { t } from './i18n.js';
-import { avatarHtml, userNameHtml, postCardHtml, emptyState } from './components.js';
+import { avatarHtml, userNameHtml, postCardHtml, emptyState, verifiedBadgeHtml, pageVerifiedBadgeHtml, isVerifiedUser } from './components.js';
 import { icon, iconFill } from './icons.js';
 import { friendIdsOf, blockedIdsOf } from './store.js';
 import { firebaseReady } from './firebase.js';
@@ -319,9 +319,9 @@ export function rightRail(d, meUser) {
   return `<div class="card rail">
     ${pending.length ? `<h4>Friend requests</h4>${pending.map((f) => `<div class="row gap-sm rail-person">${avatarHtml(byId[f.from], 36)}<span class="grow">${escapeHtml(byId[f.from]?.name || '')}</span><button class="btn btn-primary btn-sm" data-act="accept-request" data-id="${escapeHtml(f.id)}">Accept</button><button class="btn btn-ghost btn-sm" data-act="reject-request" data-id="${escapeHtml(f.id)}" aria-label="Reject">${icon('x')}</button></div>`).join('')}` : ''}
     <h4>People you may know</h4>
-    ${suggestions.map((u) => { const mutual = mutualFriendCount(d.friendships, meUser.id, u.id); return `<div class="row gap-sm rail-person">${avatarHtml(u, 36)}<span class="grow"><a href="#/profile/${escapeHtml(u.id)}">${escapeHtml(u.name)}</a>${mutual > 0 ? `<br/><span class="muted small">${mutual} ${mutual === 1 ? t('mutualFriend') : t('mutualFriends')}</span>` : ''}</span><button class="btn btn-ghost btn-sm" data-act="send-request" data-id="${escapeHtml(u.id)}">${t('addFriend')}</button></div>`; }).join('') || '<p class="muted small">No suggestions right now.</p>'}
+    ${suggestions.map((u) => { const mutual = mutualFriendCount(d.friendships, meUser.id, u.id); return `<div class="row gap-sm rail-person">${avatarHtml(u, 36)}<span class="grow"><a href="#/profile/${escapeHtml(u.id)}">${escapeHtml(u.name)}</a>${verifiedBadgeHtml(u)}${mutual > 0 ? `<br/><span class="muted small">${mutual} ${mutual === 1 ? t('mutualFriend') : t('mutualFriends')}</span>` : ''}</span><button class="btn btn-ghost btn-sm" data-act="send-request" data-id="${escapeHtml(u.id)}">${t('addFriend')}</button></div>`; }).join('') || '<p class="muted small">No suggestions right now.</p>'}
     <h4>Online</h4>
-    ${d.users.filter((u) => u.id !== meUser.id && isFreshOnline(u)).slice(0, 6).map((u) => `<a class="row gap-sm rail-person" href="#/profile/${escapeHtml(u.id)}"><span class="online-dot"></span>${escapeHtml(u.name)}</a>`).join('') || '<p class="muted small">Nobody online.</p>'}
+    ${d.users.filter((u) => u.id !== meUser.id && isFreshOnline(u)).slice(0, 6).map((u) => `<a class="row gap-sm rail-person" href="#/profile/${escapeHtml(u.id)}"><span class="online-dot"></span>${escapeHtml(u.name)}${verifiedBadgeHtml(u)}</a>`).join('') || '<p class="muted small">Nobody online.</p>'}
     <p class="muted small">${friendIds.size} friends · MeetBook</p>
   </div>`;
 }
@@ -461,7 +461,7 @@ export function friendsView(d, meUser) {
     // rendering a card for a missing user used to throw and take the
     // whole Friends page down with it.
     if (!u) return '';
-    return `<div class="card person-card">${avatarHtml(u, 56)}<a href="#/profile/${escapeHtml(u.id)}"><b>${escapeHtml(u.name)}</b></a><span class="muted small">@${escapeHtml(u.username)}</span>${extra}<div class="row gap wrap center">${actions}</div></div>`;
+    return `<div class="card person-card">${avatarHtml(u, 56)}<a href="#/profile/${escapeHtml(u.id)}"><b>${escapeHtml(u.name)}</b></a>${verifiedBadgeHtml(u)}<span class="muted small">@${escapeHtml(u.username)}</span>${extra}<div class="row gap wrap center">${actions}</div></div>`;
   };
   return `<div class="page">
     <h2>${icon('users')} ${t('friends')}</h2>
@@ -566,7 +566,7 @@ export function groupView(d, meUser, groupId, opts = {}) {
         ${avatarHtml({ name: group.name, username: group.name, avatar: '' }, 110)}
         <div class="grow">
           <h2>${escapeHtml(group.name)}</h2>
-          <p class="muted">${group.privacy === 'private' ? icon('lock', 'ic-sm') + ' ' + t('privateLabel') : icon('globe', 'ic-sm') + ' ' + t('publicLabel')} · ${plural((group.members || []).length, t('member'), t('members'))} · created by ${escapeHtml(byId[group.createdBy]?.name || '')}</p>
+          <p class="muted">${group.privacy === 'private' ? icon('lock', 'ic-sm') + ' ' + t('privateLabel') : icon('globe', 'ic-sm') + ' ' + t('publicLabel')} · ${plural((group.members || []).length, t('member'), t('members'))} · created by ${escapeHtml(byId[group.createdBy]?.name || '')}${verifiedBadgeHtml(byId[group.createdBy])}</p>
           <p class="muted small">${icon('users-round', 'ic-sm')} ${t('aboutThisGroup')}: ${group.privacy === 'private' ? icon('lock', 'ic-sm') + ' ' + t('privateLabel') : icon('globe', 'ic-sm') + ' ' + t('publicLabel')} · ${t('createdOn')} ${new Date(group.createdAt || Date.now()).toLocaleDateString()} · ${plural((group.members || []).length, t('member'), t('members'))}</p>
           <p>${escapeHtml(group.description || '')}</p>
         </div>
@@ -581,7 +581,7 @@ export function groupView(d, meUser, groupId, opts = {}) {
     ${isCreator && pendingRequests.length ? `
     <div class="card stack">
       <h3>${icon('inbox')} ${t('joinRequests')} (${pendingRequests.length})</h3>
-      ${pendingRequests.map((r) => { const u = byId[r.userId]; return u ? `<div class="row gap-sm">${avatarHtml(u, 36)}<a class="grow" href="#/profile/${escapeHtml(u.id)}">${escapeHtml(u.name)}</a><button class="btn btn-primary btn-sm" data-act="approve-group-request" data-id="${escapeHtml(r.id)}">${t('approve')}</button><button class="btn btn-ghost btn-sm" data-act="reject-group-request" data-id="${escapeHtml(r.id)}">${t('reject')}</button></div>` : ''; }).join('')}
+      ${pendingRequests.map((r) => { const u = byId[r.userId]; return u ? `<div class="row gap-sm">${avatarHtml(u, 36)}<a class="grow" href="#/profile/${escapeHtml(u.id)}">${escapeHtml(u.name)}</a>${verifiedBadgeHtml(u)}<button class="btn btn-primary btn-sm" data-act="approve-group-request" data-id="${escapeHtml(r.id)}">${t('approve')}</button><button class="btn btn-ghost btn-sm" data-act="reject-group-request" data-id="${escapeHtml(r.id)}">${t('reject')}</button></div>` : ''; }).join('')}
     </div>` : ''}
     ${member ? `
     <div class="card composer">
@@ -604,7 +604,7 @@ export function groupView(d, meUser, groupId, opts = {}) {
       ${(group.members || []).map((id) => {
         const u = byId[id];
         if (!u) return '';
-        return `<div class="row gap-sm">${avatarHtml(u, 36)}<a class="grow" href="#/profile/${escapeHtml(u.id)}">${escapeHtml(u.name)}</a>${id === group.createdBy ? ` <span class="badge badge-admin">${t('roleAdmin')}</span>` : ''}${isCreator && id !== group.createdBy ? `<button class="btn btn-ghost btn-sm" data-act="remove-member" data-group="${escapeHtml(group.id)}" data-id="${id}">Remove</button>` : ''}</div>`;
+        return `<div class="row gap-sm">${avatarHtml(u, 36)}<a class="grow" href="#/profile/${escapeHtml(u.id)}">${escapeHtml(u.name)}</a>${verifiedBadgeHtml(u)}${id === group.createdBy ? ` <span class="badge badge-admin">${t('roleAdmin')}</span>` : ''}${isCreator && id !== group.createdBy ? `<button class="btn btn-ghost btn-sm" data-act="remove-member" data-group="${escapeHtml(group.id)}" data-id="${id}">Remove</button>` : ''}</div>`;
       }).join('')}
     </div>
   </div>`;
@@ -629,11 +629,12 @@ export function groupFormHtml(group = null) {
 // ------------------------------------------------------------------ PAGES
 export function pagesView(d, meUser, queryText = '') {
   const all = d.pages || [];
+  const byId = usersById(d);
   const mine = searchByName(all.filter((p) => p.ownerId === meUser.id || (p.followers || []).includes(meUser.id)), queryText);
   const discover = searchByName(all.filter((p) => p.ownerId !== meUser.id && !(p.followers || []).includes(meUser.id)), queryText);
   const card = (p) => `<div class="card person-card">
     ${avatarHtml({ name: p.name, username: p.name, avatar: p.avatar }, 56)}
-    <a href="#/page/${escapeHtml(p.id)}"><b>${escapeHtml(p.name)}</b></a>
+    <a href="#/page/${escapeHtml(p.id)}"><b>${escapeHtml(p.name)}</b></a>${pageVerifiedBadgeHtml(p, byId)}
     <span class="badge">${escapeHtml(p.category || t('pageLabel'))}</span>
     <span class="muted small">${plural((p.followers || []).length, t('follower'), t('followers'))}</span>
     <span class="muted small">${escapeHtml(truncate(p.about || '', 90))}</span>
@@ -672,7 +673,7 @@ export function pageView(d, meUser, pageId) {
       <div class="profile-meta">
         ${avatarHtml({ name: page.name, username: page.name, avatar: page.avatar }, 110)}
         <div class="grow">
-          <h2>${escapeHtml(page.name)}</h2>
+          <h2>${escapeHtml(page.name)}${pageVerifiedBadgeHtml(page, ctx.usersById)}</h2>
           <p class="muted">${escapeHtml(page.category || '')} · ${plural((page.followers || []).length, t('follower'), t('followers'))} · by ${escapeHtml(ctx.usersById[page.ownerId]?.name || '')}</p>
           <p>${escapeHtml(page.about || '')}</p>
         </div>
@@ -684,7 +685,7 @@ export function pageView(d, meUser, pageId) {
     </div>
     ${isOwner ? `
     <div class="card composer">
-      <div class="row gap-sm">${avatarHtml({ name: page.name, username: page.name, avatar: page.avatar }, 40)}<span class="muted">${escapeHtml(page.name)}</span></div>
+      <div class="row gap-sm">${avatarHtml({ name: page.name, username: page.name, avatar: page.avatar }, 40)}<span class="muted">${escapeHtml(page.name)}${pageVerifiedBadgeHtml(page, ctx.usersById)}</span></div>
       <form id="page-composer-form" data-page="${escapeHtml(page.id)}" class="stack">
         <textarea name="text" rows="3" maxlength="2000" placeholder="${t('postAsPage')}"></textarea>
         <input type="file" name="image" accept="image/*" hidden />
@@ -700,7 +701,7 @@ export function pageView(d, meUser, pageId) {
     </div>
     <div class="card stack">
       <h3>${icon('star')} ${t('reviews')} ${ratingSummary.count ? `· <span class="stars">${stars(ratingSummary.average)}</span> ${ratingSummary.average} (${ratingSummary.count})` : ''}</h3>
-      ${pageReviews.map((r) => { const a = ctx.usersById[r.authorId]; return `<div class="row gap-sm review-item">${avatarHtml(a, 36)}<div class="grow"><b>${escapeHtml(a?.name || '')}</b> <span class="stars">${stars(r.rating)}</span> <span class="muted small">· ${timeAgo(r.createdAt)}</span>${reviewText(r) ? `<br/>${escapeHtml(reviewText(r))}` : ''}</div>${r.authorId === meUser.id ? `<button class="btn btn-ghost btn-sm" data-act="delete-review" data-id="${escapeHtml(r.id)}" aria-label="${t('delete')}">${icon('trash')}</button>` : ''}</div>`; }).join('') || `<p class="muted">${t('noReviews')}</p>`}
+      ${pageReviews.map((r) => { const a = ctx.usersById[r.authorId]; return `<div class="row gap-sm review-item">${avatarHtml(a, 36)}<div class="grow"><b>${escapeHtml(a?.name || '')}${verifiedBadgeHtml(a)}</b> <span class="stars">${stars(r.rating)}</span> <span class="muted small">· ${timeAgo(r.createdAt)}</span>${reviewText(r) ? `<br/>${escapeHtml(reviewText(r))}` : ''}</div>${r.authorId === meUser.id ? `<button class="btn btn-ghost btn-sm" data-act="delete-review" data-id="${escapeHtml(r.id)}" aria-label="${t('delete')}">${icon('trash')}</button>` : ''}</div>`; }).join('') || `<p class="muted">${t('noReviews')}</p>`}
       ${isOwner ? '' : `
       <form id="review-form" data-page="${escapeHtml(page.id)}" class="stack">
         <h4>${myReview ? t('yourReview') : t('writeReview')}</h4>
@@ -780,7 +781,7 @@ export function eventView(d, meUser, eventId) {
   const going = (e.going || []).includes(meUser.id);
   const interested = (e.interested || []).includes(meUser.id);
   const when = new Date(e.dateTime || 0).toLocaleString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-  const personList = (ids) => (ids || []).map((id) => byId[id] ? `<div class="row gap-sm">${avatarHtml(byId[id], 32)}<a href="#/profile/${id}">${escapeHtml(byId[id].name)}</a></div>` : '').join('') || '<p class="muted small">—</p>';
+  const personList = (ids) => (ids || []).map((id) => byId[id] ? `<div class="row gap-sm">${avatarHtml(byId[id], 32)}<a href="#/profile/${id}">${escapeHtml(byId[id].name)}</a>${verifiedBadgeHtml(byId[id])}</div>` : '').join('') || '<p class="muted small">—</p>';
   return `<div class="profile-wrap">
     <div class="card profile-head">
       <div class="cover" style="${e.cover ? `background-image:url('${escapeHtml(safeCssImageUrl(e.cover))}')` : ''}"></div>
@@ -790,7 +791,7 @@ export function eventView(d, meUser, eventId) {
           <h2>${escapeHtml(e.title)}</h2>
           <p class="muted">${icon('clock')} ${escapeHtml(when)}${e.location ? `<br/>${icon('map-pin')} ${escapeHtml(e.location)}` : ''}</p>
           <p class="muted small">${e.visibility === 'friends' ? icon('users', 'ic-sm') + ' ' + t('friends') : icon('globe', 'ic-sm') + ' ' + t('publicLabel')}</p>
-          ${byId[e.createdBy] ? `<div class="row gap-sm host-row">${avatarHtml(byId[e.createdBy], 32)}<span>${t('hostedBy')} <a href="#/profile/${e.createdBy}"><b>${escapeHtml(byId[e.createdBy].name)}</b></a></span></div>` : ''}
+          ${byId[e.createdBy] ? `<div class="row gap-sm host-row">${avatarHtml(byId[e.createdBy], 32)}<span>${t('hostedBy')} <a href="#/profile/${e.createdBy}"><b>${escapeHtml(byId[e.createdBy].name)}</b></a>${verifiedBadgeHtml(byId[e.createdBy])}</span></div>` : ''}
         </div>
         <div class="row gap wrap">
           ${isCreator ? `<button class="btn btn-danger" data-act="delete-event" data-id="${escapeHtml(e.id)}">${t('delete')} event</button>` : ''}
@@ -890,7 +891,7 @@ export function messagesView(d, meUser, activeConvId = '') {
       </div>
       ${listedConvs.map((x) => `<div class="conv-item-wrap">
         <button class="conv-item ${active?.conv.id === x.conv.id ? 'active' : ''}" data-act="open-conv" data-id="${escapeHtml(x.conv.id)}" data-search="${escapeHtml(x.searchText)}">
-        ${avatarHtml(x.avatarUser, 44)}<span class="grow left conv-item-text"><b class="conv-title">${x.pinned ? icon('pin', 'ic-sm') + ' ' : ''}${x.isGroup ? icon('users', 'ic-sm') + ' ' : ''}${escapeHtml(x.title)}</b> <span class="conv-preview muted small">${x.muted ? icon('bell-off', 'ic-sm') + ' ' : ''}${escapeHtml(x.preview)}</span></span>
+        ${avatarHtml(x.avatarUser, 44)}<span class="grow left conv-item-text"><b class="conv-title">${x.pinned ? icon('pin', 'ic-sm') + ' ' : ''}${x.isGroup ? icon('users', 'ic-sm') + ' ' : ''}${escapeHtml(x.title)}${x.isGroup ? '' : verifiedBadgeHtml(x.other)}</b> <span class="conv-preview muted small">${x.muted ? icon('bell-off', 'ic-sm') + ' ' : ''}${escapeHtml(x.preview)}</span></span>
         ${x.mentionUnread ? `<span class="mention-badge" title="${t('mentionedYou')}">@</span>` : ''}${x.unread && !x.muted ? `<span class="unread-badge">${x.unread}</span>` : ''}${x.unread && x.muted ? `<span class="unread-badge muted-badge">${x.unread}</span>` : ''}
         </button>
         <button class="icon-btn conv-menu-btn" data-act="conv-menu" data-id="${escapeHtml(x.conv.id)}" title="${t('conversationOptions')}" aria-label="${t('conversationOptions')}">${icon('more-horizontal')}</button>
@@ -900,12 +901,12 @@ export function messagesView(d, meUser, activeConvId = '') {
           ${x.muted ? `<button data-act="conv-mute" data-id="${escapeHtml(x.conv.id)}" data-ms="">${icon('bell')} ${t('unmuteChat')}</button>` : `<button data-act="conv-mute" data-id="${escapeHtml(x.conv.id)}" data-ms="3600000">${icon('bell-off')} ${t('muteFor1Hour')}</button><button data-act="conv-mute" data-id="${escapeHtml(x.conv.id)}" data-ms="86400000">${icon('bell-off')} ${t('muteFor24Hours')}</button><button data-act="conv-mute" data-id="${escapeHtml(x.conv.id)}" data-ms="inf">${icon('bell-off')} ${t('muteForever')}</button>`}
         </div>
       </div>`).join('') || `<p class="muted small">${filter === 'archived' ? t('noArchivedChats') : filter === 'requests' ? t('noRequests') : t('noMessages')}</p>
-      <div class="stack"><h4>Start a chat</h4>${d.users.filter((u) => u.id !== meUser.id).slice(0, 6).map((u) => `<button class="conv-item" data-act="message-user" data-id="${escapeHtml(u.id)}">${avatarHtml(u, 36)}<span>${escapeHtml(u.name)}</span></button>`).join('')}</div>`}
+      <div class="stack"><h4>Start a chat</h4>${d.users.filter((u) => u.id !== meUser.id).slice(0, 6).map((u) => `<button class="conv-item" data-act="message-user" data-id="${escapeHtml(u.id)}">${avatarHtml(u, 36)}<span>${escapeHtml(u.name)}${verifiedBadgeHtml(u)}</span></button>`).join('')}</div>`}
     </div>
     <div class="conv-thread">
       ${active ? `
       ${(() => { const theme = chatTheme(active.conv.theme); const pinned = pinnedMessages(active.msgs); const latestPinned = pinned[0]; return `
-      <header class="thread-head"><a class="thread-back" href="#/messages" aria-label="Back to conversations">${icon('arrow-left')}</a>${avatarHtml(active.avatarUser, 40)}<div><b>${active.isGroup ? icon('users', 'ic-sm') + ' ' : ''}${escapeHtml(active.title)}</b><br/><span class="muted small">${active.isGroup ? `${active.conv.participants.length} ${t('members')}` : `${active.other?.online ? t('online') : t('offline')}`}</span></div>
+      <header class="thread-head"><a class="thread-back" href="#/messages" aria-label="Back to conversations">${icon('arrow-left')}</a>${avatarHtml(active.avatarUser, 40)}<div><b>${active.isGroup ? icon('users', 'ic-sm') + ' ' : ''}${escapeHtml(active.title)}${active.isGroup ? '' : verifiedBadgeHtml(active.other)}</b><br/><span class="muted small">${active.isGroup ? `${active.conv.participants.length} ${t('members')}` : `${active.other?.online ? t('online') : t('offline')}`}</span></div>
       <span class="spacer"></span><button type="button" class="btn btn-ghost btn-sm" data-act="conv-info" title="${t('conversationDetails')}" aria-label="${t('conversationDetails')}">${icon('info')}</button>${active.isGroup ? '' : `<button class="btn btn-ghost btn-sm" data-act="report-user" data-id="${active.other?.id}" title="${t('report')}" aria-label="${t('report')}">${icon('flag')}</button>`}</header>
       ${latestPinned ? `<button type="button" class="pinned-bar" data-act="jump-message" data-id="${escapeHtml(latestPinned.id)}"><span class="pinned-bar-label">${icon('pin')} ${t('pinnedMessage')}</span><span class="pinned-bar-text">${escapeHtml(messageSnippet(latestPinned, 90))}</span></button>` : ''}
       <div id="conv-info" class="conv-info${uiState.convInfoFor === active.conv.id ? '' : ' hidden'}">
@@ -941,7 +942,7 @@ export function messagesView(d, meUser, activeConvId = '') {
           <div class="stack gap-sm"><b class="small">${icon('link')} ${t('inviteLink')}</b>
           ${conv.joinCode ? `<div class="row gap-sm"><input class="grow" readonly value="${escapeHtml(inviteLinkFor(conv.joinCode))}" aria-label="${t('inviteLink')}" /><button class="btn btn-ghost btn-sm" data-act="copy-invite" data-link="${escapeHtml(inviteLinkFor(conv.joinCode))}">${t('copyLink')}</button></div>` : (conv.createdBy === meUser.id ? `<button class="btn btn-ghost btn-sm" data-act="create-invite" data-conv="${escapeHtml(conv.id)}">${t('createInviteLink')}</button>` : '')}
           <span class="muted small">${t('inviteHint')}</span></div>
-          ${conv.participants.map((id) => `<div class="row gap-sm"><span class="grow row gap-sm">${avatarHtml(byId[id], 28)}<span>${escapeHtml(byId[id]?.name || '')}</span>${conv.createdBy === id ? `<span class="badge badge-ok">${t('groupCreator')}</span>` : ''}</span>${id !== meUser.id && canManage ? `<button class="btn btn-ghost btn-sm" data-act="group-remove-member" data-conv="${escapeHtml(conv.id)}" data-id="${id}">${t('removeMember')}</button>` : ''}</div>`).join('')}
+          ${conv.participants.map((id) => `<div class="row gap-sm"><span class="grow row gap-sm">${avatarHtml(byId[id], 28)}<span>${escapeHtml(byId[id]?.name || '')}${verifiedBadgeHtml(byId[id])}</span>${conv.createdBy === id ? `<span class="badge badge-ok">${t('groupCreator')}</span>` : ''}</span>${id !== meUser.id && canManage ? `<button class="btn btn-ghost btn-sm" data-act="group-remove-member" data-conv="${escapeHtml(conv.id)}" data-id="${id}">${t('removeMember')}</button>` : ''}</div>`).join('')}
           ${addable.length ? `<details><summary>${t('addMembers')}</summary><form id="group-add-form" data-conv="${escapeHtml(conv.id)}" class="stack group-pick-list">${addable.map((u) => `<label class="row gap-sm"><input type="checkbox" name="member" value="${escapeHtml(u.id)}" /> ${avatarHtml(u, 26)}<span>${escapeHtml(u.name)}</span></label>`).join('')}<div class="row gap end"><button class="btn btn-primary btn-sm" type="submit">${t('addMembers')}</button></div></form></details>` : ''}
           <button class="btn btn-danger btn-sm" data-act="group-leave" data-conv="${escapeHtml(conv.id)}">${icon('log-out')} ${t('leaveGroup')}</button>
         </div>`; })() : ''}
@@ -1033,7 +1034,7 @@ function messageHtml(m, meUser, byId, isGroup = false, conv = null) {
     ${mine ? '' : avatarHtml(byId[m.senderId], 28)}
     <div class="msg-col">
     <div class="msg-bubble ${mine ? 'mine' : ''}${bigEmoji || m.sticker ? ' msg-bubble-bare' : ''}${m.vanish ? ' msg-vanish' : ''}">
-      ${isGroup && !mine ? `<span class="msg-sender">${escapeHtml(nicknameFor(conv, m.senderId, byId[m.senderId]?.name || ''))}</span>` : ''}
+      ${isGroup && !mine ? `<span class="msg-sender">${escapeHtml(nicknameFor(conv, m.senderId, byId[m.senderId]?.name || ''))}${verifiedBadgeHtml(byId[m.senderId])}</span>` : ''}
       ${m.forwarded ? `<span class="msg-forwarded">${icon('forward', 'ic-sm')} ${t('forwarded')}</span>` : ''}
       ${m.replyToId ? `<button type="button" class="msg-quote" data-act="jump-message" data-id="${escapeHtml(m.replyToId)}"><b>${escapeHtml(m.replyToName || '')}</b><span>${escapeHtml(m.replyToText || '')}</span></button>` : ''}
       ${m.image ? `<img class="msg-image" src="${escapeHtml(safeMediaUrl(cldImg(m.image, 800)))}" alt="Shared photo" loading="lazy" decoding="async" />` : ''}
@@ -1130,10 +1131,21 @@ export function notificationsView(d, meUser) {
   const sorted = d.notifications.filter((n) => n.userId === meUser.id).sort((a, b) => b.createdAt - a.createdAt);
   const mine = collapseDuplicateNotifications(sorted);
   const icons = { friend_request: 'users', friend_accept: 'check-circle', like: 'heart', comment: 'message-circle', reply: 'reply', message: 'mail', mention: 'at-sign', share: 'repeat', follow: 'user-plus', group_join: 'users-round', page_follow: 'flag', group_request: 'inbox', group_request_result: 'users-round', event_rsvp: 'calendar', report_decision: 'flag', moderation_notice: 'scale', appeal_decision: 'mail', warning: 'alert-triangle' };
+  // Notification text is a sentence with the actor's name inside it:
+  // for a verified actor, splice the seal in right after their name.
+  // Both sides are escaped before the splice; the badge is static
+  // markup, so nothing unescaped ever reaches the HTML.
+  const notifTextHtml = (n) => {
+    const actor = byId[n.actorId];
+    const esc = escapeHtml(notificationText(n, byId));
+    if (!isVerifiedUser(actor) || !actor.name) return esc;
+    const escName = escapeHtml(actor.name);
+    return esc.includes(escName) ? esc.replace(escName, escName + verifiedBadgeHtml(actor)) : esc;
+  };
   return `<div class="page narrow">
     <div class="row"><h2 class="grow">${icon('bell')} ${t('notifications')}</h2><button class="btn btn-ghost btn-sm" data-act="notif-read-all">${t('markAllRead')}</button></div>
     ${mine.map((n) => `<button class="card notif ${n.read ? '' : 'unread'}" data-act="notif-open" data-id="${escapeHtml(n.id)}" data-post="${n.postId || ''}" data-conv="${n.conversationId || ''}" data-actor="${n.actorId || ''}" data-group="${n.groupId || ''}" data-page="${n.pageId || ''}" data-event="${n.eventId || ''}">
-      ${avatarHtml(byId[n.actorId], 40)}<span class="grow left">${icon(icons[n.type] || 'bell')} ${escapeHtml(notificationText(n, byId))}<br/><span class="muted small">${timeAgo(n.createdAt)}</span></span>
+      ${avatarHtml(byId[n.actorId], 40)}<span class="grow left">${icon(icons[n.type] || 'bell')} ${notifTextHtml(n)}<br/><span class="muted small">${timeAgo(n.createdAt)}</span></span>
     </button>`).join('') || emptyState('bell', t('noNotifications'))}
   </div>`;
 }
@@ -1179,7 +1191,7 @@ export function searchView(d, meUser, queryText) {
       else if (rel?.status === 'pending' && rel.from === meUser.id) action = `<button class="btn btn-ghost btn-sm" data-act="cancel-request" data-id="${escapeHtml(rel.id)}" title="${t('tapToCancel')}">${icon('check')} ${t('requestSent')}</button>`;
       else if (rel?.status === 'pending') action = `<button class="btn btn-primary btn-sm" data-act="accept-request" data-id="${escapeHtml(rel.id)}">Accept request</button>`;
       else action = `<button class="btn btn-primary btn-sm" data-act="send-request" data-id="${escapeHtml(u.id)}">${t('addFriend')}</button>`;
-      return `<div class="card person-card">${avatarHtml(u, 56)}<a href="#/profile/${escapeHtml(u.id)}"><b>${escapeHtml(u.name)}</b></a><span class="muted small">@${escapeHtml(u.username)}</span>${mutual > 0 ? `<span class="muted small">${mutual} ${mutual === 1 ? t('mutualFriend') : t('mutualFriends')}</span>` : ''}${action ? `<div class="row gap wrap center">${action}</div>` : ''}</div>`;
+      return `<div class="card person-card">${avatarHtml(u, 56)}<a href="#/profile/${escapeHtml(u.id)}"><b>${escapeHtml(u.name)}</b></a>${verifiedBadgeHtml(u)}<span class="muted small">@${escapeHtml(u.username)}</span>${mutual > 0 ? `<span class="muted small">${mutual} ${mutual === 1 ? t('mutualFriend') : t('mutualFriends')}</span>` : ''}${action ? `<div class="row gap wrap center">${action}</div>` : ''}</div>`;
     }).join('') || '<p class="muted">No people matched.</p>'}</div>
     <h3>${t('groups')}</h3>
     <div class="grid-people">${groups.map((g) => `<div class="card person-card">${avatarHtml({ name: g.name, username: g.name, avatar: g.cover }, 56)}<a href="#/group/${escapeHtml(g.id)}"><b>${escapeHtml(g.name)}</b></a><span class="muted small">${g.privacy === 'private' ? icon('lock', 'ic-sm') + ' ' + t('privateLabel') : icon('globe', 'ic-sm') + ' ' + t('publicLabel')} · ${plural(groupMemberCount(g), t('member'), t('members'))}</span><div class="row gap wrap center"><a class="btn btn-ghost btn-sm" href="#/group/${escapeHtml(g.id)}">View</a></div></div>`).join('') || '<p class="muted">No groups matched.</p>'}</div>

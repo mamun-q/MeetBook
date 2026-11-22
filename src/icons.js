@@ -115,6 +115,10 @@ const FILLED = {
   bookmark: '<path d="M19 21l-7-4.5L5 21V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2Z"/>',
   play: '<path d="M7 4.8v14.4a.8.8 0 0 0 1.2.7l11.6-7.2a.8.8 0 0 0 0-1.4L8.2 4.1A.8.8 0 0 0 7 4.8Z"/>',
   crown: '<path d="m3 8 4.5 4L12 5l4.5 7L21 8l-1.7 10.2a1.5 1.5 0 0 1-1.5 1.3H6.2a1.5 1.5 0 0 1-1.5-1.3L3 8Z"/>',
+  // Verified seal (Professional Pack): the scalloped badge fills with
+  // currentColor — CSS paints it brand blue via .verified-badge — and
+  // the check is cut in fixed white so it reads on any surface.
+  'badge-check': '<path d="M23 12l-2.44-2.79-.34-3.69-3.61-.82-1.89-3.18L12 3 8.6 1.54 6.71 4.72 3.1 3.9l.34 3.69L1 12l2.44 2.78-.34 3.68 3.61.82 1.89 3.18L12 21l2.69-1.54 1.89-3.18 3.61-.81-.34-3.69L23 12z"/><path fill="#fff" d="M12.09 16.72l-3.8-3.81 1.48-1.48 2.32 2.33 5.85-5.87 1.48 1.48-7.33 7.35z"/>',
   pin: '<path d="M9 4h6l-.8 6.2 2.6 3.8H7.2l2.6-3.8L9 4Z"/><path d="M11.2 15.5h1.6V21h-1.6Z"/>'
 };
 

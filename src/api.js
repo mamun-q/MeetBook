@@ -33,8 +33,27 @@ function sbError(error, context) {
   return err;
 }
 
+// fix-user-email-exposure.sql closes the users.email column to the
+// `authenticated` role with COLUMN-level grants (every column except
+// email). Under column-only grants PostgREST rejects select=* on
+// users OUTRIGHT — 42501 "permission denied for table users" — rather
+// than quietly omitting the column, and the same applies to the
+// RETURNING clause of inserts/updates/upserts (Postgres needs SELECT
+// privilege on every returned column). Every users read below —
+// selects AND write-returning selects — therefore names the granted
+// columns explicitly. This list is EXACTLY the grant list in
+// supabase/fix-user-email-exposure.sql section 2; keep the two in
+// sync. Returned users rows simply have no `email` field: consumers
+// are null-safe, admins get addresses via the admin_user_emails()
+// RPC (fetchAdminUserEmails) and own-email displays use ownEmail().
+const USER_PUBLIC_COLUMNS = 'id,name,username,bio,avatar,cover,work,education,"currentCity",hometown,relationship,website,nickname,dob,gender,role,"isBot","botId",status,verified,online,"lastSeen","createdAt",followers,following,"closeFriends",settings';
+const readColumnsFor = (table) => (table === 'users' ? USER_PUBLIC_COLUMNS : '*');
+// For a write's .select(): undefined keeps supabase-js's default
+// (RETURNING *) for every table except users.
+const returningColumnsFor = (table) => (table === 'users' ? USER_PUBLIC_COLUMNS : undefined);
+
 async function sbSelect(table, build) {
-  let q = supabase.from(table).select('*');
+  let q = supabase.from(table).select(readColumnsFor(table));
   if (build) q = build(q);
   const { data, error } = await q;
   if (error) throw sbError(error, table);
@@ -42,13 +61,13 @@ async function sbSelect(table, build) {
 }
 
 async function sbGet(table, id) {
-  const { data, error } = await supabase.from(table).select('*').eq('id', id).maybeSingle();
+  const { data, error } = await supabase.from(table).select(readColumnsFor(table)).eq('id', id).maybeSingle();
   if (error) throw sbError(error, table);
   return data || null;
 }
 
 async function sbInsert(table, row) {
-  const { data, error } = await supabase.from(table).insert(row).select();
+  const { data, error } = await supabase.from(table).insert(row).select(returningColumnsFor(table));
   if (error) throw sbError(error, table);
   return data?.[0] || row;
 }
@@ -59,7 +78,7 @@ async function sbInsert(table, row) {
 // in this module passes complete documents or deliberate partial
 // patches, exactly as it did against Firestore.
 async function sbUpsert(table, row, opts = {}) {
-  const { data, error } = await supabase.from(table).upsert(row, opts).select();
+  const { data, error } = await supabase.from(table).upsert(row, opts).select(returningColumnsFor(table));
   if (error) throw sbError(error, table);
   return data?.[0] || row;
 }
@@ -70,7 +89,7 @@ async function sbUpsert(table, row, opts = {}) {
 // rely on thrown errors only for hard failures, and a row the caller
 // may not touch simply keeps its server truth for the next refetch.
 async function sbUpdate(table, id, patch) {
-  const { data, error } = await supabase.from(table).update(patch).eq('id', id).select();
+  const { data, error } = await supabase.from(table).update(patch).eq('id', id).select(returningColumnsFor(table));
   if (error) throw sbError(error, table);
   return data?.[0] || null;
 }
@@ -81,7 +100,7 @@ async function sbDelete(table, id) {
 }
 
 async function sbCount(table, build) {
-  let q = supabase.from(table).select('*', { count: 'exact', head: true });
+  let q = supabase.from(table).select(readColumnsFor(table), { count: 'exact', head: true });
   if (build) q = build(q);
   const { count, error } = await q;
   if (error) throw sbError(error, table);

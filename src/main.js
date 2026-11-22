@@ -5,7 +5,7 @@ import { firebaseReady, firebaseConfig } from './firebase.js';
 import { subscribe as storeSubscribe, mutate as demoMutate } from './store.js';
 import { setLocale, t } from './i18n.js';
 import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError, messageSnippet, focusMovesWithinForm, rsvpToastKey, isThreadPinned, pickScrollAnchor, anchoredScrollTop, threadRestoreMode, threadPinnedAfterScroll, safeMediaUrl } from './utils.js';
-import { toast, clearToasts, openModal, closeModal, confirmModal, adminActionModal, avatarHtml, postCardHtml } from './components.js';
+import { toast, clearToasts, openModal, closeModal, confirmModal, adminActionModal, avatarHtml, postCardHtml, verifiedBadgeHtml } from './components.js';
 import { providerById } from './aiProviders.js';
 import { cldImg } from './cloudinary.js';
 import * as V from './views.js';
@@ -792,7 +792,7 @@ function renderStoryViewer() {
       <div class="story-segments">${authorStories.map((q, qi) => `<span class="story-seg ${qi < posInAuthor ? 'done' : qi === posInAuthor ? 'active' : ''}"><span class="story-seg-fill"></span></span>`).join('')}</div>
       <div class="story-author">
         ${avatarHtml(author, 34)}
-        <span class="grow"><b>${escapeHtml(author?.name || '')}</b> <span class="story-time">${timeAgo(s.createdAt)}</span></span>
+        <span class="grow"><b>${escapeHtml(author?.name || '')}${verifiedBadgeHtml(author)}</b> <span class="story-time">${timeAgo(s.createdAt)}</span></span>
         ${isMine ? `<button class="story-icon-btn" data-act="story-delete" aria-label="${t('deleteStory')}">${icon('trash')}</button>` : ''}
         <button class="story-icon-btn" data-act="story-close" aria-label="Close">${icon('x')}</button>
       </div>
