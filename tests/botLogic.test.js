@@ -6,7 +6,8 @@ import {
   botAlreadyCommented, pickBotCommentTarget, normaliseBotText, isDuplicateBotText,
   freshTemplatePost, freshTemplateComment,
   textSimilarity, isNearDuplicateBotText, interestRelevance, threadContextText,
-  flattenThread, pickBotReplyTarget, matchedInterests, memoryFromActivity
+  flattenThread, pickBotReplyTarget, matchedInterests, memoryFromActivity,
+  pickFriendRequestsToAccept, BOT_FRIEND_ACCEPT_MIN_AGE_MS, BOT_FRIEND_ACCEPT_PER_CYCLE
 } from '../src/botLogic.js';
 
 const nova = {
@@ -360,5 +361,39 @@ describe('Master Vision: activity memories (experience + interest)', () => {
     const second = memoryFromActivity(first, nova, { kind: 'post', text: 'Space rockets are amazing machines' }, 9000);
     expect(second).toHaveLength(1);
     expect(second[0].updatedAt).toBe(9000);
+  });
+});
+
+describe('friend-request acceptance pacing', () => {
+  const now = 1_000_000_000_000;
+  const req = (id, from, ageMs, status = 'pending', to = 'bot_nova') => ({ id, from, to, status, createdAt: now - ageMs });
+
+  it('accepts only requests at least the minimum age, oldest first', () => {
+    const rows = [
+      req('f_new', 'h1', BOT_FRIEND_ACCEPT_MIN_AGE_MS - 1),
+      req('f_old', 'h2', 30 * 60_000),
+      req('f_edge', 'h3', BOT_FRIEND_ACCEPT_MIN_AGE_MS)
+    ];
+    const picked = pickFriendRequestsToAccept(rows, 'bot_nova', now);
+    expect(picked.map((f) => f.id)).toEqual(['f_old', 'f_edge']);
+  });
+
+  it('caps accepts per cycle and leaves the rest pending', () => {
+    const rows = [req('f1', 'h1', 60 * 60_000), req('f2', 'h2', 50 * 60_000), req('f3', 'h3', 40 * 60_000), req('f4', 'h4', 30 * 60_000)];
+    const picked = pickFriendRequestsToAccept(rows, 'bot_nova', now);
+    expect(picked).toHaveLength(BOT_FRIEND_ACCEPT_PER_CYCLE);
+    expect(picked.map((f) => f.id)).toEqual(['f1', 'f2']);
+  });
+
+  it('ignores other bots\u2019 requests and non-pending rows', () => {
+    const rows = [
+      req('f_other', 'h1', 60 * 60_000, 'pending', 'bot_sage'),
+      req('f_done', 'h2', 60 * 60_000, 'accepted'),
+      req('f_dec', 'h3', 60 * 60_000, 'declined'),
+      req('f_mine', 'h4', 60 * 60_000)
+    ];
+    expect(pickFriendRequestsToAccept(rows, 'bot_nova', now).map((f) => f.id)).toEqual(['f_mine']);
+    expect(pickFriendRequestsToAccept([], 'bot_nova', now)).toEqual([]);
+    expect(pickFriendRequestsToAccept(undefined, 'bot_nova', now)).toEqual([]);
   });
 });

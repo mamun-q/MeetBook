@@ -18,7 +18,7 @@ import { createClient } from '@supabase/supabase-js';
 import { DEFAULT_SUPABASE_CONFIG } from '../src/supabase.js';
 import { uid as genId } from '../src/utils.js';
 import {
-  normaliseBot, findBotReplyTargets, decideBotAction,
+  normaliseBot, findBotReplyTargets, pickFriendRequestsToAccept, decideBotAction,
   templateBotMessageReply, generateTemplatePost, generateTemplateComment,
   emptyBotCounters, counterDayKey, botCountersForDay, memoryFromConversation,
   pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost
@@ -288,6 +288,34 @@ async function main() {
           results.push(`${bot.name} → message (via ${gen.provider})`);
           note(bot, 'message', `via ${gen.provider}`);
         }
+      }
+
+      // --- friend requests (accepted like an ordinary member's:
+      // paced by pickFriendRequestsToAccept — a few minutes old, at
+      // most a couple per cycle; no AI, no daily-cap cost) ---
+      // The runner signs in as staff, so the accept rides the
+      // friendships_update_admin policy (the same sbUpdate the
+      // browser runner / respondFriendRequest staff path uses); the
+      // sender is then notified exactly as a human accept notifies
+      // them.
+      let pendingFriendships = [];
+      try { pendingFriendships = await sbSelect('friendships', (q) => q.eq('to', bot.id).eq('status', 'pending')); } catch { /* read-only scan — a failure here must not cost the bot its autonomous action below */ }
+      for (const rel of pickFriendRequestsToAccept(pendingFriendships, bot.id)) {
+        const updated = await sbUpdate('friendships', rel.id, { status: 'accepted' });
+        if (!updated) continue; // withdrawn or already handled since the read
+        if (rel.from && rel.from !== bot.id) {
+          try {
+            await sbInsert('notifications', {
+              id: genId('n'),
+              userId: rel.from, type: 'friend_accept', actorId: bot.id,
+              text: `${bot.name} accepted your friend request.`, postId: '', conversationId: '',
+              read: false, createdAt: Date.now()
+            });
+          } catch { /* the accept itself already succeeded */ }
+        }
+        acted = true;
+        results.push(`${bot.name} → friend request accepted`);
+        note(bot, 'friend-accept');
       }
 
       // --- autonomous action (post / comment / like) ---

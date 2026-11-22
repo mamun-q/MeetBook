@@ -9,7 +9,7 @@ import {
 } from './store.js';
 import { supabase, supabaseReady } from './supabase.js';
 import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme, canEditMessage, chatPollVote, VANISH_TTL_MS, TYPING_FRESH_MS } from './utils.js';
-import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost } from './botLogic.js';
+import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, pickFriendRequestsToAccept, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost } from './botLogic.js';
 import { canAccessBotSecrets, botModel } from './gemini.js';
 import { providerById, resolveAiConfig, generateRouted, testProvider as testAiProvider, getLastRoutedFailure, resetLastRoutedFailure, anyProviderConfigured, dhakaDayKey, normaliseUsageMap, usageTotals } from './aiProviders.js';
 import { isCloudinaryConfigured, uploadToCloudinary, uploadFileToCloudinary } from './cloudinary.js';
@@ -4285,6 +4285,29 @@ export async function runLiveBotCycle() {
         if (dmNote) {
           dmDetail.note = dmNote;
           results.push({ bot: bot.name, action: 'none', reason: dmNote, pendingDMs: targets.length });
+        }
+
+        // --- friend requests (accepted like an ordinary member's:
+        // paced by pickFriendRequestsToAccept — a few minutes old,
+        // at most a couple per cycle; no AI, no daily-cap cost) ---
+        // The cycle runs as staff, so the accept rides the
+        // friendships_update_admin policy (the same sbUpdate
+        // respondFriendRequest uses when staff accept on someone's
+        // behalf); the sender is then notified exactly as a human
+        // accept notifies them. The mirror picks the new status up
+        // via the friendships realtime refetch, like every other
+        // cycle write.
+        let pendingFriendships = [];
+        try { pendingFriendships = await sbSelect('friendships', (q) => q.eq('to', bot.id).eq('status', 'pending')); } catch { /* read-only scan — a failure here must not cost the bot its autonomous action below */ }
+        for (const rel of pickFriendRequestsToAccept(pendingFriendships, bot.id)) {
+          const updated = await sbUpdate('friendships', rel.id, { status: 'accepted' });
+          if (!updated) continue; // withdrawn or already handled since the read
+          if (rel.from && rel.from !== bot.id) {
+            try { await createNotification({ userId: rel.from, type: 'friend_accept', actorId: bot.id, text: `${bot.name} accepted your friend request.`, postId: '', conversationId: '', read: false, createdAt: Date.now() }); } catch { /* the accept itself already succeeded */ }
+          }
+          actions += 1;
+          acted = true;
+          results.push({ bot: bot.name, action: 'friend-accept' });
         }
 
         // --- autonomous action (post / comment / like) ---

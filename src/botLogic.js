@@ -392,6 +392,27 @@ export function findBotReplyTargets(conversations = [], latestByConv = {}, botId
   return targets.sort((a, b) => (a.lastMessage.createdAt || 0) - (b.lastMessage.createdAt || 0));
 }
 
+// --- Friend requests ---------------------------------------------------
+// Bots are ordinary members (Master Vision / Natural Presence), so a
+// friend request sent TO a bot gets accepted like anyone else's would
+// be — never instantly (a robot-fast accept looks robotic) and never
+// in a flood. A request becomes acceptable once it has been pending a
+// few minutes, and a bot accepts only a couple per cycle, so with
+// cycles ~10 minutes apart a burst of requests drains over several
+// cycles the way a human checking their notifications would clear
+// them. Bots never decline: a pending request that is not old enough
+// yet simply waits for a later cycle. Pure + shared so the browser
+// runner and the GitHub runner pace accepts identically.
+export const BOT_FRIEND_ACCEPT_MIN_AGE_MS = 5 * 60_000;
+export const BOT_FRIEND_ACCEPT_PER_CYCLE = 2;
+
+export function pickFriendRequestsToAccept(requests = [], botId = '', now = Date.now()) {
+  return (requests || [])
+    .filter((f) => f && f.to === botId && f.status === 'pending' && Number(f.createdAt || 0) <= now - BOT_FRIEND_ACCEPT_MIN_AGE_MS)
+    .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+    .slice(0, BOT_FRIEND_ACCEPT_PER_CYCLE);
+}
+
 // Daily counters for the live runner are persisted per calendar day
 // (botSettings/counters doc in Firestore, demo state in demo mode).
 export function emptyBotCounters() {
