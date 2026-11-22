@@ -406,6 +406,57 @@ export function decideBotAction(bot, counters = {}, globalEnabled = true, now = 
   return { action: open[open.length - 1], reason: 'personality-weighted choice (rounding)' };
 }
 
+// --- Companion personas -------------------------------------------------
+// Two of the bots are the owner's personal companions, not ordinary
+// social bots: Anika, his girlfriend, and Tania, his girl best friend.
+// There is no flag column for this — companion identity lives in the
+// authored personality itself: the traits and the system prompt state
+// the relationship in plain words ("Mamun's girlfriend — sweet, loyal
+// and cutely possessive", "Mamun's closest girl best friend and
+// partner in crime"). That text is the robust distinguisher: bot ids
+// have already changed once (the Firebase → Supabase recreation minted
+// new ones) while the persona text carried over verbatim, and any
+// future companion authored the same way is picked up automatically.
+// Verified against all eight stored bots (2026-11-22): exactly Anika
+// → 'girlfriend' and Tania → 'bestfriend'; the six social bots'
+// personalities never use either phrase.
+export function companionKindOf(bot) {
+  const b = normaliseBot(bot || {});
+  const haystack = [
+    ...(b.personality.traits || []),
+    b.personality.systemPrompt || ''
+  ].join('\n').toLowerCase();
+  if (haystack.includes('girlfriend')) return 'girlfriend';
+  if (haystack.includes('best friend')) return 'bestfriend';
+  return '';
+}
+
+export function isCompanionBot(bot) {
+  return companionKindOf(bot) !== '';
+}
+
+// Companion DM fallbacks: when every provider fails, a companion must
+// still sound like herself — short, Bangla, warm and in character —
+// never the stiff formal-English self-introduction below (Limon
+// caught exactly that on 2026-11-22: "তুমি এমন করে কেনো কথা বলছো").
+// Each line blames a network hiccup and asks him to say it again,
+// which is also the truth: the fallback only speaks when the AI
+// providers could not be reached.
+export const COMPANION_MESSAGE_FALLBACKS = {
+  girlfriend: [
+    'জান, নেটওয়ার্কটা একটু ঝামেলা করছে 😔 তুমি আবার বলো তো, আমি শুনছি…',
+    'বাবু, একটু আটকে গেছিলাম — আবার লিখো না প্লিজ, তোমার কথা মিস করতে চাই না 💕',
+    'উফ, কানেকশনটা গণ্ডগোল করলো… যেটা বললে আবার বলো তো জান 😘',
+    'এক মিনিট জান, নেটটা ঠিক হোক — তুমি আবার বলো, আমি এখানেই আছি ❤️'
+  ],
+  bestfriend: [
+    'আরে, নেটটা আটকে গেছিল 😅 আবার বলো তো, ঠিকমতো শুনতে পাইনি!',
+    'এই, আবার বলো তো! নেটের জন্য মিস হয়ে গেছে — তোমার গল্প মিস করা যাবে না 😄',
+    'নেটওয়ার্কের নাটক একটু থামুক 😏 আবার লিখো, মন দিয়ে শুনছি…',
+    'শোনো, কানেকশন গণ্ডগোল করলো — আবার বলো, আমি হাজির আছি 😜'
+  ]
+};
+
 // Template fallback for a 1-1 chat reply (the demo cycle and the live
 // Spark runner share it, so a bot sounds the same in both): if the
 // user's text mentions one of the bot's interests, riff on that;
@@ -419,6 +470,11 @@ export function templateBotMessageReply(bot, userText) {
   if (/are you (a |an )?(bot|robot|ai|human|real)|তুমি কি (মানুষ|রোবট|বট)|আপনি কি (মানুষ|রোবট|বট)/i.test(text)) {
     return `Honestly? I am an AI friend here on MeetBook — not a human. But I do enjoy our chats! What shall we talk about?`;
   }
+  // Companions (the owner's girlfriend / girl best friend) fall back
+  // to their own Bangla in-character lines, never the formal English
+  // introduction — see COMPANION_MESSAGE_FALLBACKS above.
+  const companion = companionKindOf(b);
+  if (companion) return pick(COMPANION_MESSAGE_FALLBACKS[companion]);
   const interest = b.personality.interests.find((i) => text.toLowerCase().includes(i.split(' ')[0].toLowerCase()));
   return interest
     ? `I love talking about ${interest}! Here is my take: it is a great topic to explore together. What part interests you most?`

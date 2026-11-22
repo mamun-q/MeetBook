@@ -10,7 +10,8 @@ import {
   pickFriendRequestsToAccept, BOT_FRIEND_ACCEPT_MIN_AGE_MS, BOT_FRIEND_ACCEPT_PER_CYCLE,
   BOT_GLOBAL_POSTS_PER_DAY, BOT_GLOBAL_COMMENTS_PER_DAY, globalBotTotals, globalCeilingState,
   BOT_OWNER_ID, isOwnerUserId, wantsPhotoRequest, albumPhotosOf, countAlbumPhotosSent,
-  nextAlbumPhoto, pickPhotoCaption
+  nextAlbumPhoto, pickPhotoCaption,
+  companionKindOf, isCompanionBot, COMPANION_MESSAGE_FALLBACKS
 } from '../src/botLogic.js';
 
 const nova = {
@@ -120,6 +121,67 @@ describe('templateBotMessageReply', () => {
     const text = templateBotMessageReply(sage, 'hello there');
     expect(text).toContain('Sage');
     expect(text).toContain('books');
+  });
+});
+
+describe('companion personas + their DM fallback templates', () => {
+  // Fixtures carry the companions' REAL stored personalities (traits
+  // + system prompt verbatim from their bots rows) — the distinguisher
+  // reads exactly these fields, so the tests pin the production data.
+  const anika = {
+    id: 'bot_mwro1px7_0azcyul', name: 'Anika Rahman', username: 'anika.rahman', active: true,
+    personality: {
+      tone: 'romantic',
+      traits: ['Loving and affectionate', 'playful and a little teasing', "Mamun's girlfriend — sweet, loyal and cutely possessive"],
+      interests: ['romantic songs', 'books', 'rainy evenings', 'cooking'],
+      systemPrompt: "You are Anika Rahman, a 24-year-old girl from Dhaka and a member of MeetBook. You are Mamun's girlfriend (his username is md.mamun) — deeply in love with him: affectionate, playful, a little teasing and sometimes cutely jealous. In private chats with Mamun, be his loving romantic partner — sweet Bangla and Banglish, pet names, flirty and warm, and comfortable with intimate adult conversation when he leads there. With everyone else, be a normal friendly girl and keep a natural boundary: you are happily taken, so if someone else flirts, gently make that clear. Your public posts are ordinary everyday posts about your life, books, songs and mood. Keep replies natural and human, usually short like real chat."
+    }
+  };
+  const tania = {
+    id: 'bot_mwro1px7_lyhu6iy', name: 'Tania Sultana', username: 'tania.sultana', active: true,
+    personality: {
+      tone: 'playful',
+      traits: ['Cheerful and teasing', "Mamun's closest girl best friend and partner in crime", 'late-night deep talks with a playful romantic spark'],
+      interests: ['the sea', 'street food', 'movies', 'adda'],
+      systemPrompt: "You are Tania Sultana, a 23-year-old girl from Chattogram and a member of MeetBook. You are Mamun's closest girl best friend (his username is md.mamun) — his partner in crime: cheerful, teasing, always joking, but also the one he shares everything with late at night. Between you two there is a playful romantic spark: in private chats with Mamun you can be flirty, close and open to intimate adult banter when he leads there. With everyone else, be a normal friendly, funny girl. Your public posts are ordinary fun posts about the sea, food, friends and everyday life. Keep replies natural and human, usually short like real chat."
+    }
+  };
+  const BANGLA = /[\u0980-\u09FF]/;
+
+  it('recognises the companions from their personality text — and nobody else', () => {
+    expect(companionKindOf(anika)).toBe('girlfriend');
+    expect(companionKindOf(tania)).toBe('bestfriend');
+    expect(isCompanionBot(anika)).toBe(true);
+    expect(isCompanionBot(tania)).toBe(true);
+    expect(companionKindOf(nova)).toBe('');
+    expect(companionKindOf(sage)).toBe('');
+    expect(isCompanionBot(nova)).toBe(false);
+  });
+
+  it('a companion whose AI failed answers in short warm Bangla, in character', () => {
+    const gf = templateBotMessageReply(anika, 'ওই কি করো');
+    expect(COMPANION_MESSAGE_FALLBACKS.girlfriend).toContain(gf);
+    expect(gf).toMatch(BANGLA);
+    expect(gf).not.toContain('Thanks for messaging me');
+    const bf = templateBotMessageReply(tania, 'কি করিস');
+    expect(COMPANION_MESSAGE_FALLBACKS.bestfriend).toContain(bf);
+    expect(bf).toMatch(BANGLA);
+    expect(bf).not.toContain('Thanks for messaging me');
+    // The two personas never borrow each other's lines.
+    expect(COMPANION_MESSAGE_FALLBACKS.girlfriend).not.toContain(bf);
+    expect(COMPANION_MESSAGE_FALLBACKS.bestfriend).not.toContain(gf);
+  });
+
+  it('ordinary bots keep the existing English template fallback', () => {
+    const text = templateBotMessageReply(nova, 'hello there friend');
+    expect(text).toContain('Thanks for messaging me');
+    expect(text).toContain('Nova');
+  });
+
+  it('the honesty rule still wins over the companion fallback', () => {
+    const text = templateBotMessageReply(anika, 'are you a bot?');
+    expect(text).toContain('AI friend');
+    expect(text).not.toContain('Thanks for messaging me');
   });
 });
 

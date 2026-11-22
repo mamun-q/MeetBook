@@ -32,6 +32,22 @@ import { buildGeminiPrompt, generateGeminiDetailed, getLastGeminiFailure, getLas
 import { normaliseBot } from './botLogic.js';
 
 export const AI_ROUTER_TIMEOUT_MS = 20_000;
+// Router budgets (2026-11-22 fix): previously ONE flat timeoutMs
+// (20s) was handed to every attempt in the chain, and the attempts run
+// strictly one after another — so a slow first provider (the
+// openrouter/free router routinely queues for the full 20s and dies
+// with AbortError) burned the whole budget before the next provider
+// was even reached, and that provider then had to fit inside the same
+// flat 20s through a cold connection; when it also aborted, the whole
+// generation failed and the bot fell back to a template (observed live:
+// "Groq — request failed: AbortError" after a slow OpenRouter attempt,
+// 19–39s end-to-end latencies in the instant responder). Now each
+// attempt gets its OWN per-attempt budget of ~30s, and a total budget
+// caps the whole chain at ~75s so a late attempt is never handed a
+// nearly-dead clock: an attempt's timeout is min(per-attempt, time
+// left in the total), and the chain stops when the total is spent.
+export const AI_ATTEMPT_TIMEOUT_MS = 30_000;
+export const AI_TOTAL_TIMEOUT_MS = 75_000;
 export const DEFAULT_FALLBACK_ORDER = ['gemini', 'groq', 'openrouter'];
 
 // ---------------------------------------------------------------------
@@ -282,8 +298,8 @@ async function attemptOpenAiCompat({ entry, cfg, model, prompt, doFetch, timeout
 // chain (bot model → platform default → lite backup) IS the Gemini
 // attempt, so the router must never queue a second Gemini pair for the
 // same request (that would resend to the same targets).
-async function attemptGeminiRouted({ cfg, model, prompt, bot, doFetch, timeoutMs }) {
-  const r = await generateGeminiDetailed({ apiKey: cfg.apiKey, bot: { ...bot, model }, prompt, fetchImpl: doFetch, timeoutMs });
+async function attemptGeminiRouted({ cfg, model, prompt, bot, doFetch, timeoutMs, deadlineAt }) {
+  const r = await generateGeminiDetailed({ apiKey: cfg.apiKey, bot: { ...bot, model }, prompt, fetchImpl: doFetch, timeoutMs, deadlineAt });
   if (r) return { ok: true, text: r.text, model: r.model, usage: r.usage, attempts: r.attempts || 1 };
   const detail = getLastGeminiFailure();
   const status = Number(/^HTTP (\d+)/.exec(detail || '')?.[1]) || 0;
@@ -310,18 +326,29 @@ function formatRoutedFailure({ entry, status, message }) {
 }
 
 // Generate one bot text through the provider chain:
-//   1. the bot's own provider+model (or the head of the fallback order
+//   1. any providers named in preferProviders (an optional per-call
+//      ordering hint — the instant companion responder passes
+//      ['groq'] because Groq answers in a fraction of the free
+//      router's time and owns the bigger free pool; the cycles pass
+//      nothing, so the admin's configured order stays authoritative
+//      for them),
+//   2. the bot's own provider+model (or the head of the fallback order
 //      with the bot's model, when the bot names no provider),
-//   2. the admin's fallback order, each with its default model.
+//   3. the admin's fallback order, each with its default model.
 // A (provider, model) pair is attempted at most once per call, and
 // Gemini at most once in any form (its adapter walks models itself).
 // Providers that are disabled, keyless, paid-locked, cap-reached or
 // rate-limit-exhausted are skipped WITHOUT a request. onAttempt fires
 // once per real attempt so the caller can persist usage counters.
+// Budgets: each attempt gets up to timeoutMs of its OWN time, and the
+// whole chain is bounded by totalTimeoutMs — an attempt late in the
+// chain receives whatever of the total is left (never a fresh clock
+// that could push the call past the total), and the chain stops
+// instead of starting an attempt with no time left.
 // Returns { text, provider, model, usage } or null when every attempt
 // failed (lastRoutedFailure then holds the last failure, formatted for
 // the runner summary). Never throws.
-export async function generateRouted({ bot, memories = [], context = {}, config, usageToday = {}, fetchImpl, timeoutMs = AI_ROUTER_TIMEOUT_MS, now = Date.now(), onAttempt } = {}) {
+export async function generateRouted({ bot, memories = [], context = {}, config, usageToday = {}, fetchImpl, timeoutMs = AI_ATTEMPT_TIMEOUT_MS, totalTimeoutMs = AI_TOTAL_TIMEOUT_MS, preferProviders = [], now = Date.now(), onAttempt } = {}) {
   const doFetch = fetchImpl || (typeof fetch === 'function' ? fetch : null);
   if (!doFetch || !config) return null;
   const b = normaliseBot(bot);
@@ -349,18 +376,37 @@ export async function generateRouted({ bot, memories = [], context = {}, config,
   // it only when the primary attempt is Gemini itself — never send a
   // Gemini model id to Groq/OpenRouter by mistake.
   const ownModel = (b.provider || primaryId === 'gemini') ? b.model : '';
+  // Ordering hint first (see the header comment): the preferred
+  // providers are queued ahead of the normal chain, with the bot's own
+  // model when the preferred provider IS the bot's own provider, else
+  // that provider's configured default. Dedup keeps the rest of the
+  // chain intact, so a hint can reorder but never drop a provider.
+  const prefer = (Array.isArray(preferProviders) ? preferProviders : [])
+    .map((id) => String(id || '').trim().toLowerCase())
+    .filter((id) => providerById(id));
+  for (const id of prefer) {
+    push(id, id === primaryId && ownModel ? ownModel : config.providers[id]?.defaultModel);
+  }
   push(primaryId, ownModel || config.providers[primaryId]?.defaultModel);
   for (const id of config.fallbackOrder) push(id, config.providers[id]?.defaultModel);
 
   const usage = normaliseUsageMap(usageToday);
+  const deadlineAt = now + Math.max(0, Number(totalTimeoutMs) || 0);
   let lastFailure = null;
   for (const { entry, model } of chain) {
     const cfg = config.providers[entry.id] || {};
     if (providerBlockReason(entry, cfg, config)) continue;
     if (usageBlockReason(entry, usage[entry.id], now)) continue;
+    // Per-attempt budget: this attempt's own ~30s, clipped only by
+    // what is left of the total — an earlier slow attempt can no
+    // longer starve a later one out of its full budget, and the call
+    // as a whole can never run past the total.
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) break;
+    const attemptTimeoutMs = Math.min(timeoutMs, remainingMs);
     const r = entry.kind === 'gemini-native'
-      ? await attemptGeminiRouted({ cfg, model, prompt, bot: b, doFetch, timeoutMs })
-      : await attemptOpenAiCompat({ entry, cfg, model, prompt, doFetch, timeoutMs });
+      ? await attemptGeminiRouted({ cfg, model, prompt, bot: b, doFetch, timeoutMs: attemptTimeoutMs, deadlineAt })
+      : await attemptOpenAiCompat({ entry, cfg, model, prompt, doFetch, timeoutMs: attemptTimeoutMs });
     if (r.ok) {
       onAttempt?.(entry.id, { ok: true, usage: r.usage || null, status: 200, attempts: r.attempts || 1 });
       lastRoutedFailure = '';

@@ -5,8 +5,10 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   AI_PROVIDERS, providerById, resolveAiConfig, generateRouted, testProvider,
-  getLastRoutedFailure, resetLastRoutedFailure, dhakaDayKey, usageTotals
+  getLastRoutedFailure, resetLastRoutedFailure, dhakaDayKey, usageTotals,
+  AI_ATTEMPT_TIMEOUT_MS, AI_TOTAL_TIMEOUT_MS
 } from '../src/aiProviders.js';
+import { generateGeminiDetailed } from '../src/gemini.js';
 import { normaliseBot } from '../src/botLogic.js';
 import * as V from '../src/views.js';
 
@@ -180,6 +182,123 @@ describe('generateRouted chain', () => {
     const res = await generateRouted({ bot, context: { kind: 'post' }, config: cfg, fetchImpl });
     expect(res.provider).toBe('groq');
     expect(JSON.parse(fetchImpl.mock.calls[0][1].body).model).toBe('openai/gpt-oss-120b');
+  });
+});
+
+// A fetch that never answers on its own: it settles only when the
+// caller's AbortSignal fires, recording when each host's attempt
+// started and aborted so the budget tests can measure the time each
+// provider was actually given.
+function hangingFetch(records) {
+  return vi.fn((url, opts) => new Promise((_, reject) => {
+    const host = url.includes('api.groq.com') ? 'groq'
+      : url.includes('openrouter.ai') ? 'openrouter'
+        : url.includes('generativelanguage.googleapis.com') ? 'gemini' : 'other';
+    const rec = { host, startedAt: Date.now(), abortedAt: 0 };
+    records.push(rec);
+    const signal = opts?.signal;
+    if (!signal) { rec.abortedAt = Date.now(); reject(new Error('no abort signal')); return; }
+    signal.addEventListener('abort', () => {
+      rec.abortedAt = Date.now();
+      const err = new Error('The operation was aborted');
+      err.name = 'AbortError';
+      reject(err);
+    });
+  }));
+}
+
+describe('generateRouted budgets + ordering hint', () => {
+  const twoKeys = () => config(
+    { providers: { groq: { apiKey: 'G' }, openrouter: { apiKey: 'O' } } },
+    { aiFallbackOrder: ['groq'] }
+  );
+
+  it('ships a ~30s per-attempt budget inside a ~75s total budget', () => {
+    expect(AI_ATTEMPT_TIMEOUT_MS).toBe(30_000);
+    expect(AI_TOTAL_TIMEOUT_MS).toBe(75_000);
+  });
+
+  it('a later attempt still gets its OWN full per-attempt budget (no starvation)', async () => {
+    const records = [];
+    const bot = { ...nova, provider: 'openrouter' };
+    const res = await generateRouted({
+      bot, context: { kind: 'message' }, config: twoKeys(), fetchImpl: hangingFetch(records),
+      timeoutMs: 90, totalTimeoutMs: 10_000
+    });
+    expect(res).toBeNull();
+    expect(records.map((r) => r.host)).toEqual(['openrouter', 'groq']);
+    // OpenRouter burned its full ~90ms; Groq — reached only after
+    // that burn — was still given ~90ms of its own, not the scraps.
+    expect(records[0].abortedAt - records[0].startedAt).toBeGreaterThanOrEqual(65);
+    expect(records[1].abortedAt - records[1].startedAt).toBeGreaterThanOrEqual(65);
+  });
+
+  it('the total budget bounds the whole chain', async () => {
+    const records = [];
+    const bot = { ...nova, provider: 'openrouter' };
+    const started = Date.now();
+    const res = await generateRouted({
+      bot, context: { kind: 'message' }, config: twoKeys(), fetchImpl: hangingFetch(records),
+      timeoutMs: 90, totalTimeoutMs: 140
+    });
+    const elapsed = Date.now() - started;
+    expect(res).toBeNull();
+    expect(records.map((r) => r.host)).toEqual(['openrouter', 'groq']);
+    // Groq was clipped to the ~50ms left of the total, and the call
+    // ended at the total instead of running a fresh 90ms clock
+    // (bounds carry slack for timer jitter under parallel test load;
+    // a fresh-clock regression would push elapsed to ~180ms+).
+    expect(records[1].abortedAt - records[1].startedAt).toBeLessThan(95);
+    expect(elapsed).toBeGreaterThanOrEqual(120);
+    expect(elapsed).toBeLessThan(200);
+    expect(getLastRoutedFailure()).toBe('Groq — request failed: AbortError');
+  });
+
+  it('preferProviders leads with the hinted provider for this call', async () => {
+    const bot = { ...nova, provider: 'openrouter' };
+    const fetchImpl = routedFetch({ groq: openAiOk('fast groq', { prompt_tokens: 2, completion_tokens: 2 }) });
+    const res = await generateRouted({ bot, context: { kind: 'message' }, config: ALL_KEYS, fetchImpl, preferProviders: ['groq'] });
+    expect(res.provider).toBe('groq');
+    expect(res.text).toBe('fast groq');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(urlsOf(fetchImpl)[0]).toContain('api.groq.com');
+  });
+
+  it('preferProviders reorders but never drops the rest of the chain', async () => {
+    const bot = { ...nova, provider: 'openrouter' };
+    const fetchImpl = routedFetch({
+      groq: errRes(500, 'boom'),
+      openrouter: openAiOk('router recovered', { prompt_tokens: 1, completion_tokens: 1 })
+    });
+    const res = await generateRouted({ bot, context: { kind: 'message' }, config: ALL_KEYS, fetchImpl, preferProviders: ['groq'] });
+    expect(res.provider).toBe('openrouter');
+    const urls = urlsOf(fetchImpl);
+    expect(urls[0]).toContain('api.groq.com');
+    expect(urls[1]).toContain('openrouter.ai');
+  });
+
+  it('unknown ids in preferProviders are ignored', async () => {
+    const bot = { ...nova, provider: 'openrouter' };
+    const fetchImpl = routedFetch({ openrouter: openAiOk('primary as usual', { prompt_tokens: 1, completion_tokens: 1 }) });
+    const res = await generateRouted({ bot, context: { kind: 'message' }, config: ALL_KEYS, fetchImpl, preferProviders: ['nope'] });
+    expect(res.provider).toBe('openrouter');
+    expect(urlsOf(fetchImpl)[0]).toContain('openrouter.ai');
+  });
+
+  it('the Gemini model chain honours the router deadline instead of multiplying the budget', async () => {
+    const records = [];
+    const started = Date.now();
+    const res = await generateGeminiDetailed({
+      apiKey: 'GEM_KEY', bot: { name: 'Nova', model: 'gemini-3.5-flash' }, prompt: 'hi',
+      fetchImpl: hangingFetch(records), timeoutMs: 10_000, deadlineAt: Date.now() + 120
+    });
+    const elapsed = Date.now() - started;
+    expect(res).toBeNull();
+    // One model attempted and clipped at the deadline; the chain did
+    // NOT start a second model on a fresh 10s clock.
+    expect(records).toHaveLength(1);
+    expect(elapsed).toBeGreaterThanOrEqual(90);
+    expect(elapsed).toBeLessThan(1_000);
   });
 });
 

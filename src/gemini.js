@@ -183,7 +183,7 @@ function formatGeminiFailure(failure, model, multiModel) {
 // `prompt` may be passed (the multi-provider router builds the prompt
 // once and shares it across providers); otherwise it is built from
 // bot + memories + context exactly as before.
-export async function generateGeminiDetailed({ apiKey, bot, memories = [], context = {}, prompt, fetchImpl, timeoutMs = GEMINI_TIMEOUT_MS } = {}) {
+export async function generateGeminiDetailed({ apiKey, bot, memories = [], context = {}, prompt, fetchImpl, timeoutMs = GEMINI_TIMEOUT_MS, deadlineAt = 0 } = {}) {
   const key = String(apiKey || '').trim();
   if (!key) return null; // no key -> never call the provider at all
   const doFetch = fetchImpl || (typeof fetch === 'function' ? fetch : null);
@@ -194,8 +194,23 @@ export async function generateGeminiDetailed({ apiKey, bot, memories = [], conte
   let lastFailure = null;
   let lastModel = '';
   for (const model of models) {
+    // The router's total budget, when one is passed: each model in
+    // this internal chain gets its own timeoutMs clipped to whatever
+    // of the caller's deadline is left, and the chain stops rather
+    // than starting a model with no time — otherwise one Gemini
+    // "attempt" could silently multiply the router's per-attempt
+    // budget by the number of models it walks.
+    let attemptTimeoutMs = timeoutMs;
+    if (deadlineAt) {
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs <= 0) {
+        if (!lastFailure) lastFailure = { kind: 'error', detail: 'AbortError' };
+        break;
+      }
+      attemptTimeoutMs = Math.min(timeoutMs, remainingMs);
+    }
     attempts += 1;
-    const r = await attemptGeminiOnce({ key, model, prompt: finalPrompt, doFetch, timeoutMs });
+    const r = await attemptGeminiOnce({ key, model, prompt: finalPrompt, doFetch, timeoutMs: attemptTimeoutMs });
     if (r.text) {
       lastGeminiFailure = '';
       lastGeminiAttempts = attempts;
