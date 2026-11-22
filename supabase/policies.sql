@@ -85,6 +85,100 @@ alter default privileges in schema public
 -- (Carried-over exposure, mirrored 1:1: email/status are readable by
 -- every signed-in user, exactly as in Firestore — see RLS_NOTES.md.)
 -- =====================================================================
+-- =====================================================================
+-- RLS recursion fix (2026-11-22): SECURITY DEFINER row fetchers.
+-- UPDATE policies must never subquery their own table (Postgres
+-- aborts with "infinite recursion detected in policy"); they read
+-- the stored row through these helpers instead, which bypass RLS.
+-- =====================================================================
+create or replace function public."conversations_row"(p_id text)
+returns public."conversations"
+language sql security definer set search_path = public stable as $$
+  select t from public."conversations" t where t.id = p_id
+$$;
+revoke execute on function public."conversations_row"(text) from public, anon;
+grant execute on function public."conversations_row"(text) to authenticated;
+
+create or replace function public."events_row"(p_id text)
+returns public."events"
+language sql security definer set search_path = public stable as $$
+  select t from public."events" t where t.id = p_id
+$$;
+revoke execute on function public."events_row"(text) from public, anon;
+grant execute on function public."events_row"(text) to authenticated;
+
+create or replace function public."friendships_row"(p_id text)
+returns public."friendships"
+language sql security definer set search_path = public stable as $$
+  select t from public."friendships" t where t.id = p_id
+$$;
+revoke execute on function public."friendships_row"(text) from public, anon;
+grant execute on function public."friendships_row"(text) to authenticated;
+
+create or replace function public."groupRequests_row"(p_id text)
+returns public."groupRequests"
+language sql security definer set search_path = public stable as $$
+  select t from public."groupRequests" t where t.id = p_id
+$$;
+revoke execute on function public."groupRequests_row"(text) from public, anon;
+grant execute on function public."groupRequests_row"(text) to authenticated;
+
+create or replace function public."groups_row"(p_id text)
+returns public."groups"
+language sql security definer set search_path = public stable as $$
+  select t from public."groups" t where t.id = p_id
+$$;
+revoke execute on function public."groups_row"(text) from public, anon;
+grant execute on function public."groups_row"(text) to authenticated;
+
+create or replace function public."messages_row"(p_id text)
+returns public."messages"
+language sql security definer set search_path = public stable as $$
+  select t from public."messages" t where t.id = p_id
+$$;
+revoke execute on function public."messages_row"(text) from public, anon;
+grant execute on function public."messages_row"(text) to authenticated;
+
+create or replace function public."pages_row"(p_id text)
+returns public."pages"
+language sql security definer set search_path = public stable as $$
+  select t from public."pages" t where t.id = p_id
+$$;
+revoke execute on function public."pages_row"(text) from public, anon;
+grant execute on function public."pages_row"(text) to authenticated;
+
+create or replace function public."posts_row"(p_id text)
+returns public."posts"
+language sql security definer set search_path = public stable as $$
+  select t from public."posts" t where t.id = p_id
+$$;
+revoke execute on function public."posts_row"(text) from public, anon;
+grant execute on function public."posts_row"(text) to authenticated;
+
+create or replace function public."reviews_row"(p_id text)
+returns public."reviews"
+language sql security definer set search_path = public stable as $$
+  select t from public."reviews" t where t.id = p_id
+$$;
+revoke execute on function public."reviews_row"(text) from public, anon;
+grant execute on function public."reviews_row"(text) to authenticated;
+
+create or replace function public."stories_row"(p_id text)
+returns public."stories"
+language sql security definer set search_path = public stable as $$
+  select t from public."stories" t where t.id = p_id
+$$;
+revoke execute on function public."stories_row"(text) from public, anon;
+grant execute on function public."stories_row"(text) to authenticated;
+
+create or replace function public."users_row"(p_id text)
+returns public."users"
+language sql security definer set search_path = public stable as $$
+  select t from public."users" t where t.id = p_id
+$$;
+revoke execute on function public."users_row"(text) from public, anon;
+grant execute on function public."users_row"(text) to authenticated;
+
 create policy users_select_all on public.users
   for select to authenticated
   using (true);
@@ -117,9 +211,9 @@ create policy users_update_self_admin on public.users
   with check (
     (id = (select auth.uid())::text or public.is_admin())
     and role is not distinct from
-          (select o.role from public.users o where o.id = users.id)
+          ((public."users_row"(users.id)).role)
     and "isBot" is not distinct from
-          (select o."isBot" from public.users o where o.id = users.id)
+          ((public."users_row"(users.id))."isBot")
   );
 
 -- Followers-only branch: every column except `followers` pinned via
@@ -130,72 +224,72 @@ create policy users_update_followers on public.users
   using (id <> (select auth.uid())::text)
   with check (
     name is not distinct from
-      (select o.name from public.users o where o.id = users.id)
+      ((public."users_row"(users.id)).name)
     and username is not distinct from
-      (select o.username from public.users o where o.id = users.id)
+      ((public."users_row"(users.id)).username)
     and email is not distinct from
-      (select o.email from public.users o where o.id = users.id)
+      ((public."users_row"(users.id)).email)
     and bio is not distinct from
-      (select o.bio from public.users o where o.id = users.id)
+      ((public."users_row"(users.id)).bio)
     and avatar is not distinct from
-      (select o.avatar from public.users o where o.id = users.id)
+      ((public."users_row"(users.id)).avatar)
     and cover is not distinct from
-      (select o.cover from public.users o where o.id = users.id)
+      ((public."users_row"(users.id)).cover)
     and work is not distinct from
-      (select o.work from public.users o where o.id = users.id)
+      ((public."users_row"(users.id)).work)
     and education is not distinct from
-      (select o.education from public.users o where o.id = users.id)
+      ((public."users_row"(users.id)).education)
     and "currentCity" is not distinct from
-      (select o."currentCity" from public.users o where o.id = users.id)
+      ((public."users_row"(users.id))."currentCity")
     and hometown is not distinct from
-      (select o.hometown from public.users o where o.id = users.id)
+      ((public."users_row"(users.id)).hometown)
     and relationship is not distinct from
-      (select o.relationship from public.users o where o.id = users.id)
+      ((public."users_row"(users.id)).relationship)
     and website is not distinct from
-      (select o.website from public.users o where o.id = users.id)
+      ((public."users_row"(users.id)).website)
     and nickname is not distinct from
-      (select o.nickname from public.users o where o.id = users.id)
+      ((public."users_row"(users.id)).nickname)
     and dob is not distinct from
-      (select o.dob from public.users o where o.id = users.id)
+      ((public."users_row"(users.id)).dob)
     and gender is not distinct from
-      (select o.gender from public.users o where o.id = users.id)
+      ((public."users_row"(users.id)).gender)
     and role is not distinct from
-      (select o.role from public.users o where o.id = users.id)
+      ((public."users_row"(users.id)).role)
     and "isBot" is not distinct from
-      (select o."isBot" from public.users o where o.id = users.id)
+      ((public."users_row"(users.id))."isBot")
     and "botId" is not distinct from
-      (select o."botId" from public.users o where o.id = users.id)
+      ((public."users_row"(users.id))."botId")
     and status is not distinct from
-      (select o.status from public.users o where o.id = users.id)
+      ((public."users_row"(users.id)).status)
     and verified is not distinct from
-      (select o.verified from public.users o where o.id = users.id)
+      ((public."users_row"(users.id)).verified)
     and online is not distinct from
-      (select o.online from public.users o where o.id = users.id)
+      ((public."users_row"(users.id)).online)
     and "lastSeen" is not distinct from
-      (select o."lastSeen" from public.users o where o.id = users.id)
+      ((public."users_row"(users.id))."lastSeen")
     and "createdAt" is not distinct from
-      (select o."createdAt" from public.users o where o.id = users.id)
+      ((public."users_row"(users.id))."createdAt")
     and following is not distinct from
-      (select o.following from public.users o where o.id = users.id)
+      ((public."users_row"(users.id)).following)
     and "closeFriends" is not distinct from
-      (select o."closeFriends" from public.users o where o.id = users.id)
+      ((public."users_row"(users.id))."closeFriends")
     and settings is not distinct from
-      (select o.settings from public.users o where o.id = users.id)
+      ((public."users_row"(users.id)).settings)
     and (
       ( -- follow: append exactly the caller's uid
         jsonb_array_length(followers)
-          = jsonb_array_length((select o.followers from public.users o where o.id = users.id)) + 1
-        and followers @> (select o.followers from public.users o where o.id = users.id)
+          = jsonb_array_length(((public."users_row"(users.id)).followers)) + 1
+        and followers @> ((public."users_row"(users.id)).followers)
         and followers @> jsonb_build_array((select auth.uid())::text)
-        and not ((select o.followers from public.users o where o.id = users.id)
+        and not (((public."users_row"(users.id)).followers)
                  @> jsonb_build_array((select auth.uid())::text))
       )
       or
       ( -- unfollow: remove exactly the caller's uid
         jsonb_array_length(followers)
-          = jsonb_array_length((select o.followers from public.users o where o.id = users.id)) - 1
-        and (select o.followers from public.users o where o.id = users.id) @> followers
-        and (select o.followers from public.users o where o.id = users.id)
+          = jsonb_array_length(((public."users_row"(users.id)).followers)) - 1
+        and ((public."users_row"(users.id)).followers) @> followers
+        and ((public."users_row"(users.id)).followers)
               @> jsonb_build_array((select auth.uid())::text)
         and not (followers @> jsonb_build_array((select auth.uid())::text))
       )
@@ -271,19 +365,19 @@ create policy posts_update_engagement on public.posts
   using (true)
   with check (
     "authorId" is not distinct from
-      (select o."authorId" from public.posts o where o.id = posts.id)
+      ((public."posts_row"(posts.id))."authorId")
     and text is not distinct from
-      (select o.text from public.posts o where o.id = posts.id)
+      ((public."posts_row"(posts.id)).text)
     and image is not distinct from
-      (select o.image from public.posts o where o.id = posts.id)
+      ((public."posts_row"(posts.id)).image)
     and visibility is not distinct from
-      (select o.visibility from public.posts o where o.id = posts.id)
+      ((public."posts_row"(posts.id)).visibility)
     and "groupId" is not distinct from
-      (select o."groupId" from public.posts o where o.id = posts.id)
+      ((public."posts_row"(posts.id))."groupId")
     and "pageId" is not distinct from
-      (select o."pageId" from public.posts o where o.id = posts.id)
+      ((public."posts_row"(posts.id))."pageId")
     and "audienceIds" is not distinct from
-      (select o."audienceIds" from public.posts o where o.id = posts.id)
+      ((public."posts_row"(posts.id))."audienceIds")
   );
 
 create policy posts_delete on public.posts
@@ -330,24 +424,24 @@ create policy stories_update_views on public.stories
   using (true)
   with check (
     "authorId" is not distinct from
-      (select o."authorId" from public.stories o where o.id = stories.id)
+      ((public."stories_row"(stories.id))."authorId")
     and image is not distinct from
-      (select o.image from public.stories o where o.id = stories.id)
+      ((public."stories_row"(stories.id)).image)
     and text is not distinct from
-      (select o.text from public.stories o where o.id = stories.id)
+      ((public."stories_row"(stories.id)).text)
     and bg is not distinct from
-      (select o.bg from public.stories o where o.id = stories.id)
+      ((public."stories_row"(stories.id)).bg)
     and visibility is not distinct from
-      (select o.visibility from public.stories o where o.id = stories.id)
+      ((public."stories_row"(stories.id)).visibility)
     and "audienceIds" is not distinct from
-      (select o."audienceIds" from public.stories o where o.id = stories.id)
+      ((public."stories_row"(stories.id))."audienceIds")
     and "createdAt" is not distinct from
-      (select o."createdAt" from public.stories o where o.id = stories.id)
+      ((public."stories_row"(stories.id))."createdAt")
     and jsonb_array_length(views)
-          = jsonb_array_length((select o.views from public.stories o where o.id = stories.id)) + 1
-    and views @> (select o.views from public.stories o where o.id = stories.id)
+          = jsonb_array_length(((public."stories_row"(stories.id)).views)) + 1
+    and views @> ((public."stories_row"(stories.id)).views)
     and views @> jsonb_build_array((select auth.uid())::text)
-    and not ((select o.views from public.stories o where o.id = stories.id)
+    and not (((public."stories_row"(stories.id)).views)
              @> jsonb_build_array((select auth.uid())::text))
   );
 
@@ -397,37 +491,31 @@ create policy groups_update_self_membership on public.groups
   using (true)
   with check (
     name is not distinct from
-      (select o.name from public.groups o where o.id = groups.id)
+      ((public."groups_row"(groups.id)).name)
     and description is not distinct from
-      (select o.description from public.groups o where o.id = groups.id)
+      ((public."groups_row"(groups.id)).description)
     and privacy is not distinct from
-      (select o.privacy from public.groups o where o.id = groups.id)
+      ((public."groups_row"(groups.id)).privacy)
     and cover is not distinct from
-      (select o.cover from public.groups o where o.id = groups.id)
+      ((public."groups_row"(groups.id)).cover)
     and "createdBy" is not distinct from
-      (select o."createdBy" from public.groups o where o.id = groups.id)
+      ((public."groups_row"(groups.id))."createdBy")
     and "createdAt" is not distinct from
-      (select o."createdAt" from public.groups o where o.id = groups.id)
+      ((public."groups_row"(groups.id))."createdAt")
     and (
       ( -- join: add exactly the caller's uid
         cardinality(members)
-          = cardinality((select o.members from public.groups o where o.id = groups.id)) + 1
-        and members @> (select o.members from public.groups o where o.id = groups.id)
+          = cardinality(((public."groups_row"(groups.id)).members)) + 1
+        and members @> ((public."groups_row"(groups.id)).members)
         and (select auth.uid())::text = any (members)
-        and not exists (
-              select 1 from public.groups o
-              where o.id = groups.id
-                and (select auth.uid())::text = any (o.members))
+        and not ((select auth.uid())::text = any (((public."groups_row"(groups.id)).members)))
       )
       or
       ( -- leave: remove exactly the caller's uid
         cardinality(members)
-          = cardinality((select o.members from public.groups o where o.id = groups.id)) - 1
-        and (select o.members from public.groups o where o.id = groups.id) @> members
-        and exists (
-              select 1 from public.groups o
-              where o.id = groups.id
-                and (select auth.uid())::text = any (o.members))
+          = cardinality(((public."groups_row"(groups.id)).members)) - 1
+        and ((public."groups_row"(groups.id)).members) @> members
+        and ((select auth.uid())::text = any (((public."groups_row"(groups.id)).members)))
         and not ((select auth.uid())::text = any (members))
       )
     )
@@ -466,11 +554,11 @@ create policy group_requests_update on public."groupRequests"
   with check (
     ("groupOwnerId" = (select auth.uid())::text or public.is_admin())
     and "userId" is not distinct from
-      (select o."userId" from public."groupRequests" o where o.id = "groupRequests".id)
+      ((public."groupRequests_row"("groupRequests".id))."userId")
     and "groupId" is not distinct from
-      (select o."groupId" from public."groupRequests" o where o.id = "groupRequests".id)
+      ((public."groupRequests_row"("groupRequests".id))."groupId")
     and "groupOwnerId" is not distinct from
-      (select o."groupOwnerId" from public."groupRequests" o where o.id = "groupRequests".id)
+      ((public."groupRequests_row"("groupRequests".id))."groupOwnerId")
   );
 
 create policy group_requests_delete on public."groupRequests"
@@ -510,34 +598,34 @@ create policy pages_update_followers on public.pages
   using (true)
   with check (
     name is not distinct from
-      (select o.name from public.pages o where o.id = pages.id)
+      ((public."pages_row"(pages.id)).name)
     and category is not distinct from
-      (select o.category from public.pages o where o.id = pages.id)
+      ((public."pages_row"(pages.id)).category)
     and about is not distinct from
-      (select o.about from public.pages o where o.id = pages.id)
+      ((public."pages_row"(pages.id)).about)
     and avatar is not distinct from
-      (select o.avatar from public.pages o where o.id = pages.id)
+      ((public."pages_row"(pages.id)).avatar)
     and cover is not distinct from
-      (select o.cover from public.pages o where o.id = pages.id)
+      ((public."pages_row"(pages.id)).cover)
     and "ownerId" is not distinct from
-      (select o."ownerId" from public.pages o where o.id = pages.id)
+      ((public."pages_row"(pages.id))."ownerId")
     and "createdAt" is not distinct from
-      (select o."createdAt" from public.pages o where o.id = pages.id)
+      ((public."pages_row"(pages.id))."createdAt")
     and (
       ( -- follow: append exactly the caller's uid
         jsonb_array_length(followers)
-          = jsonb_array_length((select o.followers from public.pages o where o.id = pages.id)) + 1
-        and followers @> (select o.followers from public.pages o where o.id = pages.id)
+          = jsonb_array_length(((public."pages_row"(pages.id)).followers)) + 1
+        and followers @> ((public."pages_row"(pages.id)).followers)
         and followers @> jsonb_build_array((select auth.uid())::text)
-        and not ((select o.followers from public.pages o where o.id = pages.id)
+        and not (((public."pages_row"(pages.id)).followers)
                  @> jsonb_build_array((select auth.uid())::text))
       )
       or
       ( -- unfollow: remove exactly the caller's uid
         jsonb_array_length(followers)
-          = jsonb_array_length((select o.followers from public.pages o where o.id = pages.id)) - 1
-        and (select o.followers from public.pages o where o.id = pages.id) @> followers
-        and (select o.followers from public.pages o where o.id = pages.id)
+          = jsonb_array_length(((public."pages_row"(pages.id)).followers)) - 1
+        and ((public."pages_row"(pages.id)).followers) @> followers
+        and ((public."pages_row"(pages.id)).followers)
               @> jsonb_build_array((select auth.uid())::text)
         and not (followers @> jsonb_build_array((select auth.uid())::text))
       )
@@ -572,9 +660,9 @@ create policy reviews_update on public.reviews
   using ("authorId" = (select auth.uid())::text or public.is_admin())
   with check (
     "authorId" is not distinct from
-      (select o."authorId" from public.reviews o where o.id = reviews.id)
+      ((public."reviews_row"(reviews.id))."authorId")
     and "pageId" is not distinct from
-      (select o."pageId" from public.reviews o where o.id = reviews.id)
+      ((public."reviews_row"(reviews.id))."pageId")
     and rating between 1 and 5
   );
 
@@ -619,21 +707,21 @@ create policy events_update_rsvp on public.events
   using (true)
   with check (
     "createdBy" is not distinct from
-      (select o."createdBy" from public.events o where o.id = events.id)
+      ((public."events_row"(events.id))."createdBy")
     and title is not distinct from
-      (select o.title from public.events o where o.id = events.id)
+      ((public."events_row"(events.id)).title)
     and description is not distinct from
-      (select o.description from public.events o where o.id = events.id)
+      ((public."events_row"(events.id)).description)
     and "dateTime" is not distinct from
-      (select o."dateTime" from public.events o where o.id = events.id)
+      ((public."events_row"(events.id))."dateTime")
     and location is not distinct from
-      (select o.location from public.events o where o.id = events.id)
+      ((public."events_row"(events.id)).location)
     and cover is not distinct from
-      (select o.cover from public.events o where o.id = events.id)
+      ((public."events_row"(events.id)).cover)
     and visibility is not distinct from
-      (select o.visibility from public.events o where o.id = events.id)
+      ((public."events_row"(events.id)).visibility)
     and "audienceIds" is not distinct from
-      (select o."audienceIds" from public.events o where o.id = events.id)
+      ((public."events_row"(events.id))."audienceIds")
   );
 
 create policy events_delete on public.events
@@ -704,45 +792,42 @@ create policy conversations_update_self_join on public.conversations
   with check (
     (select auth.uid())::text = any (participants)
     and cardinality(participants)
-          = cardinality((select o.participants from public.conversations o
-                         where o.id = conversations.id)) + 1
-    and participants @> (select o.participants from public.conversations o
-                         where o.id = conversations.id)
+          = cardinality(((public."conversations_row"(conversations.id)).participants)) + 1
+    and participants @> ((public."conversations_row"(conversations.id)).participants)
     and "isGroup" is not distinct from
-      (select o."isGroup" from public.conversations o where o.id = conversations.id)
+      ((public."conversations_row"(conversations.id))."isGroup")
     and title is not distinct from
-      (select o.title from public.conversations o where o.id = conversations.id)
+      ((public."conversations_row"(conversations.id)).title)
     and "createdBy" is not distinct from
-      (select o."createdBy" from public.conversations o where o.id = conversations.id)
+      ((public."conversations_row"(conversations.id))."createdBy")
     and "createdAt" is not distinct from
-      (select o."createdAt" from public.conversations o where o.id = conversations.id)
+      ((public."conversations_row"(conversations.id))."createdAt")
     and typing is not distinct from
-      (select o.typing from public.conversations o where o.id = conversations.id)
+      ((public."conversations_row"(conversations.id)).typing)
     and theme is not distinct from
-      (select o.theme from public.conversations o where o.id = conversations.id)
+      ((public."conversations_row"(conversations.id)).theme)
     and emoji is not distinct from
-      (select o.emoji from public.conversations o where o.id = conversations.id)
+      ((public."conversations_row"(conversations.id)).emoji)
     and nicknames is not distinct from
-      (select o.nicknames from public.conversations o where o.id = conversations.id)
+      ((public."conversations_row"(conversations.id)).nicknames)
     and "archivedBy" is not distinct from
-      (select o."archivedBy" from public.conversations o where o.id = conversations.id)
+      ((public."conversations_row"(conversations.id))."archivedBy")
     and "mutedBy" is not distinct from
-      (select o."mutedBy" from public.conversations o where o.id = conversations.id)
+      ((public."conversations_row"(conversations.id))."mutedBy")
     and "pinnedBy" is not distinct from
-      (select o."pinnedBy" from public.conversations o where o.id = conversations.id)
+      ((public."conversations_row"(conversations.id))."pinnedBy")
     and "acceptedBy" is not distinct from
-      (select o."acceptedBy" from public.conversations o where o.id = conversations.id)
+      ((public."conversations_row"(conversations.id))."acceptedBy")
     and "mutedUntil" is not distinct from
-      (select o."mutedUntil" from public.conversations o where o.id = conversations.id)
+      ((public."conversations_row"(conversations.id))."mutedUntil")
     and vanish is not distinct from
-      (select o.vanish from public.conversations o where o.id = conversations.id)
+      ((public."conversations_row"(conversations.id)).vanish)
     and "joinCode" is not distinct from
-      (select o."joinCode" from public.conversations o where o.id = conversations.id)
-    and (select o."joinCode" from public.conversations o where o.id = conversations.id) <> ''
+      ((public."conversations_row"(conversations.id))."joinCode")
+    and ((public."conversations_row"(conversations.id))."joinCode") <> ''
     and exists (
       select 1 from public.invites i
-      where i.id = (select o."joinCode" from public.conversations o
-                    where o.id = conversations.id)
+      where i.id = ((public."conversations_row"(conversations.id))."joinCode")
     )
   );
 
@@ -828,12 +913,12 @@ create policy messages_update on public.messages
   using ((select auth.uid())::text = any (participants))
   with check (
     "senderId" is not distinct from
-      (select o."senderId" from public.messages o where o.id = messages.id)
+      ((public."messages_row"(messages.id))."senderId")
     and participants is not distinct from
-      (select o.participants from public.messages o where o.id = messages.id)
+      ((public."messages_row"(messages.id)).participants)
     and (
       text is not distinct from
-        (select o.text from public.messages o where o.id = messages.id)
+        ((public."messages_row"(messages.id)).text)
       or (select auth.uid())::text = "senderId"
     )
   );
@@ -880,11 +965,11 @@ create policy friendships_update_recipient_accept on public.friendships
   with check (
     status = 'accepted'
     and "from" is not distinct from
-      (select o."from" from public.friendships o where o.id = friendships.id)
+      ((public."friendships_row"(friendships.id))."from")
     and "to" is not distinct from
-      (select o."to" from public.friendships o where o.id = friendships.id)
+      ((public."friendships_row"(friendships.id))."to")
     and "createdAt" is not distinct from
-      (select o."createdAt" from public.friendships o where o.id = friendships.id)
+      ((public."friendships_row"(friendships.id))."createdAt")
   );
 
 create policy friendships_delete on public.friendships
