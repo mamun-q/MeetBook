@@ -4,10 +4,16 @@
 --   Section 1 (admin_user_emails RPC): APPLIED 2026-11-22 — live.
 --   Section 3 (botSettings read tightening): APPLIED 2026-11-22 —
 --     live (botSettings reads are admin-only).
---   Section 2 (users column-level grants): READY TO APPLY. It was
---     applied once on 2026-11-22 and ROLLED BACK within the hour
---     (see the PostgREST warning below — it broke every users read),
---     but the companion app patch has since landed: src/api.js reads
+--   Section 2 (users column-level grants): APPLIED + VERIFIED
+--     2026-11-22 ~22:47 (after the companion app patch landed in
+--     commit 90865e8 and the instant responder was restarted).
+--     Probes: as Test — email select 403, app column list 200 with
+--     no email field, select=* 403 (expected), RPC [], botSettings
+--     []; as Official — RPC 12 rows, column list 200; health
+--     checker ok. It was applied once earlier on 2026-11-22 and
+--     ROLLED BACK within the hour (see the PostgREST warning below
+--     — it broke every users read), but the companion app patch has
+--     since landed: src/api.js reads
 --     users with the explicit granted-column list, and
 --     runner/run-cycle.mjs + the instant responder carry the same
 --     substitution in their sb* helper copies (pinned by
