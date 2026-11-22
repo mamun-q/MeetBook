@@ -4,7 +4,7 @@ import * as api from './api.js';
 import { firebaseReady, firebaseConfig } from './firebase.js';
 import { subscribe as storeSubscribe, mutate as demoMutate } from './store.js';
 import { setLocale, t } from './i18n.js';
-import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError, messageSnippet, focusMovesWithinForm, rsvpToastKey, isThreadPinned, pickScrollAnchor, anchoredScrollTop, threadRestoreMode } from './utils.js';
+import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError, messageSnippet, focusMovesWithinForm, rsvpToastKey, isThreadPinned, pickScrollAnchor, anchoredScrollTop, threadRestoreMode, threadPinnedAfterScroll } from './utils.js';
 import { toast, clearToasts, openModal, closeModal, confirmModal, adminActionModal, avatarHtml, postCardHtml } from './components.js';
 import { providerById } from './aiProviders.js';
 import { cldImg } from './cloudinary.js';
@@ -170,6 +170,13 @@ export function render() {
   const { seg, query } = parseRoute();
   const route = seg[0] || '';
 
+  // App-shell mode for an open chat (mobile CSS keys off this): the
+  // messages view becomes a fixed-height shell whose ONLY scroller
+  // is the thread itself, instead of a page that scrolls under a
+  // vh-sized thread box. Set on every render so route changes,
+  // sign-out and the boot splash never leave it stale.
+  document.body.classList.toggle('chat-open', Boolean(user) && route === 'messages' && Boolean(seg[1]));
+
   // Boot gate (live mode only — demo auth is synchronous): splash while
   // the auth state restores, and while a restored session's profile is
   // still loading into the mirror.
@@ -280,6 +287,16 @@ export function render() {
 // so panel toggles and image loads never re-apply a stale position.
 let threadIntent = null; // { convId, pinned, anchor, scrollTop }
 let threadChrome = null; // { convId, panels, convSearch, convListTop }
+// The thread box's height at the last intent update: a scroll event
+// whose clientHeight differs from this was driven by a RESIZE
+// (browser chrome, keyboard), not by the user's finger, and must
+// not flip the pin (see threadPinnedAfterScroll in utils.js).
+let threadLastClientHeight = null;
+// Watches the thread box itself: any resize (chrome toggle,
+// keyboard, panel opening above it) re-applies the scroll intent,
+// so a pinned view re-glues to the tail instead of being left
+// stranded wherever the geometry change dropped it.
+let threadResizeObserver = null;
 // Unsent composer text per conversation, tracked from the input
 // event: a rebuild wipes the form, and softRender only protects the
 // draft while focus stays inside the input — tapping any composer
@@ -311,16 +328,32 @@ function captureThreadView() {
   const el = document.getElementById('thread-body');
   const convId = document.getElementById('message-form')?.dataset.conv || '';
   if (el && el.clientHeight > 0) {
-    const pinned = isThreadPinned(el);
+    // Resize-aware pin: if the box height changed since the last
+    // recorded metrics (chrome/keyboard) and the resize's own scroll
+    // event was missed (listener attaches a beat after each rebuild),
+    // the raw metrics would read a tail-glued user as "scrolled up".
+    const resized = threadLastClientHeight != null && el.clientHeight !== threadLastClientHeight;
+    const pinned = threadPinnedAfterScroll({
+      wasPinned: threadIntent && threadIntent.convId === convId ? threadIntent.pinned : null,
+      clientHeightBefore: threadLastClientHeight,
+      scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight
+    });
     threadIntent = {
       convId, pinned,
-      anchor: pinned ? null : pickScrollAnchor(measureThreadRows(el), el.scrollTop),
+      // Across a resize, keep the anchor row the user was reading —
+      // its position is re-measured in the new DOM at restore time.
+      anchor: pinned ? null
+        : (resized && threadIntent && threadIntent.convId === convId && threadIntent.anchor)
+          || pickScrollAnchor(measureThreadRows(el), el.scrollTop),
       scrollTop: el.scrollTop
     };
+    threadLastClientHeight = el.clientHeight;
   } else if (!el) {
     // No thread on screen (another route, logged out): the next open
     // is a FRESH open and must land on the latest message.
     threadIntent = null;
+    threadLastClientHeight = null;
+    if (threadResizeObserver) { threadResizeObserver.disconnect(); threadResizeObserver = null; }
   }
   threadChrome = {
     convId,
@@ -349,6 +382,12 @@ function applyThreadScroll() {
 
 function restoreThreadView() {
   applyThreadScroll();
+  // Late first-frame settle (a webfont swap, a photo that completes
+  // between the swap and the first paint) can still shift rows after
+  // the synchronous apply: re-apply once on the next frame. The
+  // intent is re-read at apply time, so a user scroll inside that
+  // frame is respected, never overridden.
+  requestAnimationFrame(() => applyThreadScroll());
   const s = threadChrome;
   if (!s) return;
   const list = document.querySelector('.conv-list');
@@ -377,9 +416,20 @@ function restoreThreadView() {
 function refreshThreadIntent(e) {
   const el = e.currentTarget;
   if (!el || el.clientHeight === 0) return;
+  const convId = document.getElementById('message-form')?.dataset.conv || '';
+  // A scroll event fired by a box RESIZE (browser chrome toggling,
+  // keyboard opening) is not a user scroll: the browser clamps
+  // scrollTop to the new geometry, and re-deriving the intent from
+  // those clamped metrics would silently unpin a user at the tail
+  // (box shrank → distance-to-bottom over the threshold) or move an
+  // anchored reader's anchor row. Carry the intent over untouched;
+  // only the height baseline moves.
+  const resized = threadLastClientHeight != null && el.clientHeight !== threadLastClientHeight;
+  threadLastClientHeight = el.clientHeight;
+  if (resized && threadIntent && threadIntent.convId === convId) return;
   const pinned = isThreadPinned(el);
   threadIntent = {
-    convId: document.getElementById('message-form')?.dataset.conv || '',
+    convId,
     pinned,
     anchor: pinned ? null : pickScrollAnchor(measureThreadRows(el), el.scrollTop),
     scrollTop: el.scrollTop
@@ -409,6 +459,17 @@ function setupThread() {
     // intent keeps a pinned view glued to the tail and an anchored
     // view on the same message at the same offset.
     threadEl.addEventListener('load', (e) => { if (e.target?.tagName === 'IMG') applyThreadScroll(); }, true);
+    // Box-resize glue: when the thread's own box changes height
+    // (browser chrome toggling, keyboard opening, a panel opening
+    // above it), re-apply the intent so a pinned view re-glues to
+    // the tail and an anchored view re-seats its row, instead of
+    // stranding the position the old geometry had. (Applying a
+    // scroll never resizes the box, so this cannot loop.)
+    if (typeof ResizeObserver !== 'undefined') {
+      if (threadResizeObserver) threadResizeObserver.disconnect();
+      threadResizeObserver = new ResizeObserver(() => applyThreadScroll());
+      threadResizeObserver.observe(threadEl);
+    }
   }
   // Voice messages need MediaRecorder + getUserMedia; hide the mic
   // button entirely where they are unavailable.
@@ -726,6 +787,20 @@ function softRender() {
 // Realtime: demo store subscription + Firestore mirror events.
 storeSubscribe(() => softRender());
 document.addEventListener('meetbook:data', () => softRender());
+// Thread glue for layout changes no rebuild is involved in. A
+// photo finishing loading grows its row (photos carry no reserved
+// box): the load listener lives on the document (capture phase —
+// load does not bubble) so it also covers the window between a
+// rebuild and setupThread attaching the thread-local one, which a
+// fast cached photo could otherwise slip through. Viewport resizes
+// (mobile browser chrome showing/hiding, keyboard open/close — the
+// latter often ONLY moves the visual viewport) re-apply the intent
+// the same way: pinned re-glues, anchored re-seats.
+document.addEventListener('load', (e) => {
+  if (e.target?.tagName === 'IMG' && e.target.closest?.('#thread-body')) applyThreadScroll();
+}, true);
+window.addEventListener('resize', () => applyThreadScroll());
+window.visualViewport?.addEventListener('resize', () => applyThreadScroll());
 window.addEventListener('hashchange', () => { feedPage = 1; clearToasts(1500); replyTarget = null; stopTyping(); render(); window.scrollTo({ top: 0 }); });
 
 // Infinite scroll for the feed (the Load more button is the fallback).

@@ -1026,6 +1026,22 @@ export function threadRestoreMode(captured, convId) {
   return 'anchor';
 }
 
+// Should the view still count as pinned after a scroll event? A
+// phone fires scroll events for RESIZES too: when the browser
+// chrome shows/hides or the keyboard opens, the thread box's
+// clientHeight changes and the browser adjusts/clamps scrollTop —
+// no user gesture involved. Recomputing the pin from raw metrics
+// there silently UNGLUES a user who was happily at the tail: the
+// box shrank, the distance-to-bottom grew past the threshold, and
+// the intent flipped to an anchor. So: when the box height changed
+// since the previous event, the pin state is carried over as-is
+// (a resize neither pins nor unpins); only a same-height event —
+// a real scroll of the content — re-evaluates it from the metrics.
+export function threadPinnedAfterScroll({ wasPinned, clientHeightBefore, scrollTop, scrollHeight, clientHeight }) {
+  if (wasPinned != null && clientHeightBefore != null && clientHeight !== clientHeightBefore) return Boolean(wasPinned);
+  return isThreadPinned({ scrollTop, scrollHeight, clientHeight });
+}
+
 // The displayable body of a page review. The create path stores the
 // text under `text` (form field -> saveReview -> doc), and that is
 // the canonical field; tolerate legacy docs written as body/comment

@@ -20,7 +20,7 @@
 // so main.js itself is never imported).
 import { describe, it, expect, vi, beforeAll } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { isThreadPinned, pickScrollAnchor, anchoredScrollTop, threadRestoreMode, THREAD_PIN_THRESHOLD_PX } from '../src/utils.js';
+import { isThreadPinned, pickScrollAnchor, anchoredScrollTop, threadRestoreMode, threadPinnedAfterScroll, THREAD_PIN_THRESHOLD_PX } from '../src/utils.js';
 
 const rows = [
   { id: 'm1', top: 0, height: 100 },
@@ -74,6 +74,38 @@ describe('pickScrollAnchor / anchoredScrollTop', () => {
   it('returns null for a missing anchor row (message deleted/unsent) so the caller can clamp', () => {
     expect(anchoredScrollTop(rows, { id: 'gone', offset: 10 })).toBeNull();
     expect(anchoredScrollTop(rows, null)).toBeNull();
+  });
+});
+
+// Phone round 2 (2026-11-22): realtime now actually delivers, and
+// the remaining jumps were geometry ones — the browser chrome and
+// the keyboard keep RESIZING the thread box, and a resize fires
+// scroll events whose metrics would read a tail-glued user as
+// "scrolled up" (box shrank → distance-to-bottom over threshold).
+// threadPinnedAfterScroll is the decision main.js feeds with the
+// previous intent + the box height at the previous event.
+describe('threadPinnedAfterScroll', () => {
+  const atTail = { scrollTop: 500, scrollHeight: 1000, clientHeight: 500 };
+  it('same box height: the raw metrics decide (at the tail → pinned)', () => {
+    expect(threadPinnedAfterScroll({ wasPinned: false, clientHeightBefore: 500, ...atTail })).toBe(true);
+  });
+  it('same box height: scrolled up beyond the threshold → not pinned', () => {
+    expect(threadPinnedAfterScroll({ wasPinned: true, clientHeightBefore: 500, scrollTop: 100, scrollHeight: 1000, clientHeight: 500 })).toBe(false);
+  });
+  it('box SHRANK (keyboard/chrome): a pinned user stays pinned even though the metrics now read far from the bottom', () => {
+    // clientHeight 500 → 300: distance-to-bottom is now 200px, way
+    // past the 48px threshold — the raw check would unglue them.
+    expect(threadPinnedAfterScroll({ wasPinned: true, clientHeightBefore: 500, scrollTop: 500, scrollHeight: 1000, clientHeight: 300 })).toBe(true);
+  });
+  it('box GREW (chrome hid): a pinned user stays pinned', () => {
+    expect(threadPinnedAfterScroll({ wasPinned: true, clientHeightBefore: 300, scrollTop: 500, scrollHeight: 1000, clientHeight: 500 })).toBe(true);
+  });
+  it('box changed: an anchored (reading) user stays anchored — a resize never pins either', () => {
+    expect(threadPinnedAfterScroll({ wasPinned: false, clientHeightBefore: 500, ...atTail, clientHeight: 300 })).toBe(false);
+  });
+  it('no previous intent (first capture): falls back to the raw metrics even when the height differs', () => {
+    expect(threadPinnedAfterScroll({ wasPinned: null, clientHeightBefore: 500, scrollTop: 500, scrollHeight: 1000, clientHeight: 300 })).toBe(false);
+    expect(threadPinnedAfterScroll({ wasPinned: undefined, clientHeightBefore: null, ...atTail })).toBe(true);
   });
 });
 
@@ -173,5 +205,50 @@ describe('main.js thread-stability wiring (source pins)', () => {
   it('panel toggles re-apply the scroll intent instead of forcing the bottom', () => {
     expect(mainSrc).toContain("case 'emoji-toggle': { const panel = document.getElementById('emoji-panel'); panel?.classList.toggle('hidden'); if (panel && !panel.classList.contains('hidden')) applyThreadScroll(); break; }");
     expect(mainSrc).toContain("case 'sticker-toggle': { const panel = document.getElementById('sticker-panel'); panel?.classList.toggle('hidden'); if (panel && !panel.classList.contains('hidden')) applyThreadScroll(); break; }");
+  });
+});
+
+// ------------------------------------------------ phone round 2 wiring
+describe('phone geometry glue (main.js + styles.css source pins)', () => {
+  const mainSrc = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../src/styles.css', import.meta.url), 'utf8');
+
+  it('capture decides the pin resize-aware (threadPinnedAfterScroll)', () => {
+    expect(mainSrc).toContain('threadPinnedAfterScroll({');
+  });
+
+  it('a resize-driven scroll event carries the intent over untouched', () => {
+    expect(mainSrc).toContain('if (resized && threadIntent && threadIntent.convId === convId) return;');
+  });
+
+  it('thread images re-apply the intent on load from a document-level capture listener (no setupThread gap)', () => {
+    expect(mainSrc).toContain("e.target.closest?.('#thread-body')");
+  });
+
+  it('viewport resizes (chrome + keyboard, incl. visualViewport-only) re-apply the intent', () => {
+    expect(mainSrc).toContain("window.addEventListener('resize', () => applyThreadScroll());");
+    expect(mainSrc).toContain("window.visualViewport?.addEventListener('resize', () => applyThreadScroll());");
+  });
+
+  it('a ResizeObserver on the thread box re-applies the intent when the box itself resizes', () => {
+    expect(mainSrc).toContain('new ResizeObserver(() => applyThreadScroll())');
+  });
+
+  it('restore re-applies once more on the next animation frame (late first-frame settle)', () => {
+    expect(mainSrc).toContain('requestAnimationFrame(() => applyThreadScroll())');
+  });
+
+  it('render() marks an open chat on the body for the mobile app-shell CSS', () => {
+    expect(mainSrc).toContain("classList.toggle('chat-open'");
+  });
+
+  it('mobile chat-open CSS: page locked, thread the only scroller (no vh max-height)', () => {
+    expect(css).toContain('body.chat-open { overflow: hidden; }');
+    expect(css).toContain('body.chat-open .thread-body { flex: 1; min-height: 0; max-height: none; }');
+    expect(css).toContain('height: 100dvh');
+  });
+
+  it('thread and conversation list contain their own overscroll (no chaining to the page)', () => {
+    expect(css).toContain('overscroll-behavior: contain');
   });
 });

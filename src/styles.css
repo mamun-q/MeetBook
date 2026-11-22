@@ -297,7 +297,7 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 
 /* messenger */
 .messenger { display: grid; grid-template-columns: 300px minmax(0, 1fr); padding: 0; overflow: hidden; min-height: 70vh; }
-.conv-list { border-right: 1px solid var(--border); padding: 14px; display: flex; flex-direction: column; gap: 6px; overflow-y: auto; scrollbar-width: thin; }
+.conv-list { border-right: 1px solid var(--border); padding: 14px; display: flex; flex-direction: column; gap: 6px; overflow-y: auto; scrollbar-width: thin; overscroll-behavior: contain; }
 .conv-search { border-radius: 999px; background: var(--surface-2); border: none; padding: .5rem .8rem; margin-bottom: 4px; }
 .conv-search:focus { background: var(--surface); box-shadow: var(--ring); }
 .conv-item { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: none; border: none; border-radius: 12px; padding: 8px; cursor: pointer; color: var(--text); position: relative; transition: background .15s ease; }
@@ -306,10 +306,10 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 .unread-badge { background: var(--danger); color: #fff; font-size: .7rem; font-weight: 700; border-radius: 999px; padding: 2px 7px; }
 .conv-thread { display: flex; flex-direction: column; min-height: 0; }
 .thread-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
-.thread-body { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; max-height: 56vh; scrollbar-width: thin; }
+.thread-body { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; max-height: 56vh; scrollbar-width: thin; overscroll-behavior: contain; }
 .thread-body::-webkit-scrollbar, .conv-list::-webkit-scrollbar { width: 8px; }
 .thread-body::-webkit-scrollbar-thumb, .conv-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
-.msg-row { display: flex; gap: 8px; align-items: flex-end; }
+.msg-row { display: flex; gap: 8px; align-items: flex-end; flex: none; }
 .msg-row.mine { justify-content: flex-end; }
 .msg-bubble { background: var(--surface-2); border-radius: 18px; padding: 8px 12px; max-width: 72%; box-shadow: 0 1px 1px rgba(16,24,40,.05); }
 /* Own bubbles take the chat theme's --bubble-mine when one is set; the
@@ -724,6 +724,30 @@ a, button, input, select, textarea, label { touch-action: manipulation; }
   .topbar { -webkit-backdrop-filter: blur(8px) saturate(1.4); backdrop-filter: blur(8px) saturate(1.4); }
   .thread-body { max-height: calc(100dvh - 250px); }
   .reaction-btn { min-width: 40px; min-height: 40px; }
+}
+
+/* ------------------------------------------------ Chat app-shell (mobile)
+   With a conversation open (body.chat-open, set by render()), the
+   messages view stops being a box inside a scrolling page — the
+   layout that made the inbox "ride up": the page scrolled under a
+   thread sized by a guessed calc(100dvh - 250px), the footer sat
+   below the thread, and every browser-chrome toggle resized the
+   thread box mid-gesture. Instead #app becomes a viewport-height
+   flex column (topbar, then the shell), the PAGE cannot scroll at
+   all, the footer leaves the chat, and the thread body is the one
+   and only scroller, flexing to whatever height is actually left —
+   no magic constants, and panels/banners inside the thread column
+   shrink the thread instead of pushing the page around. The
+   conversation LIST (no .has-open) keeps the normal page flow. */
+@media (max-width: 720px) {
+  body.chat-open { overflow: hidden; }
+  body.chat-open #app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+  body.chat-open .topbar { flex: none; }
+  body.chat-open .shell { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  body.chat-open .footer { display: none; }
+  body.chat-open .messenger.has-open { flex: 1; min-height: 0; grid-template-rows: minmax(0, 1fr); }
+  body.chat-open .conv-thread { min-height: 0; }
+  body.chat-open .thread-body { flex: 1; min-height: 0; max-height: none; }
 }
 
 /* ------------------------------------------------ Messenger Complete Pack
