@@ -153,8 +153,21 @@ async function smokeTests(browser) {
     await page.locator('.post-card', { hasText: marker }).first().waitFor({ state: 'visible', timeout: 20000 });
     notes.push('smoke: post published and visible');
     const card = page.locator('.post-card', { hasText: marker }).first();
-    await card.locator('.post-menu-wrap button').first().click();
-    await card.locator('[data-act="delete-post"]').click();
+    // Open the post menu and choose Delete. The feed can re-render
+    // under us (realtime echoes patch the mirror), which closes the
+    // menu again before the click lands — runs #7 and #9 both died on
+    // a single-pass delete click timeout while the app itself deletes
+    // fine by hand. Retry the open → delete sequence instead.
+    let deleteClicked = false;
+    for (let attempt = 0; attempt < 3 && !deleteClicked; attempt++) {
+      await card.locator('.post-menu-wrap button').first().click();
+      await page.waitForTimeout(400); // menu open animation
+      try {
+        await card.locator('[data-act="delete-post"]').click({ timeout: 4000 });
+        deleteClicked = true;
+      } catch { /* menu was closed by a re-render — reopen and retry */ }
+    }
+    if (!deleteClicked) throw new Error('delete-post menu item never became clickable after 3 attempts');
     await page.waitForSelector('.modal', { timeout: 8000 });
     await page.click('.modal .btn-danger, .modal .btn-primary');
     await page.locator('.post-card', { hasText: marker }).first().waitFor({ state: 'hidden', timeout: 15000 });
