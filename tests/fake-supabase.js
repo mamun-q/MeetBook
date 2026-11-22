@@ -80,9 +80,14 @@ class Builder {
     this.upsertOpts = {};
     this.countHead = false;
     this.singleMode = null;
+    this.returning = false;
   }
   select(_cols, opts) {
     if (opts?.count) this.countHead = true;
+    // A .select() chained AFTER a write op is PostgREST's RETURNING:
+    // Postgres then applies the table's SELECT policy to the rows
+    // being returned (see the notifications check in execute()).
+    if (this.op === 'insert' || this.op === 'update' || this.op === 'upsert') this.returning = true;
     return this;
   }
   insert(row) { this.op = 'insert'; this.payload = Array.isArray(row) ? row : [row]; return this; }
@@ -101,6 +106,21 @@ class Builder {
   async execute() {
     const map = tableMap(this.table);
     if (this.op === 'insert' || this.op === 'upsert') {
+      // Postgres RETURNING visibility (notifications): the SELECT
+      // policy is recipient-or-admin, so an INSERT ... RETURNING a
+      // notification addressed to SOMEONE ELSE fails the whole
+      // statement with 42501 — this is real Postgres behaviour, and
+      // the reason createNotification must insert without .select().
+      if (this.op === 'insert' && this.table === 'notifications' && this.returning) {
+        const callerId = session?.user?.id || null;
+        const callerRole = callerId ? tableMap('users').get(callerId)?.role : null;
+        const callerIsAdmin = callerRole === 'admin' || callerRole === 'superadmin';
+        for (const row of this.payload) {
+          if (!callerIsAdmin && row.userId !== callerId) {
+            return { data: null, error: { code: '42501', message: 'new row violates row-level security policy for table "notifications"' } };
+          }
+        }
+      }
       const out = [];
       for (const row of this.payload) {
         assertNoUndefined(row, '');

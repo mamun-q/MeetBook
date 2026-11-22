@@ -1310,7 +1310,7 @@ export function adminOverviewView(d, meUser, mode) {
       <p>Mode: <b>${mode.firebase ? 'Live Supabase' : 'Demo / offline'}</b> · Project: <b>${escapeHtml(mode.projectId)}</b> · Auth: ${mode.firebase ? 'Supabase Auth' : 'Local demo accounts'} · Database: ${mode.firebase ? 'connected' : 'local store'} · Storage: ${mode.firebase ? 'Cloudinary with data-URL fallback' : 'local data URLs'}</p>
       ${readOnly ? '' : `<label class="row gap-sm"><input type="checkbox" id="maintenance-toggle" ${d.config?.maintenanceMode ? 'checked' : ''} /> <span class="grow">Maintenance mode (shows a maintenance banner to non-admin users)</span></label>
       <div class="row gap wrap"><a class="btn btn-primary btn-sm" href="#/admin/bots">🤖 Open Bot Admin Panel</a><button class="btn btn-ghost btn-sm" data-act="reset-demo">Reset demo data</button></div>`}
-      <p class="muted small">Admin rights are enforced server-side: Firestore rules check users/{uid}.role and Cloud Functions verify admin before privileged actions. This page is only the interface.</p>
+      <p class="muted small">Admin rights are enforced server-side: Supabase row-level security policies check the signed-in user's role on every request. This page is only the interface.</p>
     </div>`;
 }
 

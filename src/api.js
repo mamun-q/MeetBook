@@ -133,6 +133,21 @@ let localEchoPosts = [];
 // and the server copy side by side until the next listener event.
 let remergePosts = null;
 
+// The same optimistic-echo pattern for groups / events / stories:
+// their create paths insert remotely and (unlike posts) had no local
+// echo, so the creator's own lists and pages — which render from the
+// mirror — showed nothing until the realtime refetch landed, which
+// in practice lagged minutes behind the success toast ("Group
+// created." → "This group could not be found."). Each merge below
+// unions these in and prunes an echo as soon as a slice delivers the
+// server copy, exactly like localEchoPosts.
+let localEchoGroups = [];
+let localEchoEvents = [];
+let localEchoStories = [];
+let remergeGroups = null;
+let remergeEvents = null;
+let remergeStories = null;
+
 // Canonical JSON (object keys sorted at every depth) so two mapped
 // copies of the same Firestore document compare equal regardless of
 // the key order the document was written with.
@@ -199,7 +214,16 @@ async function createNotification(note) {
   // the caller, admins exempt — every real caller passes its own id,
   // and bot notifications ride the admin exemption.
   const row = { id: genId('n'), ...note };
-  await sbInsert('notifications', row);
+  // Deliberately NOT sbInsert: sbInsert chains .select() (RETURNING),
+  // and Postgres applies the notifications SELECT policy — recipient
+  // or admin only — to returned rows, so writing a notification FOR
+  // someone else fails the whole statement with 42501 ("new row
+  // violates row-level security policy for table notifications")
+  // even though the INSERT policy allows it. A plain insert with no
+  // RETURNING is the correct write; the row is already fully known
+  // client-side.
+  const { error } = await supabase.from('notifications').insert(row);
+  if (error) throw sbError(error, 'notifications');
   return row;
 }
 
@@ -588,6 +612,12 @@ function stopRemoteSync() {
   botSecretsLoaded = false;
   localEchoPosts = [];
   remergePosts = null;
+  localEchoGroups = [];
+  localEchoEvents = [];
+  localEchoStories = [];
+  remergeGroups = null;
+  remergeEvents = null;
+  remergeStories = null;
   remote = blankRemote();
   emitData();
 }
@@ -773,10 +803,18 @@ function startRemoteSync() {
   const mergeStories = () => {
     const byIdMap = new Map();
     for (const s of [...publicStories, ...audienceStories, ...ownStories]) byIdMap.set(s.id, s);
-    const next = [...byIdMap.values()];
+    const serverStories = [...byIdMap.values()];
+    const serverIds = new Set(serverStories.map((s) => s.id));
+    // Local echoes (see mergePosts): a just-created story is mirrored
+    // at once and pruned as soon as a slice delivers the server copy;
+    // echoes older than a minute that never landed are dropped.
+    const cutoff = Date.now() - 60000;
+    localEchoStories = localEchoStories.filter((s) => !serverIds.has(s.id) && s.createdAt > cutoff);
+    const next = [...serverStories, ...localEchoStories];
     if (sameRowsById(remote.stories || [], next)) { remote.stories = next; return; } // silent rebind — see setSlice's note
     patchMirror((r) => { r.stories = next; });
   };
+  remergeStories = mergeStories;
   const fetchPublicStories = async () => { if (stale()) return; try { publicStories = (await sbSelect('stories', (q) => q.eq('visibility', 'public').order('createdAt', { ascending: false }).limit(100))).map(mapStory); mergeStories(); } catch { /* leave untouched */ } };
   const fetchOwnStories = async () => { if (stale()) return; try { ownStories = (await sbSelect('stories', (q) => q.eq('authorId', uid))).map(mapStory); mergeStories(); } catch { /* leave untouched */ } };
   const fetchAudienceStories = async () => { if (stale()) return; try { audienceStories = (await sbSelect('stories', (q) => q.contains('audienceIds', [uid]))).map(mapStory); mergeStories(); } catch { /* leave untouched */ } };
@@ -795,10 +833,17 @@ function startRemoteSync() {
   const mergeEvents = () => {
     const byIdMap = new Map();
     for (const e of [...publicEvents, ...audienceEvents, ...ownEvents]) byIdMap.set(e.id, e);
-    const next = [...byIdMap.values()];
+    const serverEvents = [...byIdMap.values()];
+    const serverIds = new Set(serverEvents.map((e) => e.id));
+    // Local echoes (see mergePosts): pruned once a slice delivers
+    // the server copy, or after a minute as a leak guard.
+    const cutoff = Date.now() - 60000;
+    localEchoEvents = localEchoEvents.filter((e) => !serverIds.has(e.id) && e.createdAt > cutoff);
+    const next = [...serverEvents, ...localEchoEvents];
     if (sameRowsById(remote.events || [], next)) { remote.events = next; return; } // silent rebind — see setSlice's note
     patchMirror((r) => { r.events = next; });
   };
+  remergeEvents = mergeEvents;
   const fetchPublicEvents = async () => { if (stale()) return; try { publicEvents = (await sbSelect('events', (q) => q.eq('visibility', 'public').order('dateTime', { ascending: true }).limit(100))).map(mapEvent); mergeEvents(); } catch { /* leave untouched */ } };
   const fetchOwnEvents = async () => { if (stale()) return; try { ownEvents = (await sbSelect('events', (q) => q.eq('createdBy', uid))).map(mapEvent); mergeEvents(); } catch { /* leave untouched */ } };
   const fetchAudienceEvents = async () => { if (stale()) return; try { audienceEvents = (await sbSelect('events', (q) => q.contains('audienceIds', [uid]))).map(mapEvent); mergeEvents(); } catch { /* leave untouched */ } };
@@ -821,10 +866,17 @@ function startRemoteSync() {
   const mergeGroups = () => {
     const byIdMap = new Map();
     for (const g of [...publicGroups, ...memberGroups]) byIdMap.set(g.id, g);
-    const next = [...byIdMap.values()];
+    const serverGroups = [...byIdMap.values()];
+    const serverIds = new Set(serverGroups.map((g) => g.id));
+    // Local echoes (see mergePosts): pruned once a slice delivers
+    // the server copy, or after a minute as a leak guard.
+    const cutoff = Date.now() - 60000;
+    localEchoGroups = localEchoGroups.filter((g) => !serverIds.has(g.id) && g.createdAt > cutoff);
+    const next = [...serverGroups, ...localEchoGroups];
     if (sameRowsById(remote.groups || [], next)) { remote.groups = next; return; } // silent rebind — see setSlice's note
     patchMirror((r) => { r.groups = next; });
   };
+  remergeGroups = mergeGroups;
   const fetchPublicGroups = async () => { if (stale()) return; try { publicGroups = (await sbSelect('groups', (q) => q.eq('privacy', 'public').limit(200))).map(mapGroup); mergeGroups(); } catch { /* leave untouched */ } };
   const fetchMemberGroups = async () => { if (stale()) return; try { memberGroups = (await sbSelect('groups', (q) => q.contains('members', [uid]))).map(mapGroup); mergeGroups(); } catch { /* leave untouched */ } };
   void fetchPublicGroups();
@@ -1004,7 +1056,19 @@ export async function updateProfile(userId, patch) {
       if (taken.some((d) => d.id !== userId)) throw new Error('That username is already taken.');
     }
   }
-  if (live) { await sbUpdate('users', userId, patch); return; }
+  if (live) {
+    const updated = await sbUpdate('users', userId, patch);
+    // Zero affected rows (sbUpdate returns null) means the write
+    // never landed — surface that instead of letting the caller
+    // toast "Profile updated." over an unchanged profile.
+    if (!updated) throw new Error('Your profile could not be updated — please try again.');
+    // Mirror the confirmed write at once: profile pages render from
+    // the mirror, and the realtime refetch can lag far behind the
+    // success toast (a saved bio used to "revert" on reload until
+    // the refetch caught up — or forever, on a zero-row write).
+    patchMirror((r) => { const u = r.users.find((x) => x.id === userId); if (u) Object.assign(u, patch); });
+    return;
+  }
   mutate((s) => {
     const u = s.users.find((x) => x.id === userId);
     if (u) Object.assign(u, patch);
@@ -1190,12 +1254,33 @@ async function fanOutMentions(text, author, postId) {
 }
 
 export async function editPost(postId, text) {
-  if (live) { await sbUpdate('posts', postId, { text, editedAt: Date.now() }); return; }
+  if (live) {
+    const updated = await sbUpdate('posts', postId, { text, editedAt: Date.now() });
+    // sbUpdate returns null when the update matched zero rows (an
+    // RLS USING denial, or a stale local-echo id whose server row
+    // does not exist yet). That used to fall through silently, so
+    // the UI toasted "Post updated." for a write that never landed
+    // and the old text survived every reload.
+    if (!updated) throw new Error('That post could not be updated — it may have been deleted, or is still publishing.');
+    // Patch the mirror with the confirmed row so the new text shows
+    // now, not whenever the realtime refetch lands.
+    patchRemotePost(postId, (p) => { p.text = updated.text; p.editedAt = updated.editedAt; });
+    return;
+  }
   mutate((s) => { const p = s.posts.find((x) => x.id === postId); if (p) { p.text = text; p.editedAt = Date.now(); } });
 }
 
 export async function deletePost(postId) {
-  if (live) { await sbDelete('posts', postId); return; }
+  if (live) {
+    await sbDelete('posts', postId);
+    // Drop the post from the mirror (and any local echo) at once:
+    // the Firestore SDK's local cache hid deletes instantly, but
+    // the Supabase mirror only learns about them from the realtime
+    // refetch, which left deleted posts on screen for minutes.
+    localEchoPosts = localEchoPosts.filter((p) => p.id !== postId);
+    patchMirror((r) => { r.posts = (r.posts || []).filter((p) => p.id !== postId); });
+    return;
+  }
   mutate((s) => { s.posts = s.posts.filter((p) => p.id !== postId); });
 }
 
@@ -1515,6 +1600,13 @@ export async function createStory({ text, image, bg, visibility }) {
   if (live) {
     const storyId = genId('story');
     await sbInsert('stories', { id: storyId, ...story });
+    // Mirror the confirmed story at once (see localEchoStories):
+    // the stories rail renders from the mirror, and the realtime
+    // refetch can lag minutes behind the success toast — the
+    // creator's own rail kept saying "No stories yet" while other
+    // users already saw the story.
+    localEchoStories = [{ id: storyId, ...story }, ...localEchoStories];
+    if (remergeStories) remergeStories(); else emitData();
     return { id: storyId, ...story };
   }
   const full = { id: genId('story'), ...story };
@@ -1551,6 +1643,13 @@ export async function createGroup({ name, description, privacy, cover }) {
   if (live) {
     const groupId = genId('g');
     await sbInsert('groups', { id: groupId, ...group });
+    // Mirror the confirmed group at once (see localEchoGroups):
+    // the group page and the Groups list render from the mirror,
+    // and the realtime refetch can lag minutes behind the success
+    // toast — the creator navigated straight to "This group could
+    // not be found."
+    localEchoGroups = [{ id: groupId, ...group }, ...localEchoGroups];
+    if (remergeGroups) remergeGroups(); else emitData();
     return { id: groupId, ...group };
   }
   const full = { id: genId('g'), ...group };
@@ -1739,9 +1838,24 @@ export async function toggleFollowPage(pageId) {
   if (page.ownerId === user.id) return true; // owners always count as following
   const following = (page.followers || []).includes(user.id);
   if (live) {
-    await sbUpdate('pages', pageId, { followers: following ? (page.followers || []).filter((id) => id !== user.id) : [...(page.followers || []), user.id] });
-    if (!following) await createNotification({ userId: page.ownerId, type: 'page_follow', actorId: user.id, text: `${user.name} started following your page "${page.name}".`, postId: '', conversationId: '', pageId: page.id, read: false, createdAt: Date.now() });
-    return !following;
+    // The followers delta is computed from the FRESH server row, not
+    // the mirror: pages_update_followers pins the delta to exactly ±
+    // the caller's uid against the STORED array (same hazard as
+    // toggleFollow — a stale-mirror patch can be a no-op against the
+    // server and return a raw 42501). The toggle decision rides the
+    // server state too, so the delta is a real ±1 by construction.
+    const fresh = await sbGet('pages', pageId);
+    const serverFollowers = fresh?.followers || page.followers || [];
+    const wasFollowing = serverFollowers.includes(user.id);
+    const nextFollowers = wasFollowing ? serverFollowers.filter((id) => id !== user.id) : [...serverFollowers, user.id];
+    await sbUpdate('pages', pageId, { followers: nextFollowers });
+    if (!wasFollowing) {
+      // Wrapped like every other notification call site: a failed
+      // notification must never masquerade as a failed follow.
+      try { await createNotification({ userId: page.ownerId, type: 'page_follow', actorId: user.id, text: `${user.name} started following your page "${page.name}".`, postId: '', conversationId: '', pageId: page.id, read: false, createdAt: Date.now() }); } catch { /* the follow itself already succeeded */ }
+    }
+    patchMirror((r) => { const mp = (r.pages || []).find((p) => p.id === pageId); if (mp) mp.followers = nextFollowers; });
+    return !wasFollowing;
   }
   let nowFollowing = false;
   mutate((s) => {
@@ -1782,6 +1896,10 @@ export async function createEvent({ title, description, dateTime, location, cove
   if (live) {
     const eventId = genId('ev');
     await sbInsert('events', { id: eventId, ...event });
+    // Mirror the confirmed event at once (see localEchoEvents) —
+    // same creator-invisibility lag as groups/stories.
+    localEchoEvents = [{ id: eventId, ...event }, ...localEchoEvents];
+    if (remergeEvents) remergeEvents(); else emitData();
     return { id: eventId, ...event };
   }
   const full = { id: genId('ev'), ...event };
@@ -1962,14 +2080,42 @@ export async function toggleFollow(targetId) {
   const following = (user.following || []).includes(targetId);
   if (live) {
     const target = data().users.find((u) => u.id === targetId);
-    await sbUpdate('users', user.id, { following: following ? (user.following || []).filter((id) => id !== targetId) : [...(user.following || []), targetId] });
+    // Both writes are computed from FRESH server rows, never the
+    // local mirror: the users_update_followers policy accepts only a
+    // followers delta of exactly ± the caller's uid against the
+    // STORED array, so a patch computed from a stale mirror can be a
+    // no-op against the server (a second tap before the refetch
+    // lands, or a follow another session already recorded) and comes
+    // back as a raw 42501 RLS error — even though the follow itself
+    // had already landed, leaving the UI and the database
+    // disagreeing. Reading both rows first makes each side
+    // idempotent: a side is only written when it actually has to
+    // change, so the toggle can never send a no-diff followers patch.
+    const [freshMe, freshTarget] = await Promise.all([sbGet('users', user.id), sbGet('users', targetId)]);
+    const myFollowing = freshMe?.following || user.following || [];
+    const nowFollowing = !myFollowing.includes(targetId);
+    const nextFollowing = nowFollowing ? [...myFollowing, targetId] : myFollowing.filter((id) => id !== targetId);
+    await sbUpdate('users', user.id, { following: nextFollowing });
     // The followers write touches ANOTHER user's row — the policy
     // allows exactly this one-field delta (adding/removing only yourself).
-    await sbUpdate('users', targetId, { followers: following ? (target?.followers || []).filter((id) => id !== user.id) : [...(target?.followers || []), user.id] });
-    if (!following) {
+    const serverFollowers = freshTarget?.followers || target?.followers || [];
+    const hasMe = serverFollowers.includes(user.id);
+    let nextFollowers = serverFollowers;
+    if (nowFollowing && !hasMe) nextFollowers = [...serverFollowers, user.id];
+    if (!nowFollowing && hasMe) nextFollowers = serverFollowers.filter((id) => id !== user.id);
+    if (nextFollowers !== serverFollowers) await sbUpdate('users', targetId, { followers: nextFollowers });
+    if (nowFollowing) {
       try { await createNotification({ userId: targetId, type: 'follow', actorId: user.id, text: `${user.name} started following you.`, postId: '', conversationId: '', read: false, createdAt: Date.now() }); } catch { /* the follow itself already succeeded */ }
     }
-    return !following;
+    // Reflect the confirmed state in the mirror at once — the button
+    // and the follower count must not wait for the realtime refetch.
+    patchMirror((r) => {
+      const mine = r.users.find((u) => u.id === user.id);
+      if (mine) mine.following = nextFollowing;
+      const theirs = r.users.find((u) => u.id === targetId);
+      if (theirs) theirs.followers = nextFollowers;
+    });
+    return nowFollowing;
   }
   mutate((s) => {
     const u = s.users.find((x) => x.id === user.id);
