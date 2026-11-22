@@ -46,7 +46,8 @@ export function buildGeminiPrompt(bot, memories = [], context = {}) {
     `Task: write a short ${kind === 'message' ? 'message reply' : kind} for a social network. ${BOT_PRESENCE_RULES} Keep it under 60 words.`,
     'Reply in the same language as the context: if the context is in Bangla, reply in Bangla; if it is in English, reply in English.',
     context?.thread ? `Recent conversation (oldest first — continue it naturally, do not repeat yourself):\n${context.thread}` : '',
-    context?.text ? `Context: ${context.text}` : ''
+    context?.text ? `Context: ${context.text}` : '',
+    Array.isArray(context?.avoid) && context.avoid.length ? `IMPORTANT: you already posted about these topics recently — write about something completely different this time, do not reuse their topics, openings or phrasing:\n${context.avoid.map((t) => `- ${String(t).slice(0, 90)}`).join('\n')}` : ''
   ].filter(Boolean).join('\n');
 }
 

@@ -165,11 +165,12 @@ describe('live bot runner (Spark)', () => {
     await settle();
   });
 
-  it('Gemini failure -> template text is still posted', async () => {
+  it('Gemini failure -> the post is skipped, not replaced by a template post', async () => {
     fake.remove('botSettings', 'counters'); // fresh counters: interval + limits reset
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
     // Pin the Decision Engine v2 rng so the cycle picks the post action.
     const rngSpy = vi.spyOn(Math, 'random').mockReturnValue(0.05);
+    const novaPostsBefore = fake.all('posts').filter((p) => p.authorId === 'bot_nova').length;
     let r;
     try {
       r = await api.runBotCycle();
@@ -177,12 +178,12 @@ describe('live bot runner (Spark)', () => {
       rngSpy.mockRestore();
     }
     expect(r.ran).toBe(true);
+    // Owner quality rule (2026-11-23): when AI generation fails, the
+    // cycle does NOT publish a bland template post — doing nothing is
+    // a valid decision. The brain row still records the fallback so
+    // the outage stays diagnosable from the admin panel.
     const botPosts = fake.all('posts').filter((p) => p.authorId === 'bot_nova');
-    const newest = botPosts[botPosts.length - 1];
-    expect(newest.generatedBy).toBeUndefined(); // no such column on Supabase; the brain assertion below carries the stamp
-    // Natural Presence: bot posts are stored raw — no "AI Bot post ·" stamp.
-    expect(newest.text).not.toContain('AI Bot post ·');
-    expect(newest.text).not.toContain(GEMINI_TEXT);
+    expect(botPosts.length).toBe(novaPostsBefore);
     await settle();
     expect(fake.get('botBrains', 'bot_nova').provider).toBe('template-fallback');
   });

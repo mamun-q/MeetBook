@@ -172,24 +172,89 @@ export function isDuplicateBotText(text, recentTexts = []) {
   return (recentTexts || []).some((t) => normaliseBotText(t) === n);
 }
 
+// --- Output quality gate (2026-11-23) ---------------------------------
+// Free models occasionally return garbage: text with stray words in
+// scripts the bot never writes (a Bangla post containing Hebrew and
+// Chinese fragments reached the live feed), or JSON-style escaped
+// newlines ("\n" printed literally instead of a line break). Every
+// generated bot text passes through here BEFORE it can be posted,
+// commented or sent: escape sequences are repaired, control characters
+// are stripped, and text containing a foreign script is rejected
+// outright ('' — callers treat that as a generation failure).
+const FOREIGN_SCRIPT_RE = /[\u0590-\u05FF\u0400-\u04FF\u3040-\u30FF\u3400-\u9FFF\uAC00-\uD7AF]/;
+
+export function sanitizeBotOutput(text) {
+  if (typeof text !== 'string') return '';
+  let out = text
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\n')
+    .replace(/\\t/g, ' ')
+    .replace(/\\"/g, '"')
+    .replace(/\\'/g, "'")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (!out) return '';
+  if (FOREIGN_SCRIPT_RE.test(out)) return '';
+  return out;
+}
+
 // --- Master Vision Phase 1: similarity, relevance, thread context -----
 // Token-set similarity (Jaccard over meaningful words, Unicode-aware so
 // Bangla text works too). This is the practical near-duplicate detector
 // for the anti-repetition rules: it catches REWORDED repeats — a simple
 // word replacement must not make duplicate content acceptable.
+export function contentTokenSet(t = '') {
+  return new Set(normaliseBotText(t).split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 2));
+}
+
 export function textSimilarity(a = '', b = '') {
-  const tokens = (t) => new Set(normaliseBotText(t).split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 2));
-  const A = tokens(a);
-  const B = tokens(b);
+  const A = contentTokenSet(a);
+  const B = contentTokenSet(b);
   if (!A.size || !B.size) return 0;
   let inter = 0;
   for (const w of A) if (B.has(w)) inter += 1;
   return inter / (A.size + B.size - inter);
 }
 
-export function isNearDuplicateBotText(text, recentTexts = [], threshold = 0.55) {
+// Overlap coefficient: how much of the SMALLER text's vocabulary the
+// larger one covers. Jaccard alone misses the common failure mode — a
+// short distinctive opening ("just spotted a shooting star…") followed
+// by a freshly worded tail scores ~0.28 Jaccard yet is plainly the same
+// post again (Nova did exactly this twice in 20 minutes, 2026-11-23).
+export function textOverlap(a = '', b = '') {
+  const A = contentTokenSet(a);
+  const B = contentTokenSet(b);
+  if (!A.size || !B.size) return 0;
+  let inter = 0;
+  for (const w of A) if (B.has(w)) inter += 1;
+  return inter / Math.min(A.size, B.size);
+}
+
+// Shared topic phrase: any common run of 3+ consecutive content words.
+// The strongest same-topic signal there is — two posts that open with
+// the same three content words are the same post wearing a new tail.
+export function sharesTopicPhrase(a = '', b = '') {
+  const seq = (t) => normaliseBotText(t).split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 2);
+  const A = seq(a);
+  const B = new Set();
+  const seqB = seq(b);
+  for (let i = 0; i + 3 <= seqB.length; i++) B.add(seqB.slice(i, i + 3).join(' '));
+  if (!B.size) return false;
+  for (let i = 0; i + 3 <= A.length; i++) if (B.has(A.slice(i, i + 3).join(' '))) return true;
+  return false;
+}
+
+// Near-duplicate test. recentTexts is the mixed ecosystem set (own +
+// other bots' recent posts); ownTexts, when given, is this bot's OWN
+// recent posts and gets the strictest test (shared topic phrase),
+// because a bot repeating its own topic is the failure that matters —
+// two different bots may legitimately open with a similar phrase.
+export function isNearDuplicateBotText(text, recentTexts = [], threshold = 0.55, ownTexts = []) {
   if (isDuplicateBotText(text, recentTexts)) return true;
-  return (recentTexts || []).some((t) => textSimilarity(text, t) >= threshold);
+  if ((recentTexts || []).some((t) => textSimilarity(text, t) >= threshold || textOverlap(text, t) >= 0.62)) return true;
+  return (ownTexts || []).some((t) => sharesTopicPhrase(text, t));
 }
 
 // How relevant a text is to a bot: the share of its interests that the
@@ -629,6 +694,32 @@ export function botCountersForDay(stored, dayKey) {
   if (!stored || stored.day !== dayKey || typeof stored.counters !== 'object' || !stored.counters) return {};
   const out = {};
   for (const [id, c] of Object.entries(stored.counters)) out[id] = { ...emptyBotCounters(), ...(c || {}) };
+  return out;
+}
+
+// Merge two same-day counters maps without ever LOSING a count. The
+// counters doc has several independent writers (browser autocycle,
+// GitHub runner, instant responder); each loads the map, bumps its own
+// bot and writes the whole map back. A shallow spread merge lets a
+// writer holding a STALE copy erase another writer's fresh increments
+// for the same bot — on 2026-11-23 the live doc said Nova had posted 0
+// times while her 2 newest posts were already on the feed, so the caps
+// and global ceilings were being enforced against fiction. Counters
+// only ever grow within a day, so the correct merge is per-bot,
+// per-field MAX. (Day changes are handled by botCountersForDay's reset
+// before this is ever called.)
+const COUNTER_FIELDS = ['postsToday', 'commentsToday', 'likesToday', 'messagesToday', 'lastActionAt'];
+
+export function mergeBotCountersMax(currentMap = {}, incomingMap = {}) {
+  const out = {};
+  const ids = new Set([...Object.keys(currentMap || {}), ...Object.keys(incomingMap || {})]);
+  for (const id of ids) {
+    const cur = currentMap?.[id] || {};
+    const inc = incomingMap?.[id] || {};
+    const merged = { ...emptyBotCounters(), ...cur, ...inc };
+    for (const f of COUNTER_FIELDS) merged[f] = Math.max(Number(cur[f] || 0), Number(inc[f] || 0));
+    out[id] = merged;
+  }
   return out;
 }
 

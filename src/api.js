@@ -9,7 +9,7 @@ import {
 } from './store.js';
 import { supabase, supabaseReady } from './supabase.js';
 import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme, canEditMessage, chatPollVote, VANISH_TTL_MS, TYPING_FRESH_MS, isGroupMember } from './utils.js';
-import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, pickFriendRequestsToAccept, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost, globalBotTotals, isOwnerUserId, wantsPhotoRequest, countAlbumPhotosSent, nextAlbumPhoto, pickPhotoCaption } from './botLogic.js';
+import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, pickFriendRequestsToAccept, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost, globalBotTotals, isOwnerUserId, wantsPhotoRequest, countAlbumPhotosSent, nextAlbumPhoto, pickPhotoCaption, sanitizeBotOutput, mergeBotCountersMax } from './botLogic.js';
 import { canAccessBotSecrets, botModel } from './gemini.js';
 import { providerById, resolveAiConfig, generateRouted, testProvider as testAiProvider, getLastRoutedFailure, resetLastRoutedFailure, anyProviderConfigured, dhakaDayKey, normaliseUsageMap, usageTotals } from './aiProviders.js';
 import { isCloudinaryConfigured, uploadToCloudinary, uploadFileToCloudinary } from './cloudinary.js';
@@ -4657,8 +4657,14 @@ async function generateBotText(bot, memories, context, templateText) {
     onAttempt: (providerId, attempt) => recordAiUsage(providerId, attempt)
   });
   if (res) {
-    recordBotBrain(bot, res.provider, res.model);
-    return { text: res.text, provider: res.provider };
+    // Quality gate: repair escaped newlines; foreign-script garbage is
+    // a generation failure, not a post (falls through to the template).
+    const clean = sanitizeBotOutput(res.text);
+    if (clean) {
+      recordBotBrain(bot, res.provider, res.model);
+      return { text: clean, provider: res.provider };
+    }
+    logBotEvent(bot.id, 'warn', `AI output for ${bot.name} rejected by the quality gate (foreign script or empty), using template fallback.`);
   }
   if (anyProviderConfigured(config)) {
     logBotEvent(bot.id, 'warn', `AI generation failed for ${bot.name} (${getLastRoutedFailure() || 'no provider available'}), using template fallback.`);
@@ -4690,11 +4696,12 @@ export async function runDemoBotCycle() {
       // Anti-duplicate set: this bot's recent posts AND other bots'
       // recent posts (Master Vision: compare across the ecosystem).
       const botIds = new Set(s.bots.map((b) => b.id));
+      const ownTexts = s.posts.filter((p) => p.authorId === bot.id).slice(0, 10).map((p) => p.text);
       const recentTexts = [
-        ...s.posts.filter((p) => p.authorId === bot.id).slice(0, 10),
-        ...s.posts.filter((p) => p.authorId !== bot.id && botIds.has(p.authorId)).slice(0, 10)
-      ].map((p) => p.text);
-      if (entry.gen && isNearDuplicateBotText(entry.gen.text, recentTexts)) {
+        ...ownTexts,
+        ...s.posts.filter((p) => p.authorId !== bot.id && botIds.has(p.authorId)).slice(0, 10).map((p) => p.text)
+      ];
+      if (entry.gen && isNearDuplicateBotText(entry.gen.text, recentTexts, 0.55, ownTexts)) {
         const fresh = freshTemplatePost(bot, recentTexts);
         entry.gen = fresh ? { ...entry.gen, text: fresh, provider: 'template' } : null;
       }
@@ -4917,9 +4924,13 @@ async function saveLiveBotCounters(day, counters) {
   // would be last-writer-wins): read the stored row and merge this
   // cycle's counters over it — same-day only; a stale-day row is
   // replaced wholesale, matching botCountersForDay's reset semantics.
+  // The merge itself is per-field MAX (mergeBotCountersMax): a shallow
+  // spread still let a writer holding a stale copy of a bot's entry
+  // erase that bot's fresh increments from another writer (live proof
+  // 2026-11-23: counters said Nova 0 posts, feed showed 2).
   try {
     const current = await sbGet('botSettings', 'counters');
-    const merged = current && current.day === day ? { ...(current.counters || {}), ...counters } : counters;
+    const merged = current && current.day === day ? mergeBotCountersMax(current.counters || {}, counters) : counters;
     await sbUpsert('botSettings', { id: 'counters', day, counters: merged, updatedAt: Date.now() });
   } catch { /* best-effort */ }
 }
@@ -5135,18 +5146,25 @@ export async function runLiveBotCycle() {
             ...(data().users || []).filter((u) => u.isBot).map((u) => u.id),
             ...(data().bots || []).map((b) => b.id)
           ]);
+          const ownTexts = (data().posts || []).filter((p) => p.authorId === bot.id).slice(0, 10).map((p) => p.text);
           const recentTexts = [
-            ...(data().posts || []).filter((p) => p.authorId === bot.id).slice(0, 10),
-            ...(data().posts || []).filter((p) => p.authorId !== bot.id && botIds.has(p.authorId)).slice(0, 10)
-          ].map((p) => p.text);
+            ...ownTexts,
+            ...(data().posts || []).filter((p) => p.authorId !== bot.id && botIds.has(p.authorId)).slice(0, 10).map((p) => p.text)
+          ];
           let gen = await generateBotText(bot, memories, { kind: 'post' }, generateTemplatePost(bot));
-          if (isNearDuplicateBotText(gen.text, recentTexts)) {
-            // The provider (or the random template) repeated one of
-            // the bot's recent posts — swap in a fresh template once;
-            // if every variant repeats, skip the post entirely.
-            const fresh = freshTemplatePost(bot, recentTexts);
-            if (!fresh) { results.push({ bot: bot.name, action: 'none', reason: 'post would repeat a recent post' }); gen = null; }
-            else gen = { ...gen, text: fresh, provider: 'template' };
+          if (gen && String(gen.provider || '').startsWith('template')) {
+            // AI generation failed (or its output was rejected): a
+            // bland template post is worse than no post — doing
+            // nothing is a valid decision (owner quality rule,
+            // 2026-11-23).
+            results.push({ bot: bot.name, action: 'none', reason: 'AI unavailable — skipped post instead of a template post' });
+            gen = null;
+          } else if (gen && isNearDuplicateBotText(gen.text, recentTexts, 0.55, ownTexts)) {
+            // Repeated a recent post: regenerate ONCE with the recent
+            // topics explicitly banned; if it still repeats, skip.
+            const retry = await generateBotText(bot, memories, { kind: 'post', avoid: ownTexts.slice(0, 5) }, generateTemplatePost(bot));
+            if (retry && !String(retry.provider || '').startsWith('template') && !isNearDuplicateBotText(retry.text, recentTexts, 0.55, ownTexts)) gen = retry;
+            else { results.push({ bot: bot.name, action: 'none', reason: 'post would repeat a recent post' }); gen = null; }
           }
           if (gen) {
           // Same stored shape createPost writes: the audience pair is
