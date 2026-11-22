@@ -261,6 +261,13 @@ export function render() {
     if (openMenu) openMenu.classList.remove('hidden'); else openPostMenuId = '';
   }
 
+  // Same for the shared per-message menu: if one was open, re-mount
+  // it into its rebuilt row so it survives the re-render like the
+  // per-row copies used to.
+  if (route === 'messages' && V.uiState.msgMenuFor) {
+    if (!openSharedMsgMenu(V.uiState.msgMenuFor)) V.uiState.msgMenuFor = '';
+  }
+
   // Restore the open thread's scroll position + composer chrome
   // SYNCHRONOUSLY, before paint: positioning used to wait for a
   // 30ms timer, so every rebuild first flashed the top of the
@@ -407,6 +414,26 @@ function restoreThreadView() {
     cs.value = s.convSearch;
     applyConvListFilter(cs);
   }
+}
+
+// Mount the ONE shared per-message menu (views.sharedMsgMenuHtml)
+// into a message's column, in the exact spot the per-row copies used
+// to render (after the bubble, before the reaction chips): stamps
+// the message id onto its buttons for the delegated handlers and
+// hides Unsend for other people's messages (the shared copy always
+// carries the button). Returns false when the row is not on screen.
+function openSharedMsgMenu(id) {
+  const menu = document.getElementById('msg-menu');
+  const col = document.getElementById(`msg-${id}`)?.querySelector('.msg-col');
+  if (!menu || !col) return false;
+  const msg = api.data().messages.find((m) => m.id === id);
+  menu.querySelectorAll('button').forEach((b) => { b.dataset.id = id; });
+  menu.querySelector('[data-act="unsend-message"]')?.classList.toggle('hidden', !msg || msg.senderId !== me()?.id);
+  menu.dataset.forId = id;
+  const chips = col.querySelector('.msg-chips');
+  if (chips) col.insertBefore(menu, chips); else col.appendChild(menu);
+  menu.classList.remove('hidden');
+  return true;
 }
 
 // Passive scroll listener (installed by setupThread): keeps the
@@ -1107,14 +1134,37 @@ document.addEventListener('click', async (e) => {
     }
     case 'cancel-reply': replyTarget = null; hideReplyPreview(); break;
     case 'msg-react-toggle': {
-      const picker = document.getElementById(`msg-picker-${actEl.dataset.id}`);
-      document.querySelectorAll('.msg-picker').forEach((p) => { if (p !== picker) p.classList.add('hidden'); });
-      picker?.classList.toggle('hidden');
+      // Shared picker (one per thread): mount it into this message's
+      // bubble, in the spot the per-row copies used to render (right
+      // before the footer line), with this message's id stamped onto
+      // its buttons. Toggling the same message again closes it; the
+      // "more" grid closes with it, as before.
+      const id = actEl.dataset.id;
+      const picker = document.getElementById('msg-picker');
+      const bubble = document.getElementById(`msg-${id}`)?.querySelector('.msg-bubble');
+      document.getElementById('msg-picker-more')?.classList.add('hidden');
+      if (!picker || !bubble) break;
+      if (!picker.classList.contains('hidden') && picker.dataset.forId === id) { picker.classList.add('hidden'); break; }
+      picker.querySelectorAll('button').forEach((b) => { b.dataset.id = id; });
+      picker.dataset.forId = id;
+      bubble.insertBefore(picker, bubble.querySelector('.msg-foot'));
+      picker.classList.remove('hidden');
       break;
     }
     case 'msg-react': await handle(api.toggleMessageReaction(actEl.dataset.id, actEl.dataset.emoji)); break;
     // ---- Fun Pack: stickers, location, chat polls, any-emoji reactions, nicknames
-    case 'react-more': { document.querySelectorAll('.msg-picker-more').forEach((p) => { if (p.id !== `msg-picker-more-${actEl.dataset.id}`) p.classList.add('hidden'); }); document.getElementById(`msg-picker-more-${actEl.dataset.id}`)?.classList.toggle('hidden'); break; }
+    case 'react-more': {
+      const id = actEl.dataset.id;
+      const picker = document.getElementById('msg-picker');
+      const more = document.getElementById('msg-picker-more');
+      if (!picker || !more) break;
+      if (!more.classList.contains('hidden') && more.dataset.forId === id) { more.classList.add('hidden'); break; }
+      more.querySelectorAll('button').forEach((b) => { b.dataset.id = id; });
+      more.dataset.forId = id;
+      picker.insertAdjacentElement('afterend', more);
+      more.classList.remove('hidden');
+      break;
+    }
     case 'sticker-toggle': { const panel = document.getElementById('sticker-panel'); panel?.classList.toggle('hidden'); if (panel && !panel.classList.contains('hidden')) applyThreadScroll(); break; }
     case 'send-sticker': { const convId = document.getElementById('message-form')?.dataset.conv; if (convId) { await handle(api.sendMessage(convId, { sticker: actEl.dataset.emoji })); render(); scrollThread(); } break; }
     case 'send-location': {
@@ -1137,11 +1187,16 @@ document.addEventListener('click', async (e) => {
     case 'pin-message': { const pinned = await handle(api.togglePinMessage(actEl.dataset.id)); if (pinned !== null) toast(pinned ? t('messagePinned') : t('messageUnpinned'), 'success'); break; }
     // ---- Messenger Complete Pack: per-message menu, edit, unsend, hide, forward
     case 'msg-menu': {
+      // Shared menu (one per thread): mount it into this message's
+      // column; toggling the same message again closes it.
       const id = actEl.dataset.id;
-      const menu = document.getElementById(`msg-menu-${id}`);
-      document.querySelectorAll('.msg-menu').forEach((m) => { if (m !== menu) m.classList.add('hidden'); });
-      V.uiState.msgMenuFor = V.uiState.msgMenuFor === id ? '' : id;
-      menu?.classList.toggle('hidden');
+      const menu = document.getElementById('msg-menu');
+      if (menu && !menu.classList.contains('hidden') && menu.dataset.forId === id) {
+        menu.classList.add('hidden');
+        V.uiState.msgMenuFor = '';
+        break;
+      }
+      V.uiState.msgMenuFor = openSharedMsgMenu(id) ? id : '';
       break;
     }
     case 'edit-message': {

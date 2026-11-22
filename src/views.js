@@ -949,6 +949,8 @@ export function messagesView(d, meUser, activeConvId = '') {
       <div class="thread-body" id="thread-body" style="${theme.tint ? `background:${theme.tint};` : ''}${theme.bubble ? `--bubble-mine:${theme.bubble};` : ''}">
         ${active.msgs.map((m) => messageHtml(m, meUser, byId, active.isGroup, active.conv)).join('') || '<p class="muted center">No messages yet. Say hello 👋</p>'}
       </div>
+      ${sharedMsgPickersHtml()}
+      ${sharedMsgMenuHtml()}
       <div class="typing-row" id="typing-row">${typingIndicatorHtml(active.conv, meUser, byId)}</div>
       ${active.request ? `<div class="request-banner">${icon('inbox')} <span class="grow"><b>${escapeHtml(active.other?.name || '')}</b> ${t('requestHint')}</span><button class="btn btn-primary btn-sm" data-act="accept-msg-request" data-id="${active.conv.id}">${t('acceptRequest')}</button></div>` : ''}
       ${active.conv.vanish ? `<div class="vanish-banner">${icon('eye-off')} ${t('vanishBanner')}</div>` : ''}
@@ -1045,18 +1047,34 @@ function messageHtml(m, meUser, byId, isGroup = false, conv = null) {
       ${m.location ? `<a class="msg-location" href="${escapeHtml(mapsUrl(m.location))}" target="_blank" rel="noopener noreferrer"><span class="msg-location-pin">${icon('map-pin')}</span><span class="grow"><b>${t('sharedLocation')}</b><small>${Number(m.location.lat).toFixed(5)}, ${Number(m.location.lng).toFixed(5)} · ${t('openInMaps')}</small></span></a>` : ''}
       ${m.poll ? (() => { const total = chatPollTotal(m.poll); return `<div class="chat-poll"><b>${icon('bar-chart')} ${escapeHtml(m.poll.question || '')}</b>${(m.poll.options || []).map((o) => { const pct = total ? Math.round((o.votes || []).length / total * 100) : 0; const voted = (o.votes || []).includes(meUser.id); return `<button type="button" class="chat-poll-option ${voted ? 'voted' : ''}" data-act="vote-poll" data-id="${m.id}" data-option="${o.id}"><span class="chat-poll-fill" style="width:${pct}%"></span><span class="chat-poll-text">${voted ? icon('check', 'ic-sm') + ' ' : ''}${escapeHtml(o.text)}</span><span class="chat-poll-count">${(o.votes || []).length} · ${pct}%</span></button>`; }).join('')}<span class="muted small">${total} ${t('votes')}</span></div>`; })() : ''}
       ${m.text ? `<p${bigEmoji ? ' class="msg-big-emoji"' : ''}>${messageTextHtml(m, byId)}</p>` : ''}
-      <div class="msg-picker hidden" id="msg-picker-${m.id}">${MESSAGE_REACTIONS.map((e) => `<button type="button" class="emoji-btn" data-act="msg-react" data-id="${m.id}" data-emoji="${e}" aria-label="${t('reactToMessage')} ${e}">${e}</button>`).join('')}<button type="button" class="emoji-btn" data-act="react-more" data-id="${m.id}" title="${t('moreReactions')}" aria-label="${t('moreReactions')}">${icon('plus')}</button></div>
-      <div class="msg-picker msg-picker-more hidden" id="msg-picker-more-${m.id}">${REACTION_EMOJI_SET.map((e) => `<button type="button" class="emoji-btn" data-act="msg-react" data-id="${m.id}" data-emoji="${e}" aria-label="${t('reactToMessage')} ${e}">${e}</button>`).join('')}</div>
       <span class="msg-foot"><span class="msg-meta">${m.pinned ? icon('pin', 'ic-sm') + ' ' : ''}${timeAgo(m.createdAt)}${m.editedAt ? ` · ${t('edited')}` : ''}${m.vanish ? ` · ${icon('eye-off', 'ic-sm')}` : ''} ${status}</span><span class="msg-actions"><button type="button" class="link-btn msg-act-btn" data-act="reply-message" data-id="${m.id}" title="${t('replyToMessage')}" aria-label="${t('replyToMessage')}">${icon('reply')}</button><button type="button" class="link-btn msg-act-btn" data-act="msg-react-toggle" data-id="${m.id}" title="${t('reactToMessage')}" aria-label="${t('reactToMessage')}">${icon('smile')}</button><button type="button" class="link-btn msg-act-btn ${m.pinned ? 'active' : ''}" data-act="pin-message" data-id="${m.id}" title="${t(m.pinned ? 'unpinMessage' : 'pinMessage')}" aria-label="${t(m.pinned ? 'unpinMessage' : 'pinMessage')}">${m.pinned ? iconFill('pin') : icon('pin')}</button>${editable ? `<button type="button" class="link-btn msg-act-btn" data-act="edit-message" data-id="${m.id}" title="${t('editMessage')}" aria-label="${t('editMessage')}">${icon('pencil')}</button>` : ''}<button type="button" class="link-btn msg-act-btn" data-act="msg-menu" data-id="${m.id}" title="${t('messageOptions')}" aria-label="${t('messageOptions')}">${icon('more-horizontal')}</button>${mine ? '' : `<button class="link-btn msg-report-btn" data-act="report-message" data-id="${m.id}" title="${t('report')}" aria-label="${t('report')}">${icon('flag')}</button>`}</span></span>
-    </div>
-    <div class="menu msg-menu ${uiState.msgMenuFor === m.id ? '' : 'hidden'}" id="msg-menu-${m.id}">
-      <button data-act="forward-message" data-id="${m.id}">${icon('forward')} ${t('forwardMessage')}</button>
-      ${mine ? `<button data-act="unsend-message" data-id="${m.id}">${icon('ban')} ${t('unsendMessage')}</button>` : ''}
-      <button data-act="hide-message" data-id="${m.id}">${icon('trash')} ${t('removeForMe')}</button>
     </div>
     ${chips.length ? `<div class="msg-chips">${chips.map((c) => `<button type="button" class="msg-chip ${c.uids.includes(meUser.id) ? 'mine' : ''}" data-act="msg-react" data-id="${m.id}" data-emoji="${c.emoji}" title="${t('reactToMessage')}">${c.emoji} ${c.count}</button>`).join('')}</div>` : ''}
     </div>
   </div>`;
+}
+
+// ONE shared reaction-picker pair + per-message menu for the whole
+// thread, rendered once by messagesView (thread-lightening: rows used
+// to each carry hidden copies — ~42 DOM nodes per message). main.js
+// moves these single elements into the active message's bubble /
+// column on demand and stamps the target message id onto their
+// buttons, so the delegated data-act handlers work unchanged; closed,
+// they sit hidden here, and a re-render recreates them hidden — the
+// same reset the per-row copies had. The menu's Unsend button is
+// always present in the shared copy; main.js hides it for other
+// people's messages when it mounts the menu.
+export function sharedMsgPickersHtml() {
+  return `<div class="msg-picker hidden" id="msg-picker">${MESSAGE_REACTIONS.map((e) => `<button type="button" class="emoji-btn" data-act="msg-react" data-emoji="${e}" aria-label="${t('reactToMessage')} ${e}">${e}</button>`).join('')}<button type="button" class="emoji-btn" data-act="react-more" title="${t('moreReactions')}" aria-label="${t('moreReactions')}">${icon('plus')}</button></div>
+  <div class="msg-picker msg-picker-more hidden" id="msg-picker-more">${REACTION_EMOJI_SET.map((e) => `<button type="button" class="emoji-btn" data-act="msg-react" data-emoji="${e}" aria-label="${t('reactToMessage')} ${e}">${e}</button>`).join('')}</div>`;
+}
+
+export function sharedMsgMenuHtml() {
+  return `<div class="menu msg-menu hidden" id="msg-menu">
+      <button data-act="forward-message">${icon('forward')} ${t('forwardMessage')}</button>
+      <button data-act="unsend-message">${icon('ban')} ${t('unsendMessage')}</button>
+      <button data-act="hide-message">${icon('trash')} ${t('removeForMe')}</button>
+    </div>`;
 }
 
 // "X is typing…" line for the open thread. Exported because main.js
