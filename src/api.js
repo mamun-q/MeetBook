@@ -2110,7 +2110,16 @@ export async function sendFriendRequest(toId) {
     if (existing) return;
     // Deterministic doc id ({from}_{to}) so firestore.rules can verify a
     // friendship with a single exists() check for friends-only posts.
-    await sbUpsert('friendships', { id: `${user.id}_${toId}`, from: user.id, to: toId, status: 'pending', createdAt: Date.now() });
+    const row = { id: `${user.id}_${toId}`, from: user.id, to: toId, status: 'pending', createdAt: Date.now() };
+    await sbUpsert('friendships', row);
+    // Mirror the confirmed write at once: the profile button reads
+    // relationship() from the mirror, and the realtime refetch can
+    // lag far behind — without this the button stayed on "Add
+    // Friend" until a full reload even though the request had sent.
+    patchMirror((r) => {
+      const i = r.friendships.findIndex((f) => f.id === row.id);
+      if (i >= 0) r.friendships[i] = { ...r.friendships[i], ...row }; else r.friendships.push(row);
+    });
     await createNotification({ userId: toId, type: 'friend_request', actorId: user.id, text: `${user.name} sent you a friend request.`, postId: '', conversationId: '', read: false, createdAt: Date.now() });
     return;
   }
@@ -2149,8 +2158,15 @@ export async function respondFriendRequest(friendshipId, accept) {
       if (rel && rel.from && rel.from !== user.id) {
         try { await createNotification({ userId: rel.from, type: 'friend_accept', actorId: user.id, text: `${user.name} accepted your friend request.`, postId: '', conversationId: '', read: false, createdAt: Date.now() }); } catch { /* the accept itself already succeeded */ }
       }
+      // Mirror the accept at once (see sendFriendRequest): the
+      // Friends page and profile buttons read the mirror, and the
+      // realtime refetch can lag far behind the tap.
+      patchMirror((r) => { const f = r.friendships.find((x) => x.id === friendshipId); if (f) f.status = 'accepted'; });
     }
-    else await sbDelete('friendships', friendshipId);
+    else {
+      await sbDelete('friendships', friendshipId);
+      patchMirror((r) => { r.friendships = r.friendships.filter((x) => x.id !== friendshipId); });
+    }
     return;
   }
   mutate((s) => {
@@ -2162,7 +2178,13 @@ export async function respondFriendRequest(friendshipId, accept) {
 }
 
 export async function removeFriendship(friendshipId) {
-  if (live) { await sbDelete('friendships', friendshipId); return; }
+  if (live) {
+    await sbDelete('friendships', friendshipId);
+    // Mirror the delete at once (see sendFriendRequest) so the
+    // "Request sent" / Friends UI updates without a reload.
+    patchMirror((r) => { r.friendships = r.friendships.filter((x) => x.id !== friendshipId); });
+    return;
+  }
   mutate((s) => { s.friendships = s.friendships.filter((x) => x.id !== friendshipId); });
 }
 
