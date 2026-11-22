@@ -7,6 +7,7 @@ import { cldImg } from './cloudinary.js';
 import { AI_PROVIDERS, providerById, resolveAiConfig, usageTotals } from './aiProviders.js';
 import { t } from './i18n.js';
 import { avatarHtml, userNameHtml, postCardHtml, emptyState } from './components.js';
+import { icon, iconFill } from './icons.js';
 import { friendIdsOf, blockedIdsOf } from './store.js';
 import { firebaseReady } from './firebase.js';
 
@@ -48,7 +49,7 @@ const GOOGLE_G_SVG = '<svg class="google-g" width="18" height="18" viewBox="0 0 
 
 // Password field with a show/hide eye toggle (main.js wires data-act).
 function passwordFieldHtml({ name = 'password', labelKey = 'password', autocomplete = 'current-password', placeholder = '••••••••', required = true, minlength = '' }) {
-  return `<label>${t(labelKey)}<span class="pw-wrap"><input name="${name}" type="password" ${required ? 'required' : ''} ${minlength ? `minlength="${minlength}"` : ''} autocomplete="${autocomplete}" placeholder="${placeholder}" /><button type="button" class="pw-eye" data-act="toggle-pw" aria-label="${t('showPassword')}" title="${t('showPassword')}">👁️</button></span></label>`;
+  return `<label>${t(labelKey)}<span class="pw-wrap"><input name="${name}" type="password" ${required ? 'required' : ''} ${minlength ? `minlength="${minlength}"` : ''} autocomplete="${autocomplete}" placeholder="${placeholder}" /><button type="button" class="pw-eye" data-act="toggle-pw" aria-label="${t('showPassword')}" title="${t('showPassword')}">${icon('eye')}</button></span></label>`;
 }
 
 export function authView(mode = 'login') {
@@ -59,9 +60,9 @@ export function authView(mode = 'login') {
       <div class="logo-big">MeetBook</div>
       <p>${t('authTagline')}</p>
       <ul class="auth-feats">
-        <li>📰 ${t('authFeat1')}</li>
-        <li>💬 ${t('authFeat2')}</li>
-        <li>🤖 ${t('authFeat3')}</li>
+        <li>${icon('newspaper')} ${t('authFeat1')}</li>
+        <li>${icon('message-circle')} ${t('authFeat2')}</li>
+        <li>${icon('bot')} ${t('authFeat3')}</li>
       </ul>
     </div>
     <div class="card auth-card">
@@ -126,13 +127,13 @@ export function feedView(d, meUser, page = 1) {
           <div id="composer-preview"></div>
           <input type="file" name="image" accept="image/*" hidden />
           <div class="row gap wrap">
-            <button type="button" class="btn btn-ghost btn-sm" data-act="pick-photo">📷 ${t('photo')}</button>
-            <label class="btn btn-ghost btn-sm">📊 ${t('addPoll')}<input type="checkbox" name="hasPoll" hidden /></label>
+            <button type="button" class="btn btn-ghost btn-sm" data-act="pick-photo">${icon('image')} ${t('photo')}</button>
+            <label class="btn btn-ghost btn-sm">${icon('bar-chart')} ${t('addPoll')}<input type="checkbox" name="hasPoll" hidden /></label>
             <select name="visibility" class="select-sm" aria-label="Post privacy">
-              <option value="public" ${defaultVis === 'public' ? 'selected' : ''}>🌍 ${t('publicLabel')}</option>
-              <option value="friends" ${defaultVis === 'friends' ? 'selected' : ''}>👥 ${t('friends')}</option>
-              <option value="close" ${defaultVis === 'close' ? 'selected' : ''}>⭐ ${t('closeFriends')}</option>
-              <option value="only-me" ${defaultVis === 'only-me' ? 'selected' : ''}>🔒 ${t('onlyMe')}</option>
+              <option value="public" ${defaultVis === 'public' ? 'selected' : ''}>${t('publicLabel')}</option>
+              <option value="friends" ${defaultVis === 'friends' ? 'selected' : ''}>${t('friends')}</option>
+              <option value="close" ${defaultVis === 'close' ? 'selected' : ''}>${t('closeFriends')}</option>
+              <option value="only-me" ${defaultVis === 'only-me' ? 'selected' : ''}>${t('onlyMe')}</option>
             </select>
             <span class="spacer"></span>
             <button class="btn btn-primary" type="submit">${t('post')}</button>
@@ -142,13 +143,13 @@ export function feedView(d, meUser, page = 1) {
               ${[1, 2].map((i) => `<div class="row gap-sm poll-opt-row"><input name="pollOption" maxlength="60" placeholder="${t('pollOption')} ${i}" autocomplete="off" /></div>`).join('')}
             </div>
             <div class="row gap wrap">
-              <button type="button" class="btn btn-ghost btn-sm" data-act="poll-add-option">＋ ${t('addOption')}</button>
-              <button type="button" class="btn btn-ghost btn-sm" data-act="poll-remove">✕ ${t('removePoll')}</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-act="poll-add-option">${icon('plus')} ${t('addOption')}</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-act="poll-remove">${icon('x')} ${t('removePoll')}</button>
             </div>
           </div>
           <div class="row gap wrap">
-            <label class="grow">📍 ${t('checkIn')}<input name="location" maxlength="120" placeholder="e.g. Lalbagh Fort, Dhaka" autocomplete="off" /></label>
-            <label>🙂 ${t('feeling')}
+            <label class="grow">${icon('map-pin')} ${t('checkIn')}<input name="location" maxlength="120" placeholder="e.g. Lalbagh Fort, Dhaka" autocomplete="off" /></label>
+            <label>${icon('smile')} ${t('feeling')}
               <select name="feeling" class="select-sm">
                 <option value="">—</option>
                 ${FEELINGS.map((f) => `<option value="${f.key}">${f.emoji} ${f.labelKey ? t(f.labelKey) : f.label}</option>`).join('')}
@@ -158,7 +159,7 @@ export function feedView(d, meUser, page = 1) {
         </form>
       </div>
       <div id="feed-list">
-        ${pg.items.map((p) => postCardHtml(p, ctx)).join('') || emptyState('📰', t('noPosts'))}
+        ${pg.items.map((p) => postCardHtml(p, ctx)).join('') || emptyState('newspaper', t('noPosts'))}
       </div>
       ${pg.hasMore ? `<button class="btn btn-ghost btn-block" data-act="feed-more" data-page="${page + 1}">Load more posts</button>` : (visible.length > 10 ? '<p class="muted center small">You are all caught up 🎉</p>' : '')}
     </main>
@@ -180,12 +181,12 @@ export function announcementsHtml(d, meUser) {
   if (!active.length) return '';
   return active.map((a) => `<div class="card announcement-banner">
     <div class="row gap-sm">
-      <span aria-hidden="true">📣</span>
+      <span aria-hidden="true">${icon('megaphone')}</span>
       <div class="grow"><b>${escapeHtml(a.title)}</b>
         <p class="small">${escapeHtml(a.body)}</p>
         <span class="muted small">${escapeHtml(a.createdByName || '')} · ${timeAgo(a.createdAt)}</span>
       </div>
-      <button class="icon-btn" data-act="dismiss-announcement" data-id="${a.id}" aria-label="${t('announceDismiss')}" title="${t('announceDismiss')}">✕</button>
+      <button class="icon-btn" data-act="dismiss-announcement" data-id="${a.id}" aria-label="${t('announceDismiss')}" title="${t('announceDismiss')}">${icon('x')}</button>
     </div>
   </div>`).join('');
 }
@@ -201,12 +202,12 @@ export function memoriesHtml(d, meUser, ctx) {
   if (!memories.length) return '';
   return `<div class="card memory-card">
     <div class="row gap-sm">
-      <h3 class="grow">🕰️ ${t('memories')} · ${t('onThisDay')}</h3>
-      <button class="icon-btn" data-act="dismiss-memories" aria-label="Dismiss">✕</button>
+      <h3 class="grow">${icon('history')} ${t('memories')} · ${t('onThisDay')}</h3>
+      <button class="icon-btn" data-act="dismiss-memories" aria-label="Dismiss">${icon('x')}</button>
     </div>
     ${memories.map(({ post, yearsAgo }) => `<a class="memory-item" href="#/profile/${meUser.id}">
       <span class="memory-when">${yearsAgo} ${yearsAgo === 1 ? t('yearAgo') : t('yearsAgo')}</span>
-      <span class="memory-text">${escapeHtml(truncate(post.text || (post.image ? '📷 Photo' : ''), 160))}</span>
+      <span class="memory-text">${post.text ? escapeHtml(truncate(post.text, 160)) : (post.image ? `${icon('camera', 'ic-sm')} Photo` : '')}</span>
     </a>`).join('')}
   </div>`;
 }
@@ -218,11 +219,11 @@ export function memoriesView(d, meUser) {
   const ctx = viewCtx(d, meUser);
   const memories = memoriesFor(d.posts, meUser.id);
   return `<div class="page narrow">
-    <h2>🕰️ ${t('memories')}</h2>
+    <h2>${icon('history')} ${t('memories')}</h2>
     <p class="muted">${t('onThisDay')}</p>
     ${memories.length ? memories.map(({ post, yearsAgo }) => `
       <p class="memory-when-label muted"><b>${yearsAgo} ${yearsAgo === 1 ? t('yearAgo') : t('yearsAgo')}</b></p>
-      ${postCardHtml(post, ctx)}`).join('') : emptyState('🕰️', t('memoriesEmpty'))}
+      ${postCardHtml(post, ctx)}`).join('') : emptyState('history', t('memoriesEmpty'))}
   </div>`;
 }
 
@@ -262,7 +263,7 @@ export function storiesRailHtml(d, meUser, ctx) {
   return `<div class="stories card">
     <button class="story-tile create" data-act="create-story" aria-label="${t('createStory')}">
       <span class="story-tile-avatar">${avatarHtml(meUser, 34)}</span>
-      <span class="story-plus">➕</span>
+      <span class="story-plus">${icon('plus')}</span>
       <span class="story-tile-name">${t('createStory')}</span>
     </button>
     ${groups.map(tile).join('')}
@@ -271,10 +272,10 @@ export function storiesRailHtml(d, meUser, ctx) {
 }
 
 export function storyFormHtml() {
-  return `<h3>➕ ${t('createStory')}</h3>
+  return `<h3>${icon('plus')} ${t('createStory')}</h3>
   <form id="story-form" class="stack">
     <label>${t('storyText')}<textarea name="text" rows="3" maxlength="300" placeholder="${t('storyTextPlaceholder')}"></textarea></label>
-    <label>📷 Photo<input type="file" name="image" accept="image/*" /></label>
+    <label>${icon('camera')} Photo<input type="file" name="image" accept="image/*" /></label>
     <div>
       <span class="small muted">${t('storyBackground')}</span>
       <div class="bg-swatches">
@@ -283,8 +284,8 @@ export function storyFormHtml() {
     </div>
     <label>${t('privacyLabel')}
       <select name="visibility">
-        <option value="public">🌍 ${t('publicLabel')}</option>
-        <option value="friends">👥 ${t('friends')}</option>
+        <option value="public">${t('publicLabel')}</option>
+        <option value="friends">${t('friends')}</option>
       </select>
     </label>
     <p class="muted small">${t('stories')} · 24h</p>
@@ -295,18 +296,18 @@ export function storyFormHtml() {
 export function leftRail(d, meUser) {
   return `<div class="card rail">
     <a class="rail-item" href="#/profile/${meUser.id}">${avatarHtml(meUser, 36)}<span>${escapeHtml(meUser.name)}</span></a>
-    <a class="rail-item" href="#/">📰 Feed</a>
-    <a class="rail-item" href="#/friends">👥 ${t('friends')}</a>
-    <a class="rail-item" href="#/events">📅 ${t('events')}</a>
-    <a class="rail-item" href="#/memories">🕰️ ${t('memories')}</a>
-    <a class="rail-item" href="#/groups">🏘️ ${t('groups')}</a>
-    <a class="rail-item" href="#/pages">📄 ${t('pages')}</a>
-    <a class="rail-item" href="#/messages">💬 ${t('messages')}</a>
-    <a class="rail-item" href="#/saved">🔖 ${t('saved')} posts</a>
-    <a class="rail-item" href="#/notifications">🔔 ${t('notifications')}</a>
-    ${isStaff(meUser) ? `<a class="rail-item" href="#/admin">🛡️ ${t('admin')}</a>` : ''}${isAdminRole(meUser) ? `<a class="rail-item" href="#/admin/bots">🤖 ${t('bots')}</a>` : ''}
-    <a class="rail-item" href="#/settings">⚙️ ${t('settings')}</a>
-    <a class="rail-item" href="#/help">❓ ${t('help')}</a>
+    <a class="rail-item" href="#/">${icon('newspaper')} Feed</a>
+    <a class="rail-item" href="#/friends">${icon('users')} ${t('friends')}</a>
+    <a class="rail-item" href="#/events">${icon('calendar')} ${t('events')}</a>
+    <a class="rail-item" href="#/memories">${icon('history')} ${t('memories')}</a>
+    <a class="rail-item" href="#/groups">${icon('users-round')} ${t('groups')}</a>
+    <a class="rail-item" href="#/pages">${icon('flag')} ${t('pages')}</a>
+    <a class="rail-item" href="#/messages">${icon('message-circle')} ${t('messages')}</a>
+    <a class="rail-item" href="#/saved">${icon('bookmark')} ${t('saved')} posts</a>
+    <a class="rail-item" href="#/notifications">${icon('bell')} ${t('notifications')}</a>
+    ${isStaff(meUser) ? `<a class="rail-item" href="#/admin">${icon('shield')} ${t('admin')}</a>` : ''}${isAdminRole(meUser) ? `<a class="rail-item" href="#/admin/bots">${icon('bot')} ${t('bots')}</a>` : ''}
+    <a class="rail-item" href="#/settings">${icon('settings')} ${t('settings')}</a>
+    <a class="rail-item" href="#/help">${icon('help-circle')} ${t('help')}</a>
   </div>`;
 }
 
@@ -316,7 +317,7 @@ export function rightRail(d, meUser) {
   const suggestions = suggestionsFor(d, meUser).slice(0, 4);
   const byId = usersById(d);
   return `<div class="card rail">
-    ${pending.length ? `<h4>Friend requests</h4>${pending.map((f) => `<div class="row gap-sm rail-person">${avatarHtml(byId[f.from], 36)}<span class="grow">${escapeHtml(byId[f.from]?.name || '')}</span><button class="btn btn-primary btn-sm" data-act="accept-request" data-id="${f.id}">Accept</button><button class="btn btn-ghost btn-sm" data-act="reject-request" data-id="${f.id}">✕</button></div>`).join('')}` : ''}
+    ${pending.length ? `<h4>Friend requests</h4>${pending.map((f) => `<div class="row gap-sm rail-person">${avatarHtml(byId[f.from], 36)}<span class="grow">${escapeHtml(byId[f.from]?.name || '')}</span><button class="btn btn-primary btn-sm" data-act="accept-request" data-id="${f.id}">Accept</button><button class="btn btn-ghost btn-sm" data-act="reject-request" data-id="${f.id}" aria-label="Reject">${icon('x')}</button></div>`).join('')}` : ''}
     <h4>People you may know</h4>
     ${suggestions.map((u) => { const mutual = mutualFriendCount(d.friendships, meUser.id, u.id); return `<div class="row gap-sm rail-person">${avatarHtml(u, 36)}<span class="grow"><a href="#/profile/${u.id}">${escapeHtml(u.name)}</a>${mutual > 0 ? `<br/><span class="muted small">${mutual} ${mutual === 1 ? t('mutualFriend') : t('mutualFriends')}</span>` : ''}</span><button class="btn btn-ghost btn-sm" data-act="send-request" data-id="${u.id}">${t('addFriend')}</button></div>`; }).join('') || '<p class="muted small">No suggestions right now.</p>'}
     <h4>Online</h4>
@@ -348,7 +349,7 @@ export function isFreshOnline(u, now = Date.now()) {
 export function profileView(d, meUser, userId) {
   const ctx = viewCtx(d, meUser);
   const user = ctx.usersById[userId];
-  if (!user) return emptyState('🕵️', 'This profile could not be found.');
+  if (!user) return emptyState('search', 'This profile could not be found.');
   const isMe = user.id === meUser.id;
   const friendIds = friendIdsOfData(d, user.id);
   const myFriends = friendIdsOfData(d, meUser.id);
@@ -360,7 +361,7 @@ export function profileView(d, meUser, userId) {
   <div class="profile-wrap">
     <div class="card profile-head">
       <div class="cover" style="${user.cover ? `background-image:url('${escapeHtml(user.cover)}')` : ''}">
-        ${isMe ? `<button class="btn btn-ghost btn-sm cover-edit-btn" data-act="edit-profile">📷 ${user.cover ? t('changeCoverPhoto') : t('addCoverPhoto')}</button>` : ''}
+        ${isMe ? `<button class="btn btn-ghost btn-sm cover-edit-btn" data-act="edit-profile">${icon('camera')} ${user.cover ? t('changeCoverPhoto') : t('addCoverPhoto')}</button>` : ''}
       </div>
       <div class="profile-meta">
         ${avatarHtml(user, 110)}
@@ -368,16 +369,16 @@ export function profileView(d, meUser, userId) {
           <h2>${userNameHtml(user)}${user.nickname ? ` <span class="nickname">(${escapeHtml(user.nickname)})</span>` : ''}</h2>
           <p class="muted">@${escapeHtml(user.username)} · ${friendIds.size} friends · ${(user.followers || []).length} followers · <span class="${user.online ? 'online-text' : 'muted'}">${user.online ? '● ' + t('online') : t('offline')}</span></p>
           <p>${escapeHtml(user.bio || 'No bio yet.')}</p>
-          ${isMe && !user.avatar ? `<button class="link-btn small" data-act="edit-profile">📷 ${t('addProfilePhoto')}</button>` : ''}
+          ${isMe && !user.avatar ? `<button class="link-btn small" data-act="edit-profile">${icon('camera')} ${t('addProfilePhoto')}</button>` : ''}
         </div>
         <div class="row gap wrap">
-          ${isMe ? `<button class="btn btn-primary" data-act="edit-profile">✏️ ${t('editProfile')}</button>` : `
+          ${isMe ? `<button class="btn btn-primary" data-act="edit-profile">${icon('pencil')} ${t('editProfile')}</button>` : `
             ${blocked ? `<button class="btn btn-ghost" data-act="block" data-id="${user.id}">Unblock</button>` : `
-              ${rel?.status === 'accepted' ? `<button class="btn btn-ghost" data-act="remove-friend" data-id="${rel.id}">✓ Friends</button>` : rel?.status === 'pending' && rel.from === meUser.id ? `<button class="btn btn-ghost" data-act="cancel-request" data-id="${rel.id}" title="${t('tapToCancel')}">✓ ${t('requestSent')}</button>` : rel?.status === 'pending' ? `<button class="btn btn-primary" data-act="accept-request" data-id="${rel.id}">Accept request</button>` : `<button class="btn btn-primary" data-act="send-request" data-id="${user.id}">${t('addFriend')}</button>`}
+              ${rel?.status === 'accepted' ? `<button class="btn btn-ghost" data-act="remove-friend" data-id="${rel.id}">${icon('check')} Friends</button>` : rel?.status === 'pending' && rel.from === meUser.id ? `<button class="btn btn-ghost" data-act="cancel-request" data-id="${rel.id}" title="${t('tapToCancel')}">${icon('check')} ${t('requestSent')}</button>` : rel?.status === 'pending' ? `<button class="btn btn-primary" data-act="accept-request" data-id="${rel.id}">Accept request</button>` : `<button class="btn btn-primary" data-act="send-request" data-id="${user.id}">${t('addFriend')}</button>`}
               <button class="btn ${following ? 'btn-ghost' : 'btn-primary'}" data-act="follow" data-id="${user.id}">${following ? t('following') : t('follow')}</button>
-              <button class="btn btn-ghost" data-act="message-user" data-id="${user.id}">💬 Message</button>
+              <button class="btn btn-ghost" data-act="message-user" data-id="${user.id}">${icon('message-circle')} Message</button>
               <button class="btn btn-ghost" data-act="block" data-id="${user.id}">Block</button>
-              <button class="btn btn-ghost" data-act="report-user" data-id="${user.id}">🚩 ${t('report')}</button>`}
+              <button class="btn btn-ghost" data-act="report-user" data-id="${user.id}">${icon('flag')} ${t('report')}</button>`}
           `}
         </div>
       </div>
@@ -407,7 +408,7 @@ export function profileView(d, meUser, userId) {
       </div>`;
       const sideBits = intro + photosStrip + friendsStrip;
       const postsHtml = `<div class="profile-posts">
-      ${posts.map((p) => postCardHtml(p, ctx)).join('') || emptyState('📝', 'No visible posts yet.')}
+      ${posts.map((p) => postCardHtml(p, ctx)).join('') || emptyState('file-text', 'No visible posts yet.')}
     </div>`;
       return sideBits
         ? `<div class="profile-cols"><aside class="profile-side">${sideBits}</aside>${postsHtml}</div>`
@@ -421,20 +422,20 @@ export function profileView(d, meUser, userId) {
 // assumed when no scheme is present).
 export function introCardHtml(user, isMe = false) {
   const items = [];
-  if (user.work) items.push(`<div class="intro-row"><span class="intro-icon">💼</span><span>${t('worksAt')} <b>${escapeHtml(user.work)}</b></span></div>`);
-  if (user.education) items.push(`<div class="intro-row"><span class="intro-icon">🎓</span><span>${t('studiedAt')} <b>${escapeHtml(user.education)}</b></span></div>`);
-  if (user.currentCity) items.push(`<div class="intro-row"><span class="intro-icon">📍</span><span>${t('livesIn')} <b>${escapeHtml(user.currentCity)}</b></span></div>`);
-  if (user.hometown) items.push(`<div class="intro-row"><span class="intro-icon">🏠</span><span>${t('fromPlace')} <b>${escapeHtml(user.hometown)}</b></span></div>`);
-  if (user.relationship) items.push(`<div class="intro-row"><span class="intro-icon">❤️</span><span>${escapeHtml(user.relationship)}</span></div>`);
+  if (user.work) items.push(`<div class="intro-row"><span class="intro-icon">${icon('briefcase')}</span><span>${t('worksAt')} <b>${escapeHtml(user.work)}</b></span></div>`);
+  if (user.education) items.push(`<div class="intro-row"><span class="intro-icon">${icon('grad-cap')}</span><span>${t('studiedAt')} <b>${escapeHtml(user.education)}</b></span></div>`);
+  if (user.currentCity) items.push(`<div class="intro-row"><span class="intro-icon">${icon('map-pin')}</span><span>${t('livesIn')} <b>${escapeHtml(user.currentCity)}</b></span></div>`);
+  if (user.hometown) items.push(`<div class="intro-row"><span class="intro-icon">${icon('home')}</span><span>${t('fromPlace')} <b>${escapeHtml(user.hometown)}</b></span></div>`);
+  if (user.relationship) items.push(`<div class="intro-row"><span class="intro-icon">${icon('heart')}</span><span>${escapeHtml(user.relationship)}</span></div>`);
   if (user.dob) {
     const dobDate = new Date(`${user.dob}T00:00:00`);
     const dobText = Number.isNaN(dobDate.getTime()) ? String(user.dob) : dobDate.toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' });
-    items.push(`<div class="intro-row"><span class="intro-icon">🎂</span><span>${t('birthday')}: <b>${escapeHtml(dobText)}</b></span></div>`);
+    items.push(`<div class="intro-row"><span class="intro-icon">${icon('cake')}</span><span>${t('birthday')}: <b>${escapeHtml(dobText)}</b></span></div>`);
   }
-  if (user.gender) items.push(`<div class="intro-row"><span class="intro-icon">🧑</span><span>${t('gender')}: <b>${escapeHtml(user.gender)}</b></span></div>`);
+  if (user.gender) items.push(`<div class="intro-row"><span class="intro-icon">${icon('user')}</span><span>${t('gender')}: <b>${escapeHtml(user.gender)}</b></span></div>`);
   if (user.website) {
     const href = /^https?:\/\//i.test(user.website) ? user.website : `https://${user.website}`;
-    items.push(`<div class="intro-row"><span class="intro-icon">🔗</span><a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(user.website)}</a></div>`);
+    items.push(`<div class="intro-row"><span class="intro-icon">${icon('link')}</span><a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(user.website)}</a></div>`);
   }
   if (!items.length && !isMe) return '';
   return `<div class="card intro-card">
@@ -463,13 +464,13 @@ export function friendsView(d, meUser) {
     return `<div class="card person-card">${avatarHtml(u, 56)}<a href="#/profile/${u.id}"><b>${escapeHtml(u.name)}</b></a><span class="muted small">@${escapeHtml(u.username)}</span>${extra}<div class="row gap wrap center">${actions}</div></div>`;
   };
   return `<div class="page">
-    <h2>👥 ${t('friends')}</h2>
+    <h2>${icon('users')} ${t('friends')}</h2>
     <h3>${t('requestsReceived')}</h3>
     ${incoming.length ? `<div class="grid-people">${incoming.map((f) => person(byId[f.from], `<button class="btn btn-primary btn-sm" data-act="accept-request" data-id="${f.id}">Accept</button><button class="btn btn-ghost btn-sm" data-act="reject-request" data-id="${f.id}">Reject</button>`, mutualLine(byId[f.from]))).join('')}</div>` : `<p class="muted">${t('noRequestsReceived')}</p>`}
     <h3>${t('requestsSent')}</h3>
     ${outgoing.length ? `<div class="grid-people">${outgoing.map((f) => person(byId[f.to], `<button class="btn btn-ghost btn-sm" data-act="cancel-request" data-id="${f.id}">${t('cancelRequest')}</button>`)).join('')}</div>` : `<p class="muted">${t('noRequestsSent')}</p>`}
     <h3>${t('yourFriends')} (${friendIds.size})</h3>
-    <div class="grid-people">${[...friendIds].map((id) => { const rel = d.friendships.find((f) => f.status === 'accepted' && ((f.from === meUser.id && f.to === id) || (f.to === meUser.id && f.from === id))); const isClose = (meUser.closeFriends || []).includes(id); return person(byId[id], `<button class="btn ${isClose ? 'btn-primary' : 'btn-ghost'} btn-sm" data-act="toggle-close-friend" data-id="${id}" title="${t('closeFriends')}">${isClose ? '⭐' : '☆'} ${t('closeFriends')}</button><button class="btn btn-ghost btn-sm" data-act="message-user" data-id="${id}">Message</button><button class="btn btn-ghost btn-sm" data-act="remove-friend" data-id="${rel?.id}">Remove</button>`); }).join('') || '<p class="muted">No friends yet — send a request below.</p>'}</div>
+    <div class="grid-people">${[...friendIds].map((id) => { const rel = d.friendships.find((f) => f.status === 'accepted' && ((f.from === meUser.id && f.to === id) || (f.to === meUser.id && f.from === id))); const isClose = (meUser.closeFriends || []).includes(id); return person(byId[id], `<button class="btn ${isClose ? 'btn-primary' : 'btn-ghost'} btn-sm" data-act="toggle-close-friend" data-id="${id}" title="${t('closeFriends')}">${isClose ? iconFill('star') : icon('star')} ${t('closeFriends')}</button><button class="btn btn-ghost btn-sm" data-act="message-user" data-id="${id}">Message</button><button class="btn btn-ghost btn-sm" data-act="remove-friend" data-id="${rel?.id}">Remove</button>`); }).join('') || '<p class="muted">No friends yet — send a request below.</p>'}</div>
     <h3>${t('suggestedForYou')}</h3>
     <div class="grid-people">${suggestions.map((u) => person(u, `<button class="btn btn-primary btn-sm" data-act="send-request" data-id="${u.id}">${t('addFriend')}</button>`, mutualLine(u))).join('') || '<p class="muted">No suggestions.</p>'}</div>
   </div>`;
@@ -495,7 +496,7 @@ export function groupsView(d, meUser, queryText = '') {
     return `<div class="card person-card">
     ${avatarHtml({ name: g.name, username: g.name, avatar: g.cover }, 56)}
     <a href="#/group/${g.id}"><b>${escapeHtml(g.name)}</b></a>
-    <span class="muted small">${g.privacy === 'private' ? '🔒 ' + t('privateLabel') : '🌍 ' + t('publicLabel')} · ${plural(groupMemberCount(g), t('member'), t('members'))}</span>
+    <span class="muted small">${g.privacy === 'private' ? icon('lock', 'ic-sm') + ' ' + t('privateLabel') : icon('globe', 'ic-sm') + ' ' + t('publicLabel')} · ${plural(groupMemberCount(g), t('member'), t('members'))}</span>
     <span class="muted small">${escapeHtml(truncate(g.description || '', 90))}</span>
     <div class="row gap wrap center">
       ${isGroupMember(g, meUser.id) ? `<span class="badge badge-ok">${t('joined')}</span>` : pendingReq ? `<span class="badge badge-warn">${t('requestPending')}</span>` : `<button class="btn btn-primary btn-sm" data-act="toggle-group-join" data-id="${g.id}">${g.privacy === 'private' ? t('requestToJoin') : t('joinGroup')}</button>`}
@@ -504,7 +505,7 @@ export function groupsView(d, meUser, queryText = '') {
   </div>`;
   };
   return `<div class="page">
-    <div class="row"><h2 class="grow">🏘️ ${t('groups')}</h2><button class="btn btn-primary" data-act="create-group">+ ${t('createGroup')}</button></div>
+    <div class="row"><h2 class="grow">${icon('users-round')} ${t('groups')}</h2><button class="btn btn-primary" data-act="create-group">+ ${t('createGroup')}</button></div>
     <form id="groups-search-form" class="row gap">
       <input name="q" class="grow" placeholder="${t('searchGroups')}" value="${escapeHtml(queryText || '')}" autocomplete="off" />
       <button class="btn btn-ghost" type="submit">${t('search')}</button>
@@ -523,7 +524,7 @@ export function groupView(d, meUser, groupId, opts = {}) {
   // group — the tier-2 slices may simply not have delivered it. Show
   // a loading state rather than a false "could not be found" that
   // flips away a moment later.
-  if (!group) return opts.loading ? emptyState('🏘️', 'Loading…') : emptyState('🏘️', 'This group could not be found.');
+  if (!group) return opts.loading ? emptyState('users-round', 'Loading…') : emptyState('users-round', 'This group could not be found.');
   if (!canViewGroup(group, meUser.id)) {
     // Private group, not a member: show only the public metadata and the
     // join-request action — no posts, no member list.
@@ -534,9 +535,9 @@ export function groupView(d, meUser, groupId, opts = {}) {
         ${avatarHtml({ name: group.name, username: group.name, avatar: group.cover }, 110)}
         <div class="grow">
           <h2>${escapeHtml(group.name)}</h2>
-          <p class="muted">🔒 ${t('privateLabel')} · ${plural(groupMemberCount(group), t('member'), t('members'))}</p>
+          <p class="muted">${icon('lock')} ${t('privateLabel')} · ${plural(groupMemberCount(group), t('member'), t('members'))}</p>
           <p>${escapeHtml(group.description || '')}</p>
-          <p class="muted small">🔒 ${t('privateGroupNotice')}</p>
+          <p class="muted small">${icon('lock', 'ic-sm')} ${t('privateGroupNotice')}</p>
         </div>
         <div class="row gap wrap">
           ${pending ? `<span class="badge badge-warn">${t('requestPending')}</span><button class="btn btn-ghost" data-act="toggle-group-join" data-id="${group.id}">${t('withdrawRequest')}</button>`
@@ -565,12 +566,12 @@ export function groupView(d, meUser, groupId, opts = {}) {
         ${avatarHtml({ name: group.name, username: group.name, avatar: '' }, 110)}
         <div class="grow">
           <h2>${escapeHtml(group.name)}</h2>
-          <p class="muted">${group.privacy === 'private' ? '🔒 ' + t('privateLabel') : '🌍 ' + t('publicLabel')} · ${plural((group.members || []).length, t('member'), t('members'))} · created by ${escapeHtml(byId[group.createdBy]?.name || '')}</p>
-          <p class="muted small">🏘️ ${t('aboutThisGroup')}: ${group.privacy === 'private' ? '🔒 ' + t('privateLabel') : '🌍 ' + t('publicLabel')} · ${t('createdOn')} ${new Date(group.createdAt || Date.now()).toLocaleDateString()} · ${plural((group.members || []).length, t('member'), t('members'))}</p>
+          <p class="muted">${group.privacy === 'private' ? icon('lock', 'ic-sm') + ' ' + t('privateLabel') : icon('globe', 'ic-sm') + ' ' + t('publicLabel')} · ${plural((group.members || []).length, t('member'), t('members'))} · created by ${escapeHtml(byId[group.createdBy]?.name || '')}</p>
+          <p class="muted small">${icon('users-round', 'ic-sm')} ${t('aboutThisGroup')}: ${group.privacy === 'private' ? icon('lock', 'ic-sm') + ' ' + t('privateLabel') : icon('globe', 'ic-sm') + ' ' + t('publicLabel')} · ${t('createdOn')} ${new Date(group.createdAt || Date.now()).toLocaleDateString()} · ${plural((group.members || []).length, t('member'), t('members'))}</p>
           <p>${escapeHtml(group.description || '')}</p>
         </div>
         <div class="row gap wrap">
-          ${isCreator ? `<button class="btn btn-primary" data-act="edit-group" data-id="${group.id}">✏️ ${t('edit')}</button><button class="btn btn-danger" data-act="delete-group" data-id="${group.id}">${t('delete')} group</button>`
+          ${isCreator ? `<button class="btn btn-primary" data-act="edit-group" data-id="${group.id}">${icon('pencil')} ${t('edit')}</button><button class="btn btn-danger" data-act="delete-group" data-id="${group.id}">${t('delete')} group</button>`
             : member ? `<button class="btn btn-ghost" data-act="toggle-group-join" data-id="${group.id}">${t('leaveGroup')}</button>`
             : myPending ? `<span class="badge badge-warn">${t('requestPending')}</span><button class="btn btn-ghost" data-act="toggle-group-join" data-id="${group.id}">${t('withdrawRequest')}</button>`
             : `<button class="btn btn-primary" data-act="toggle-group-join" data-id="${group.id}">${group.privacy === 'private' ? t('requestToJoin') : t('joinGroup')}</button>`}
@@ -579,7 +580,7 @@ export function groupView(d, meUser, groupId, opts = {}) {
     </div>
     ${isCreator && pendingRequests.length ? `
     <div class="card stack">
-      <h3>📥 ${t('joinRequests')} (${pendingRequests.length})</h3>
+      <h3>${icon('inbox')} ${t('joinRequests')} (${pendingRequests.length})</h3>
       ${pendingRequests.map((r) => { const u = byId[r.userId]; return u ? `<div class="row gap-sm">${avatarHtml(u, 36)}<a class="grow" href="#/profile/${u.id}">${escapeHtml(u.name)}</a><button class="btn btn-primary btn-sm" data-act="approve-group-request" data-id="${r.id}">${t('approve')}</button><button class="btn btn-ghost btn-sm" data-act="reject-group-request" data-id="${r.id}">${t('reject')}</button></div>` : ''; }).join('')}
     </div>` : ''}
     ${member ? `
@@ -589,14 +590,14 @@ export function groupView(d, meUser, groupId, opts = {}) {
         <textarea name="text" rows="3" maxlength="2000" placeholder="${t('postToGroup')}"></textarea>
         <input type="file" name="image" accept="image/*" hidden />
         <div class="row gap wrap">
-          <button type="button" class="btn btn-ghost btn-sm" data-act="pick-photo">📷 ${t('photo')}</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-act="pick-photo">${icon('image')} ${t('photo')}</button>
           <span class="spacer"></span>
           <button class="btn btn-primary" type="submit">${t('post')}</button>
         </div>
       </form>
     </div>` : `<div class="card"><p class="muted">${t('joinToPost')}</p></div>`}
     <div class="profile-posts">
-      ${posts.map((p) => postCardHtml(p, ctx)).join('') || emptyState('📝', t('noPosts'))}
+      ${posts.map((p) => postCardHtml(p, ctx)).join('') || emptyState('file-text', t('noPosts'))}
     </div>
     <div class="card stack">
       <h3>${t('members')} (${(group.members || []).length})</h3>
@@ -616,8 +617,8 @@ export function groupFormHtml(group = null) {
     <label>${t('description')}<textarea name="description" rows="3" maxlength="500">${escapeHtml(group?.description || '')}</textarea></label>
     <label>${t('privacyLabel')}
       <select name="privacy">
-        <option value="public" ${group?.privacy !== 'private' ? 'selected' : ''}>🌍 ${t('publicLabel')}</option>
-        <option value="private" ${group?.privacy === 'private' ? 'selected' : ''}>🔒 ${t('privateLabel')}</option>
+        <option value="public" ${group?.privacy !== 'private' ? 'selected' : ''}>${t('publicLabel')}</option>
+        <option value="private" ${group?.privacy === 'private' ? 'selected' : ''}>${t('privateLabel')}</option>
       </select>
     </label>
     <label>Cover photo<input type="file" name="cover" accept="image/*" /></label>
@@ -642,7 +643,7 @@ export function pagesView(d, meUser, queryText = '') {
     </div>
   </div>`;
   return `<div class="page">
-    <div class="row"><h2 class="grow">📄 ${t('pages')}</h2><button class="btn btn-primary" data-act="create-page">+ ${t('createPage')}</button></div>
+    <div class="row"><h2 class="grow">${icon('flag')} ${t('pages')}</h2><button class="btn btn-primary" data-act="create-page">+ ${t('createPage')}</button></div>
     <form id="pages-search-form" class="row gap">
       <input name="q" class="grow" placeholder="${t('searchPages')}" value="${escapeHtml(queryText || '')}" autocomplete="off" />
       <button class="btn btn-ghost" type="submit">${t('search')}</button>
@@ -656,7 +657,7 @@ export function pagesView(d, meUser, queryText = '') {
 
 export function pageView(d, meUser, pageId) {
   const page = (d.pages || []).find((p) => p.id === pageId);
-  if (!page) return emptyState('📄', 'This page could not be found.');
+  if (!page) return emptyState('flag', 'This page could not be found.');
   const ctx = viewCtx(d, meUser);
   const isOwner = page.ownerId === meUser.id;
   const following = (page.followers || []).includes(meUser.id);
@@ -664,7 +665,7 @@ export function pageView(d, meUser, pageId) {
   const pageReviews = (d.reviews || []).filter((r) => r.pageId === page.id).sort((a, b) => b.createdAt - a.createdAt);
   const ratingSummary = averageRating(pageReviews);
   const myReview = pageReviews.find((r) => r.authorId === meUser.id);
-  const stars = (n) => '★'.repeat(Math.round(n)) + '☆'.repeat(5 - Math.round(n));
+  const stars = (n) => iconFill('star', 'ic-sm').repeat(Math.round(n)) + icon('star', 'ic-sm').repeat(5 - Math.round(n));
   return `<div class="profile-wrap">
     <div class="card profile-head">
       <div class="cover" style="${page.cover ? `background-image:url('${escapeHtml(page.cover)}')` : ''}"></div>
@@ -676,7 +677,7 @@ export function pageView(d, meUser, pageId) {
           <p>${escapeHtml(page.about || '')}</p>
         </div>
         <div class="row gap wrap">
-          ${isOwner ? `<button class="btn btn-primary" data-act="edit-page" data-id="${page.id}">✏️ ${t('edit')}</button><button class="btn btn-danger" data-act="delete-page" data-id="${page.id}">${t('delete')} page</button>`
+          ${isOwner ? `<button class="btn btn-primary" data-act="edit-page" data-id="${page.id}">${icon('pencil')} ${t('edit')}</button><button class="btn btn-danger" data-act="delete-page" data-id="${page.id}">${t('delete')} page</button>`
             : `<button class="btn ${following ? 'btn-ghost' : 'btn-primary'}" data-act="follow-page" data-id="${page.id}">${following ? t('following') : t('follow')}</button>`}
         </div>
       </div>
@@ -688,23 +689,23 @@ export function pageView(d, meUser, pageId) {
         <textarea name="text" rows="3" maxlength="2000" placeholder="${t('postAsPage')}"></textarea>
         <input type="file" name="image" accept="image/*" hidden />
         <div class="row gap wrap">
-          <button type="button" class="btn btn-ghost btn-sm" data-act="pick-photo">📷 ${t('photo')}</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-act="pick-photo">${icon('image')} ${t('photo')}</button>
           <span class="spacer"></span>
           <button class="btn btn-primary" type="submit">${t('post')}</button>
         </div>
       </form>
     </div>` : ''}
     <div class="profile-posts">
-      ${posts.map((p) => postCardHtml(p, ctx)).join('') || emptyState('📝', t('noPosts'))}
+      ${posts.map((p) => postCardHtml(p, ctx)).join('') || emptyState('file-text', t('noPosts'))}
     </div>
     <div class="card stack">
-      <h3>⭐ ${t('reviews')} ${ratingSummary.count ? `· <span class="stars">${stars(ratingSummary.average)}</span> ${ratingSummary.average} (${ratingSummary.count})` : ''}</h3>
-      ${pageReviews.map((r) => { const a = ctx.usersById[r.authorId]; return `<div class="row gap-sm review-item">${avatarHtml(a, 36)}<div class="grow"><b>${escapeHtml(a?.name || '')}</b> <span class="stars">${stars(r.rating)}</span> <span class="muted small">· ${timeAgo(r.createdAt)}</span>${reviewText(r) ? `<br/>${escapeHtml(reviewText(r))}` : ''}</div>${r.authorId === meUser.id ? `<button class="btn btn-ghost btn-sm" data-act="delete-review" data-id="${r.id}">🗑️</button>` : ''}</div>`; }).join('') || `<p class="muted">${t('noReviews')}</p>`}
+      <h3>${icon('star')} ${t('reviews')} ${ratingSummary.count ? `· <span class="stars">${stars(ratingSummary.average)}</span> ${ratingSummary.average} (${ratingSummary.count})` : ''}</h3>
+      ${pageReviews.map((r) => { const a = ctx.usersById[r.authorId]; return `<div class="row gap-sm review-item">${avatarHtml(a, 36)}<div class="grow"><b>${escapeHtml(a?.name || '')}</b> <span class="stars">${stars(r.rating)}</span> <span class="muted small">· ${timeAgo(r.createdAt)}</span>${reviewText(r) ? `<br/>${escapeHtml(reviewText(r))}` : ''}</div>${r.authorId === meUser.id ? `<button class="btn btn-ghost btn-sm" data-act="delete-review" data-id="${r.id}" aria-label="${t('delete')}">${icon('trash')}</button>` : ''}</div>`; }).join('') || `<p class="muted">${t('noReviews')}</p>`}
       ${isOwner ? '' : `
       <form id="review-form" data-page="${page.id}" class="stack">
         <h4>${myReview ? t('yourReview') : t('writeReview')}</h4>
         <div class="star-picker" role="radiogroup" aria-label="${t('rating')}">
-          ${[1, 2, 3, 4, 5].map((n) => `<label class="star-option"><input type="radio" name="rating" value="${n}" ${Number(myReview?.rating || 0) === n ? 'checked' : ''} required /><span>${n <= Number(myReview?.rating || 0) ? '★' : '☆'}</span></label>`).join('')}
+          ${[1, 2, 3, 4, 5].map((n) => `<label class="star-option"><input type="radio" name="rating" value="${n}" ${Number(myReview?.rating || 0) === n ? 'checked' : ''} required /><span>${n <= Number(myReview?.rating || 0) ? iconFill('star') : icon('star')}</span></label>`).join('')}
         </div>
         <textarea name="text" rows="2" maxlength="500" placeholder="${t('writeReview')}…">${escapeHtml(myReview?.text || '')}</textarea>
         <div><button class="btn btn-primary btn-sm" type="submit">${myReview ? 'Update review' : t('writeReview')}</button></div>
@@ -746,13 +747,13 @@ function eventCardHtml(d, meUser, e, ctx) {
       ${eventDateBlock(e.dateTime)}
       <div class="grow">
         <a href="#/event/${e.id}"><b>${escapeHtml(e.title)}</b></a>
-        <div class="muted small">🕒 ${escapeHtml(when)}${e.location ? ` · 📍 ${escapeHtml(e.location)}` : ''}</div>
-        <div class="muted small">${e.visibility === 'friends' ? '👥 ' + t('friends') : '🌍 ' + t('publicLabel')} · ${plural((e.going || []).length, t('going'), t('going'))} · ${plural((e.interested || []).length, t('interested'), t('interested'))} · by ${escapeHtml(byId[e.createdBy]?.name || '')}</div>
+        <div class="muted small">${icon('clock', 'ic-sm')} ${escapeHtml(when)}${e.location ? ` · ${icon('map-pin', 'ic-sm')} ${escapeHtml(e.location)}` : ''}</div>
+        <div class="muted small">${e.visibility === 'friends' ? icon('users', 'ic-sm') + ' ' + t('friends') : icon('globe', 'ic-sm') + ' ' + t('publicLabel')} · ${plural((e.going || []).length, t('going'), t('going'))} · ${plural((e.interested || []).length, t('interested'), t('interested'))} · by ${escapeHtml(byId[e.createdBy]?.name || '')}</div>
       </div>
     </div>
     <div class="row gap wrap">
-      <button class="btn ${going ? 'btn-primary' : 'btn-ghost'} btn-sm" data-act="rsvp" data-kind="going" data-id="${e.id}">${going ? '✓ ' : ''}${t('going')}</button>
-      <button class="btn ${interested ? 'btn-primary' : 'btn-ghost'} btn-sm" data-act="rsvp" data-kind="interested" data-id="${e.id}">⭐ ${t('interested')}</button>
+      <button class="btn ${going ? 'btn-primary' : 'btn-ghost'} btn-sm" data-act="rsvp" data-kind="going" data-id="${e.id}">${going ? icon('check') + ' ' : ''}${t('going')}</button>
+      <button class="btn ${interested ? 'btn-primary' : 'btn-ghost'} btn-sm" data-act="rsvp" data-kind="interested" data-id="${e.id}">${interested ? iconFill('star') : icon('star')} ${t('interested')}</button>
       <a class="btn btn-ghost btn-sm" href="#/event/${e.id}">Details</a>
     </div>
   </div>`;
@@ -763,9 +764,9 @@ export function eventsView(d, meUser) {
   const blocked = blockedIdsOfData(d, meUser.id);
   const visible = upcomingEvents((d.events || []).filter((e) => canViewEvent(e, { viewerId: meUser.id, friendIds: ctx.friendIds, blockedIds: blocked })));
   return `<div class="page">
-    <div class="row"><h2 class="grow">📅 ${t('events')}</h2><button class="btn btn-primary" data-act="create-event">+ ${t('createEvent')}</button></div>
+    <div class="row"><h2 class="grow">${icon('calendar')} ${t('events')}</h2><button class="btn btn-primary" data-act="create-event">+ ${t('createEvent')}</button></div>
     <h3>${t('upcomingEvents')} (${visible.length})</h3>
-    ${visible.map((e) => eventCardHtml(d, meUser, e, ctx)).join('') || emptyState('📅', t('noEvents'))}
+    ${visible.map((e) => eventCardHtml(d, meUser, e, ctx)).join('') || emptyState('calendar', t('noEvents'))}
   </div>`;
 }
 
@@ -773,7 +774,7 @@ export function eventView(d, meUser, eventId) {
   const e = (d.events || []).find((x) => x.id === eventId);
   const ctx = viewCtx(d, meUser);
   const blocked = blockedIdsOfData(d, meUser.id);
-  if (!e || !canViewEvent(e, { viewerId: meUser.id, friendIds: ctx.friendIds, blockedIds: blocked })) return emptyState('📅', 'This event could not be found.');
+  if (!e || !canViewEvent(e, { viewerId: meUser.id, friendIds: ctx.friendIds, blockedIds: blocked })) return emptyState('calendar', 'This event could not be found.');
   const byId = ctx.usersById;
   const isCreator = e.createdBy === meUser.id;
   const going = (e.going || []).includes(meUser.id);
@@ -787,8 +788,8 @@ export function eventView(d, meUser, eventId) {
         ${eventDateBlock(e.dateTime)}
         <div class="grow">
           <h2>${escapeHtml(e.title)}</h2>
-          <p class="muted">🕒 ${escapeHtml(when)}${e.location ? `<br/>📍 ${escapeHtml(e.location)}` : ''}</p>
-          <p class="muted small">${e.visibility === 'friends' ? '👥 ' + t('friends') : '🌍 ' + t('publicLabel')}</p>
+          <p class="muted">${icon('clock')} ${escapeHtml(when)}${e.location ? `<br/>${icon('map-pin')} ${escapeHtml(e.location)}` : ''}</p>
+          <p class="muted small">${e.visibility === 'friends' ? icon('users', 'ic-sm') + ' ' + t('friends') : icon('globe', 'ic-sm') + ' ' + t('publicLabel')}</p>
           ${byId[e.createdBy] ? `<div class="row gap-sm host-row">${avatarHtml(byId[e.createdBy], 32)}<span>${t('hostedBy')} <a href="#/profile/${e.createdBy}"><b>${escapeHtml(byId[e.createdBy].name)}</b></a></span></div>` : ''}
         </div>
         <div class="row gap wrap">
@@ -798,8 +799,8 @@ export function eventView(d, meUser, eventId) {
     </div>
     <div class="card stack">
       <div class="row gap wrap">
-        <button class="btn ${going ? 'btn-primary' : 'btn-ghost'}" data-act="rsvp" data-kind="going" data-id="${e.id}">${going ? '✓ ' : ''}${t('going')} (${(e.going || []).length})</button>
-        <button class="btn ${interested ? 'btn-primary' : 'btn-ghost'}" data-act="rsvp" data-kind="interested" data-id="${e.id}">⭐ ${t('interested')} (${(e.interested || []).length})</button>
+        <button class="btn ${going ? 'btn-primary' : 'btn-ghost'}" data-act="rsvp" data-kind="going" data-id="${e.id}">${going ? icon('check') + ' ' : ''}${t('going')} (${(e.going || []).length})</button>
+        <button class="btn ${interested ? 'btn-primary' : 'btn-ghost'}" data-act="rsvp" data-kind="interested" data-id="${e.id}">${interested ? iconFill('star') : icon('star')} ${t('interested')} (${(e.interested || []).length})</button>
       </div>
       ${e.description ? `<p>${escapeHtml(e.description)}</p>` : ''}
     </div>
@@ -816,7 +817,7 @@ export function eventView(d, meUser, eventId) {
 export function eventFormHtml() {
   // datetime-local needs a value in local time; leave empty and let the
   // browser picker fill it (required).
-  return `<h3>📅 ${t('createEvent')}</h3>
+  return `<h3>${icon('calendar')} ${t('createEvent')}</h3>
   <form id="event-form" class="stack">
     <label>${t('eventTitle')}<input name="title" required maxlength="120" /></label>
     <label>${t('description')}<textarea name="description" rows="3" maxlength="1000"></textarea></label>
@@ -825,8 +826,8 @@ export function eventFormHtml() {
     <label>Cover photo<input type="file" name="cover" accept="image/*" /></label>
     <label>${t('privacyLabel')}
       <select name="visibility">
-        <option value="public">🌍 ${t('publicLabel')}</option>
-        <option value="friends">👥 ${t('friends')}</option>
+        <option value="public">${t('publicLabel')}</option>
+        <option value="friends">${t('friends')}</option>
       </select>
     </label>
     <div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">${t('createEvent')}</button></div>
@@ -878,25 +879,25 @@ export function messagesView(d, meUser, activeConvId = '') {
     .sort((a, b) => Number(myFriendIds.has(b.id)) - Number(myFriendIds.has(a.id))).slice(0, 12);
   return `<div class="messenger card ${activeConvId ? 'has-open' : ''}">
     <div class="conv-list">
-      <div class="row gap-sm"><h3 class="grow">💬 ${t('messages')}</h3><button class="btn btn-primary btn-sm" data-act="create-group-chat">👥 ${t('newGroupChat')}</button></div>
+      <div class="row gap-sm"><h3 class="grow">${icon('message-circle')} ${t('messages')}</h3><button class="btn btn-primary btn-sm" data-act="create-group-chat">${icon('users')} ${t('newGroupChat')}</button></div>
       <input id="conv-search" class="conv-search" type="search" placeholder="${t('searchConversations')}" autocomplete="off" aria-label="${t('searchConversations')}" />
       ${onlineUsers.length ? `<div class="active-rail" aria-label="${t('activeNow')}">${onlineUsers.map((u) => `<button class="active-person" data-act="message-user" data-id="${u.id}" title="${escapeHtml(u.name)}">${avatarHtml(u, 44)}<span class="active-dot"></span><span class="active-name">${escapeHtml(u.name.split(' ')[0])}</span></button>`).join('')}</div>` : ''}
       <div class="row gap-sm conv-filters">
         <button class="btn btn-sm ${filter === 'all' ? 'btn-primary' : 'btn-ghost'}" data-act="conv-filter" data-filter="all">${t('allChats')}</button>
         <button class="btn btn-sm ${filter === 'unread' ? 'btn-primary' : 'btn-ghost'}" data-act="conv-filter" data-filter="unread">${t('unreadChats')}</button>
-        <button class="btn btn-sm ${filter === 'archived' ? 'btn-primary' : 'btn-ghost'}" data-act="conv-filter" data-filter="archived">🗄️ ${t('archivedChats')}${archivedCount ? ` (${archivedCount})` : ''}</button>
-        <button class="btn btn-sm ${filter === 'requests' ? 'btn-primary' : 'btn-ghost'}" data-act="conv-filter" data-filter="requests">📩 ${t('messageRequests')}${requestsCount ? ` (${requestsCount})` : ''}</button>
+        <button class="btn btn-sm ${filter === 'archived' ? 'btn-primary' : 'btn-ghost'}" data-act="conv-filter" data-filter="archived">${icon('archive')} ${t('archivedChats')}${archivedCount ? ` (${archivedCount})` : ''}</button>
+        <button class="btn btn-sm ${filter === 'requests' ? 'btn-primary' : 'btn-ghost'}" data-act="conv-filter" data-filter="requests">${icon('inbox')} ${t('messageRequests')}${requestsCount ? ` (${requestsCount})` : ''}</button>
       </div>
       ${listedConvs.map((x) => `<div class="conv-item-wrap">
         <button class="conv-item ${active?.conv.id === x.conv.id ? 'active' : ''}" data-act="open-conv" data-id="${x.conv.id}" data-search="${escapeHtml(x.searchText)}">
-        ${avatarHtml(x.avatarUser, 44)}<span class="grow left conv-item-text"><b class="conv-title">${x.pinned ? '📌 ' : ''}${x.isGroup ? '👥 ' : ''}${escapeHtml(x.title)}</b> <span class="conv-preview muted small">${x.muted ? '🔕 ' : ''}${escapeHtml(x.preview)}</span></span>
+        ${avatarHtml(x.avatarUser, 44)}<span class="grow left conv-item-text"><b class="conv-title">${x.pinned ? icon('pin', 'ic-sm') + ' ' : ''}${x.isGroup ? icon('users', 'ic-sm') + ' ' : ''}${escapeHtml(x.title)}</b> <span class="conv-preview muted small">${x.muted ? icon('bell-off', 'ic-sm') + ' ' : ''}${escapeHtml(x.preview)}</span></span>
         ${x.mentionUnread ? `<span class="mention-badge" title="${t('mentionedYou')}">@</span>` : ''}${x.unread && !x.muted ? `<span class="unread-badge">${x.unread}</span>` : ''}${x.unread && x.muted ? `<span class="unread-badge muted-badge">${x.unread}</span>` : ''}
         </button>
-        <button class="icon-btn conv-menu-btn" data-act="conv-menu" data-id="${x.conv.id}" title="${t('conversationOptions')}" aria-label="${t('conversationOptions')}">⋯</button>
+        <button class="icon-btn conv-menu-btn" data-act="conv-menu" data-id="${x.conv.id}" title="${t('conversationOptions')}" aria-label="${t('conversationOptions')}">${icon('more-horizontal')}</button>
         <div class="menu conv-menu ${uiState.convMenuFor === x.conv.id ? '' : 'hidden'}" id="conv-menu-${x.conv.id}">
-          <button data-act="conv-pin" data-id="${x.conv.id}">${x.pinned ? `📌 ${t('unpinChat')}` : `📌 ${t('pinChat')}`}</button>
-          <button data-act="conv-archive" data-id="${x.conv.id}">${x.archived ? `📤 ${t('unarchiveChat')}` : `🗄️ ${t('archiveChat')}`}</button>
-          ${x.muted ? `<button data-act="conv-mute" data-id="${x.conv.id}" data-ms="">🔔 ${t('unmuteChat')}</button>` : `<button data-act="conv-mute" data-id="${x.conv.id}" data-ms="3600000">🔕 ${t('muteFor1Hour')}</button><button data-act="conv-mute" data-id="${x.conv.id}" data-ms="86400000">🔕 ${t('muteFor24Hours')}</button><button data-act="conv-mute" data-id="${x.conv.id}" data-ms="inf">🔕 ${t('muteForever')}</button>`}
+          <button data-act="conv-pin" data-id="${x.conv.id}">${x.pinned ? `${icon('pin')} ${t('unpinChat')}` : `${icon('pin')} ${t('pinChat')}`}</button>
+          <button data-act="conv-archive" data-id="${x.conv.id}">${x.archived ? `${icon('archive-restore')} ${t('unarchiveChat')}` : `${icon('archive')} ${t('archiveChat')}`}</button>
+          ${x.muted ? `<button data-act="conv-mute" data-id="${x.conv.id}" data-ms="">${icon('bell')} ${t('unmuteChat')}</button>` : `<button data-act="conv-mute" data-id="${x.conv.id}" data-ms="3600000">${icon('bell-off')} ${t('muteFor1Hour')}</button><button data-act="conv-mute" data-id="${x.conv.id}" data-ms="86400000">${icon('bell-off')} ${t('muteFor24Hours')}</button><button data-act="conv-mute" data-id="${x.conv.id}" data-ms="inf">${icon('bell-off')} ${t('muteForever')}</button>`}
         </div>
       </div>`).join('') || `<p class="muted small">${filter === 'archived' ? t('noArchivedChats') : filter === 'requests' ? t('noRequests') : t('noMessages')}</p>
       <div class="stack"><h4>Start a chat</h4>${d.users.filter((u) => u.id !== meUser.id).slice(0, 6).map((u) => `<button class="conv-item" data-act="message-user" data-id="${u.id}">${avatarHtml(u, 36)}<span>${escapeHtml(u.name)}</span></button>`).join('')}</div>`}
@@ -904,73 +905,73 @@ export function messagesView(d, meUser, activeConvId = '') {
     <div class="conv-thread">
       ${active ? `
       ${(() => { const theme = chatTheme(active.conv.theme); const pinned = pinnedMessages(active.msgs); const latestPinned = pinned[0]; return `
-      <header class="thread-head"><a class="thread-back" href="#/messages" aria-label="Back to conversations">←</a>${avatarHtml(active.avatarUser, 40)}<div><b>${active.isGroup ? '👥 ' : ''}${escapeHtml(active.title)}</b><br/><span class="muted small">${active.isGroup ? `${active.conv.participants.length} ${t('members')}` : `${active.other?.online ? t('online') : t('offline')}`}</span></div>
-      <span class="spacer"></span><button type="button" class="btn btn-ghost btn-sm" data-act="conv-info" title="${t('conversationDetails')}" aria-label="${t('conversationDetails')}">ℹ️</button>${active.isGroup ? '' : `<button class="btn btn-ghost btn-sm" data-act="report-user" data-id="${active.other?.id}">🚩</button>`}</header>
-      ${latestPinned ? `<button type="button" class="pinned-bar" data-act="jump-message" data-id="${latestPinned.id}"><span class="pinned-bar-label">📌 ${t('pinnedMessage')}</span><span class="pinned-bar-text">${escapeHtml(messageSnippet(latestPinned, 90))}</span></button>` : ''}
+      <header class="thread-head"><a class="thread-back" href="#/messages" aria-label="Back to conversations">${icon('arrow-left')}</a>${avatarHtml(active.avatarUser, 40)}<div><b>${active.isGroup ? icon('users', 'ic-sm') + ' ' : ''}${escapeHtml(active.title)}</b><br/><span class="muted small">${active.isGroup ? `${active.conv.participants.length} ${t('members')}` : `${active.other?.online ? t('online') : t('offline')}`}</span></div>
+      <span class="spacer"></span><button type="button" class="btn btn-ghost btn-sm" data-act="conv-info" title="${t('conversationDetails')}" aria-label="${t('conversationDetails')}">${icon('info')}</button>${active.isGroup ? '' : `<button class="btn btn-ghost btn-sm" data-act="report-user" data-id="${active.other?.id}" title="${t('report')}" aria-label="${t('report')}">${icon('flag')}</button>`}</header>
+      ${latestPinned ? `<button type="button" class="pinned-bar" data-act="jump-message" data-id="${latestPinned.id}"><span class="pinned-bar-label">${icon('pin')} ${t('pinnedMessage')}</span><span class="pinned-bar-text">${escapeHtml(messageSnippet(latestPinned, 90))}</span></button>` : ''}
       <div id="conv-info" class="conv-info${uiState.convInfoFor === active.conv.id ? '' : ' hidden'}">
-        <div class="conv-info-section"><h4>🎨 ${t('chatTheme')}</h4>
+        <div class="conv-info-section"><h4>${icon('palette')} ${t('chatTheme')}</h4>
           <div class="theme-swatches">${CHAT_THEMES.map((th) => `<button type="button" class="theme-swatch ${theme.id === th.id ? 'active' : ''}" data-act="set-theme" data-conv="${active.conv.id}" data-theme="${th.id}" title="${t(`theme_${th.id}`)}" aria-label="${t(`theme_${th.id}`)}" style="${th.gradient ? `background:${th.gradient};` : ''}">${th.id === 'default' ? '∅' : ''}</button>`).join('')}</div>
           <p class="muted small">${t(`theme_${theme.id}`)}</p>
         </div>
-        <div class="conv-info-section"><h4>📌 ${t('pinnedMessages')}</h4>
+        <div class="conv-info-section"><h4>${icon('pin')} ${t('pinnedMessages')}</h4>
           ${pinned.length ? pinned.map((m) => `<button type="button" class="pinned-item" data-act="jump-message" data-id="${m.id}"><b>${escapeHtml((byId[m.senderId]?.name || '').split(' ')[0])}</b><span class="grow">${escapeHtml(messageSnippet(m, 80))}</span><span class="muted small">${timeAgo(m.createdAt)}</span></button>`).join('') : `<p class="muted small">${t('noPinnedMessages')}</p>`}
         </div>
-        <div class="conv-info-section"><h4>😀 ${t('chatEmoji')}</h4>
+        <div class="conv-info-section"><h4>${icon('smile')} ${t('chatEmoji')}</h4>
           <div class="emoji-swatches">${['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '🎉', '😍', '👏', '💯', '🌙'].map((e) => `<button type="button" class="emoji-swatch ${(active.conv.emoji || '👍') === e ? 'active' : ''}" data-act="set-conv-emoji" data-conv="${active.conv.id}" data-emoji="${e}" aria-label="${t('chatEmoji')} ${e}">${e}</button>`).join('')}</div>
           <p class="muted small">${t('chatEmojiHint')}</p>
         </div>
-        <div class="conv-info-section"><h4>🫥 ${t('vanishMode')}</h4>
+        <div class="conv-info-section"><h4>${icon('eye-off')} ${t('vanishMode')}</h4>
           <div class="row gap-sm"><span class="grow small">${active.conv.vanish ? t('vanishOnText') : t('vanishOffText')}</span><button class="btn btn-ghost btn-sm" data-act="vanish-toggle" data-conv="${active.conv.id}">${active.conv.vanish ? t('turnOff') : t('turnOn')}</button></div>
           <p class="muted small">${t('vanishHint')}</p>
         </div>
-        <div class="conv-info-section"><h4>🏷️ ${t('nicknames')}</h4>
+        <div class="conv-info-section"><h4>${icon('tag')} ${t('nicknames')}</h4>
           ${active.conv.participants.map((id) => `<div class="row gap-sm"><span class="grow row gap-sm">${avatarHtml(byId[id], 28)}<span>${escapeHtml(nicknameFor(active.conv, id, byId[id]?.name || ''))}${active.conv.nicknames?.[id] ? ` <span class="muted small">(${escapeHtml(byId[id]?.name || '')})</span>` : ''}</span></span><button class="btn btn-ghost btn-sm" data-act="set-nickname" data-conv="${active.conv.id}" data-id="${id}">${t('setNickname')}</button></div>`).join('')}
           <p class="muted small">${t('nicknameHint')}</p>
         </div>
-        <div class="conv-info-section"><h4>🔍 ${t('searchInConversation')}</h4>
+        <div class="conv-info-section"><h4>${icon('search')} ${t('searchInConversation')}</h4>
           <input id="conv-msg-search" class="conv-search" type="search" placeholder="${t('searchInConversation')}" autocomplete="off" data-conv="${active.conv.id}" aria-label="${t('searchInConversation')}" />
           <div id="conv-search-results"></div>
         </div>
-        ${(() => { const media = active.msgs.filter((m) => m.image && !m.unsent); return media.length ? `<div class="conv-info-section"><h4>🖼️ ${t('sharedMedia')}</h4><div class="media-grid">${media.slice(-9).reverse().map((m) => `<button type="button" class="media-thumb" data-act="jump-message" data-id="${m.id}"><img src="${escapeHtml(cldImg(m.image, 480))}" alt="${t('sharedMedia')}" loading="lazy" decoding="async" /></button>`).join('')}</div></div>` : ''; })()}
-        ${active.isGroup ? (() => { const conv = active.conv; const canManage = conv.createdBy === meUser.id || isAdminRole(meUser); const addable = [...friendIdsOfData(d, meUser.id)].map((id) => byId[id]).filter((u) => u && !conv.participants.includes(u.id)); return `<div class="conv-info-section"><h4>👥 ${t('members')}</h4>
+        ${(() => { const media = active.msgs.filter((m) => m.image && !m.unsent); return media.length ? `<div class="conv-info-section"><h4>${icon('image')} ${t('sharedMedia')}</h4><div class="media-grid">${media.slice(-9).reverse().map((m) => `<button type="button" class="media-thumb" data-act="jump-message" data-id="${m.id}"><img src="${escapeHtml(cldImg(m.image, 480))}" alt="${t('sharedMedia')}" loading="lazy" decoding="async" /></button>`).join('')}</div></div>` : ''; })()}
+        ${active.isGroup ? (() => { const conv = active.conv; const canManage = conv.createdBy === meUser.id || isAdminRole(meUser); const addable = [...friendIdsOfData(d, meUser.id)].map((id) => byId[id]).filter((u) => u && !conv.participants.includes(u.id)); return `<div class="conv-info-section"><h4>${icon('users')} ${t('members')}</h4>
           <form id="group-rename-form" data-conv="${conv.id}" class="row gap-sm">
             <input name="title" class="grow" value="${escapeHtml(conv.title || '')}" maxlength="60" aria-label="${t('groupName')}" />
             <button class="btn btn-ghost btn-sm" type="submit">${t('renameGroup')}</button>
           </form>
-          <div class="stack gap-sm"><b class="small">🔗 ${t('inviteLink')}</b>
+          <div class="stack gap-sm"><b class="small">${icon('link')} ${t('inviteLink')}</b>
           ${conv.joinCode ? `<div class="row gap-sm"><input class="grow" readonly value="${escapeHtml(inviteLinkFor(conv.joinCode))}" aria-label="${t('inviteLink')}" /><button class="btn btn-ghost btn-sm" data-act="copy-invite" data-link="${escapeHtml(inviteLinkFor(conv.joinCode))}">${t('copyLink')}</button></div>` : (conv.createdBy === meUser.id ? `<button class="btn btn-ghost btn-sm" data-act="create-invite" data-conv="${conv.id}">${t('createInviteLink')}</button>` : '')}
           <span class="muted small">${t('inviteHint')}</span></div>
           ${conv.participants.map((id) => `<div class="row gap-sm"><span class="grow row gap-sm">${avatarHtml(byId[id], 28)}<span>${escapeHtml(byId[id]?.name || '')}</span>${conv.createdBy === id ? `<span class="badge badge-ok">${t('groupCreator')}</span>` : ''}</span>${id !== meUser.id && canManage ? `<button class="btn btn-ghost btn-sm" data-act="group-remove-member" data-conv="${conv.id}" data-id="${id}">${t('removeMember')}</button>` : ''}</div>`).join('')}
           ${addable.length ? `<details><summary>${t('addMembers')}</summary><form id="group-add-form" data-conv="${conv.id}" class="stack group-pick-list">${addable.map((u) => `<label class="row gap-sm"><input type="checkbox" name="member" value="${u.id}" /> ${avatarHtml(u, 26)}<span>${escapeHtml(u.name)}</span></label>`).join('')}<div class="row gap end"><button class="btn btn-primary btn-sm" type="submit">${t('addMembers')}</button></div></form></details>` : ''}
-          <button class="btn btn-danger btn-sm" data-act="group-leave" data-conv="${conv.id}">🚪 ${t('leaveGroup')}</button>
+          <button class="btn btn-danger btn-sm" data-act="group-leave" data-conv="${conv.id}">${icon('log-out')} ${t('leaveGroup')}</button>
         </div>`; })() : ''}
       </div>
       <div class="thread-body" id="thread-body" style="${theme.tint ? `background:${theme.tint};` : ''}${theme.bubble ? `--bubble-mine:${theme.bubble};` : ''}">
         ${active.msgs.map((m) => messageHtml(m, meUser, byId, active.isGroup, active.conv)).join('') || '<p class="muted center">No messages yet. Say hello 👋</p>'}
       </div>
       <div class="typing-row" id="typing-row">${typingIndicatorHtml(active.conv, meUser, byId)}</div>
-      ${active.request ? `<div class="request-banner">📩 <span class="grow"><b>${escapeHtml(active.other?.name || '')}</b> ${t('requestHint')}</span><button class="btn btn-primary btn-sm" data-act="accept-msg-request" data-id="${active.conv.id}">${t('acceptRequest')}</button></div>` : ''}
-      ${active.conv.vanish ? `<div class="vanish-banner">🫥 ${t('vanishBanner')}</div>` : ''}
+      ${active.request ? `<div class="request-banner">${icon('inbox')} <span class="grow"><b>${escapeHtml(active.other?.name || '')}</b> ${t('requestHint')}</span><button class="btn btn-primary btn-sm" data-act="accept-msg-request" data-id="${active.conv.id}">${t('acceptRequest')}</button></div>` : ''}
+      ${active.conv.vanish ? `<div class="vanish-banner">${icon('eye-off')} ${t('vanishBanner')}</div>` : ''}
       <div class="composer-wrap">
         <div id="mention-menu" class="mention-menu hidden"></div>
         <div id="reply-preview" class="message-preview reply-preview hidden"></div>
         <div id="message-preview" class="message-preview hidden"></div>`; })()}
         <div id="composer-tray" class="composer-tray hidden">
-          <button type="button" class="btn btn-ghost" data-act="sticker-toggle" title="${t('stickers')}" aria-label="${t('stickers')}">🎨</button>
-          <label class="btn btn-ghost msg-attach" for="msg-file-input" title="${t('attachFile')}" aria-label="${t('attachFile')}">📎</label>
-          <button type="button" class="btn btn-ghost" data-act="send-location" title="${t('shareLocation')}" aria-label="${t('shareLocation')}">📍</button>
-          <button type="button" class="btn btn-ghost" data-act="poll-open" data-conv="${active.conv.id}" title="${t('createPoll')}" aria-label="${t('createPoll')}">📊</button>
-          <label class="btn btn-ghost msg-attach" for="msg-image-input" title="${t('photo')}" aria-label="${t('photo')}">📷</label>
+          <button type="button" class="btn btn-ghost" data-act="sticker-toggle" title="${t('stickers')}" aria-label="${t('stickers')}">${icon('sticker')}</button>
+          <label class="btn btn-ghost msg-attach" for="msg-file-input" title="${t('attachFile')}" aria-label="${t('attachFile')}">${icon('paperclip')}</label>
+          <button type="button" class="btn btn-ghost" data-act="send-location" title="${t('shareLocation')}" aria-label="${t('shareLocation')}">${icon('map-pin')}</button>
+          <button type="button" class="btn btn-ghost" data-act="poll-open" data-conv="${active.conv.id}" title="${t('createPoll')}" aria-label="${t('createPoll')}">${icon('bar-chart')}</button>
+          <label class="btn btn-ghost msg-attach" for="msg-image-input" title="${t('photo')}" aria-label="${t('photo')}">${icon('image')}</label>
         </div>
         <form id="message-form" data-conv="${active.conv.id}" class="message-form">
           <input type="file" id="msg-image-input" name="image" accept="image/*" hidden />
           <input type="file" id="msg-file-input" name="file" hidden />
-          <button type="button" class="btn btn-ghost btn-sm" data-act="composer-more" title="${t('moreOptions')}" aria-label="${t('moreOptions')}">➕</button>
-          <button type="button" class="btn btn-ghost btn-sm" data-act="emoji-toggle" title="Emoji" aria-label="Emoji">😊</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-act="composer-more" title="${t('moreOptions')}" aria-label="${t('moreOptions')}">${icon('plus')}</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-act="emoji-toggle" title="Emoji" aria-label="Emoji">${icon('smile')}</button>
           <input name="text" placeholder="Type a message…" autocomplete="off" maxlength="2000" />
-          <button type="button" class="btn btn-ghost btn-sm" id="voice-btn" data-act="voice-toggle" title="${t('voiceMessage')}" aria-label="${t('voiceMessage')}">🎤</button>
+          <button type="button" class="btn btn-ghost btn-sm" id="voice-btn" data-act="voice-toggle" title="${t('voiceMessage')}" aria-label="${t('voiceMessage')}">${icon('mic')}</button>
           <button type="button" class="btn btn-ghost thread-emoji-btn" data-act="send-thread-emoji" data-conv="${active.conv.id}" title="${t('chatEmoji')}" aria-label="${t('chatEmoji')}">${escapeHtml(active.conv.emoji || '👍')}</button>
-          <button class="btn btn-primary msg-send-btn" type="submit" title="${t('send')}" aria-label="${t('send')}">➤</button>
+          <button class="btn btn-primary msg-send-btn" type="submit" title="${t('send')}" aria-label="${t('send')}">${icon('send')}</button>
         </form>
         <div id="emoji-panel" class="emoji-panel hidden">
           ${CHAT_EMOJIS.map((e) => `<button type="button" class="emoji-btn" data-emoji-insert="${e}" aria-label="Insert ${e}">${e}</button>`).join('')}
@@ -980,10 +981,10 @@ export function messagesView(d, meUser, activeConvId = '') {
         </div>
         <div id="voice-ui" class="voice-ui hidden">
           <span class="voice-dot"></span><span id="voice-time" class="mono">0:00</span><span class="grow small">${t('recording')}…</span>
-          <button class="btn btn-ghost btn-sm" data-act="voice-cancel">✕ ${t('cancel')}</button>
+          <button class="btn btn-ghost btn-sm" data-act="voice-cancel">${icon('x')} ${t('cancel')}</button>
           <button class="btn btn-primary btn-sm" data-act="voice-send">${t('send')}</button>
         </div>
-      </div>` : `<div class="empty-state"><div class="empty-icon">💬</div><p class="muted">${t('selectConversation')}</p></div>`}
+      </div>` : `<div class="empty-state"><div class="empty-icon">${icon('message-circle', 'ic-xl')}</div><p class="muted">${t('selectConversation')}</p></div>`}
     </div>
   </div>`;
 }
@@ -1020,13 +1021,13 @@ function messageHtml(m, meUser, byId, isGroup = false, conv = null) {
   if (m.unsent) {
     return `<div class="msg-row ${mine ? 'mine' : ''}" id="msg-${m.id}">
     ${mine ? '' : avatarHtml(byId[m.senderId], 28)}
-    <div class="msg-bubble msg-unsent"><i>🚫 ${mine ? t('youUnsentMessage') : t('messageUnsent')}</i></div>
+    <div class="msg-bubble msg-unsent"><i>${icon('ban', 'ic-sm')} ${mine ? t('youUnsentMessage') : t('messageUnsent')}</i></div>
   </div>`;
   }
   // Own-message status as words (Facebook-style): "Seen" once any other
   // participant has it in readBy / the status flipped to read, else "Sent".
   const seen = m.status === 'read' || (m.readBy || []).length > 1;
-  const status = mine ? (seen ? `✓✓ ${t('seen')}` : `✓ ${t('sent')}`) : '';
+  const status = mine ? (seen ? `${icon('check-check', 'ic-sm')} ${t('seen')}` : `${icon('check', 'ic-sm')} ${t('sent')}`) : '';
   const chips = reactionChips(m.reactions);
   const bigEmoji = Boolean(m.text) && !m.image && !m.audio && isEmojiOnlyText(m.text);
   const editable = canEditMessage(m, meUser.id);
@@ -1035,23 +1036,23 @@ function messageHtml(m, meUser, byId, isGroup = false, conv = null) {
     <div class="msg-col">
     <div class="msg-bubble ${mine ? 'mine' : ''}${bigEmoji || m.sticker ? ' msg-bubble-bare' : ''}${m.vanish ? ' msg-vanish' : ''}">
       ${isGroup && !mine ? `<span class="msg-sender">${escapeHtml(nicknameFor(conv, m.senderId, byId[m.senderId]?.name || ''))}</span>` : ''}
-      ${m.forwarded ? `<span class="msg-forwarded">↪️ ${t('forwarded')}</span>` : ''}
+      ${m.forwarded ? `<span class="msg-forwarded">${icon('forward', 'ic-sm')} ${t('forwarded')}</span>` : ''}
       ${m.replyToId ? `<button type="button" class="msg-quote" data-act="jump-message" data-id="${m.replyToId}"><b>${escapeHtml(m.replyToName || '')}</b><span>${escapeHtml(m.replyToText || '')}</span></button>` : ''}
       ${m.image ? `<img class="msg-image" src="${escapeHtml(safeMediaUrl(cldImg(m.image, 800)))}" alt="Shared photo" loading="lazy" decoding="async" />` : ''}
       ${m.audio ? `<audio class="msg-audio" controls preload="metadata" src="${escapeHtml(safeMediaUrl(m.audio))}"></audio>` : ''}
-      ${m.file ? `<a class="msg-file" href="${escapeHtml(safeMediaUrl(m.file.url))}" target="_blank" rel="noopener noreferrer" download="${escapeHtml(m.file.name || 'file')}"><span class="msg-file-icon">📄</span><span class="grow"><b>${escapeHtml(m.file.name || t('file'))}</b><small>${formatBytes(m.file.size)} · ${t('download')}</small></span></a>` : ''}
+      ${m.file ? `<a class="msg-file" href="${escapeHtml(safeMediaUrl(m.file.url))}" target="_blank" rel="noopener noreferrer" download="${escapeHtml(m.file.name || 'file')}"><span class="msg-file-icon">${icon('file-text')}</span><span class="grow"><b>${escapeHtml(m.file.name || t('file'))}</b><small>${formatBytes(m.file.size)} · ${t('download')}</small></span></a>` : ''}
       ${m.sticker ? `<p class="msg-sticker">${escapeHtml(m.sticker)}</p>` : ''}
-      ${m.location ? `<a class="msg-location" href="${escapeHtml(mapsUrl(m.location))}" target="_blank" rel="noopener noreferrer"><span class="msg-location-pin">📍</span><span class="grow"><b>${t('sharedLocation')}</b><small>${Number(m.location.lat).toFixed(5)}, ${Number(m.location.lng).toFixed(5)} · ${t('openInMaps')}</small></span></a>` : ''}
-      ${m.poll ? (() => { const total = chatPollTotal(m.poll); return `<div class="chat-poll"><b>📊 ${escapeHtml(m.poll.question || '')}</b>${(m.poll.options || []).map((o) => { const pct = total ? Math.round((o.votes || []).length / total * 100) : 0; const voted = (o.votes || []).includes(meUser.id); return `<button type="button" class="chat-poll-option ${voted ? 'voted' : ''}" data-act="vote-poll" data-id="${m.id}" data-option="${o.id}"><span class="chat-poll-fill" style="width:${pct}%"></span><span class="chat-poll-text">${voted ? '✓ ' : ''}${escapeHtml(o.text)}</span><span class="chat-poll-count">${(o.votes || []).length} · ${pct}%</span></button>`; }).join('')}<span class="muted small">${total} ${t('votes')}</span></div>`; })() : ''}
+      ${m.location ? `<a class="msg-location" href="${escapeHtml(mapsUrl(m.location))}" target="_blank" rel="noopener noreferrer"><span class="msg-location-pin">${icon('map-pin')}</span><span class="grow"><b>${t('sharedLocation')}</b><small>${Number(m.location.lat).toFixed(5)}, ${Number(m.location.lng).toFixed(5)} · ${t('openInMaps')}</small></span></a>` : ''}
+      ${m.poll ? (() => { const total = chatPollTotal(m.poll); return `<div class="chat-poll"><b>${icon('bar-chart')} ${escapeHtml(m.poll.question || '')}</b>${(m.poll.options || []).map((o) => { const pct = total ? Math.round((o.votes || []).length / total * 100) : 0; const voted = (o.votes || []).includes(meUser.id); return `<button type="button" class="chat-poll-option ${voted ? 'voted' : ''}" data-act="vote-poll" data-id="${m.id}" data-option="${o.id}"><span class="chat-poll-fill" style="width:${pct}%"></span><span class="chat-poll-text">${voted ? icon('check', 'ic-sm') + ' ' : ''}${escapeHtml(o.text)}</span><span class="chat-poll-count">${(o.votes || []).length} · ${pct}%</span></button>`; }).join('')}<span class="muted small">${total} ${t('votes')}</span></div>`; })() : ''}
       ${m.text ? `<p${bigEmoji ? ' class="msg-big-emoji"' : ''}>${messageTextHtml(m, byId)}</p>` : ''}
-      <div class="msg-picker hidden" id="msg-picker-${m.id}">${MESSAGE_REACTIONS.map((e) => `<button type="button" class="emoji-btn" data-act="msg-react" data-id="${m.id}" data-emoji="${e}" aria-label="${t('reactToMessage')} ${e}">${e}</button>`).join('')}<button type="button" class="emoji-btn" data-act="react-more" data-id="${m.id}" title="${t('moreReactions')}" aria-label="${t('moreReactions')}">➕</button></div>
+      <div class="msg-picker hidden" id="msg-picker-${m.id}">${MESSAGE_REACTIONS.map((e) => `<button type="button" class="emoji-btn" data-act="msg-react" data-id="${m.id}" data-emoji="${e}" aria-label="${t('reactToMessage')} ${e}">${e}</button>`).join('')}<button type="button" class="emoji-btn" data-act="react-more" data-id="${m.id}" title="${t('moreReactions')}" aria-label="${t('moreReactions')}">${icon('plus')}</button></div>
       <div class="msg-picker msg-picker-more hidden" id="msg-picker-more-${m.id}">${REACTION_EMOJI_SET.map((e) => `<button type="button" class="emoji-btn" data-act="msg-react" data-id="${m.id}" data-emoji="${e}" aria-label="${t('reactToMessage')} ${e}">${e}</button>`).join('')}</div>
-      <span class="msg-foot"><span class="msg-meta">${m.pinned ? '📌 ' : ''}${timeAgo(m.createdAt)}${m.editedAt ? ` · ${t('edited')}` : ''}${m.vanish ? ' · 🫥' : ''} ${status}</span><span class="msg-actions"><button type="button" class="link-btn msg-act-btn" data-act="reply-message" data-id="${m.id}" title="${t('replyToMessage')}" aria-label="${t('replyToMessage')}">↩️</button><button type="button" class="link-btn msg-act-btn" data-act="msg-react-toggle" data-id="${m.id}" title="${t('reactToMessage')}" aria-label="${t('reactToMessage')}">😊</button><button type="button" class="link-btn msg-act-btn ${m.pinned ? 'active' : ''}" data-act="pin-message" data-id="${m.id}" title="${t(m.pinned ? 'unpinMessage' : 'pinMessage')}" aria-label="${t(m.pinned ? 'unpinMessage' : 'pinMessage')}">📌</button>${editable ? `<button type="button" class="link-btn msg-act-btn" data-act="edit-message" data-id="${m.id}" title="${t('editMessage')}" aria-label="${t('editMessage')}">✏️</button>` : ''}<button type="button" class="link-btn msg-act-btn" data-act="msg-menu" data-id="${m.id}" title="${t('messageOptions')}" aria-label="${t('messageOptions')}">⋯</button>${mine ? '' : `<button class="link-btn msg-report-btn" data-act="report-message" data-id="${m.id}" title="${t('report')}" aria-label="${t('report')}">🚩</button>`}</span></span>
+      <span class="msg-foot"><span class="msg-meta">${m.pinned ? icon('pin', 'ic-sm') + ' ' : ''}${timeAgo(m.createdAt)}${m.editedAt ? ` · ${t('edited')}` : ''}${m.vanish ? ` · ${icon('eye-off', 'ic-sm')}` : ''} ${status}</span><span class="msg-actions"><button type="button" class="link-btn msg-act-btn" data-act="reply-message" data-id="${m.id}" title="${t('replyToMessage')}" aria-label="${t('replyToMessage')}">${icon('reply')}</button><button type="button" class="link-btn msg-act-btn" data-act="msg-react-toggle" data-id="${m.id}" title="${t('reactToMessage')}" aria-label="${t('reactToMessage')}">${icon('smile')}</button><button type="button" class="link-btn msg-act-btn ${m.pinned ? 'active' : ''}" data-act="pin-message" data-id="${m.id}" title="${t(m.pinned ? 'unpinMessage' : 'pinMessage')}" aria-label="${t(m.pinned ? 'unpinMessage' : 'pinMessage')}">${m.pinned ? iconFill('pin') : icon('pin')}</button>${editable ? `<button type="button" class="link-btn msg-act-btn" data-act="edit-message" data-id="${m.id}" title="${t('editMessage')}" aria-label="${t('editMessage')}">${icon('pencil')}</button>` : ''}<button type="button" class="link-btn msg-act-btn" data-act="msg-menu" data-id="${m.id}" title="${t('messageOptions')}" aria-label="${t('messageOptions')}">${icon('more-horizontal')}</button>${mine ? '' : `<button class="link-btn msg-report-btn" data-act="report-message" data-id="${m.id}" title="${t('report')}" aria-label="${t('report')}">${icon('flag')}</button>`}</span></span>
     </div>
     <div class="menu msg-menu ${uiState.msgMenuFor === m.id ? '' : 'hidden'}" id="msg-menu-${m.id}">
-      <button data-act="forward-message" data-id="${m.id}">↪️ ${t('forwardMessage')}</button>
-      ${mine ? `<button data-act="unsend-message" data-id="${m.id}">🚫 ${t('unsendMessage')}</button>` : ''}
-      <button data-act="hide-message" data-id="${m.id}">🗑️ ${t('removeForMe')}</button>
+      <button data-act="forward-message" data-id="${m.id}">${icon('forward')} ${t('forwardMessage')}</button>
+      ${mine ? `<button data-act="unsend-message" data-id="${m.id}">${icon('ban')} ${t('unsendMessage')}</button>` : ''}
+      <button data-act="hide-message" data-id="${m.id}">${icon('trash')} ${t('removeForMe')}</button>
     </div>
     ${chips.length ? `<div class="msg-chips">${chips.map((c) => `<button type="button" class="msg-chip ${c.uids.includes(meUser.id) ? 'mine' : ''}" data-act="msg-react" data-id="${m.id}" data-emoji="${c.emoji}" title="${t('reactToMessage')}">${c.emoji} ${c.count}</button>`).join('')}</div>` : ''}
     </div>
@@ -1078,7 +1079,7 @@ export function typingIndicatorHtml(conv, meUser, byId, now = Date.now()) {
 export function groupChatFormHtml(d, meUser) {
   const byId = usersById(d);
   const friends = [...friendIdsOfData(d, meUser.id)].map((id) => byId[id]).filter(Boolean);
-  return `<h3>👥 ${t('newGroupChat')}</h3>
+  return `<h3>${icon('users')} ${t('newGroupChat')}</h3>
   <form id="group-chat-form" class="stack">
     <label>${t('groupChat')}<input name="title" maxlength="60" placeholder="e.g. Weekend Plans" /></label>
     <div class="stack group-pick-list">
@@ -1114,12 +1115,12 @@ export function notificationsView(d, meUser) {
   const byId = usersById(d);
   const sorted = d.notifications.filter((n) => n.userId === meUser.id).sort((a, b) => b.createdAt - a.createdAt);
   const mine = collapseDuplicateNotifications(sorted);
-  const icons = { friend_request: '👥', friend_accept: '✅', like: '❤️', comment: '💬', reply: '↩️', message: '✉️', mention: '@', share: '🔁', follow: '➕', group_join: '🏘️', page_follow: '📄', group_request: '📥', group_request_result: '🏘️', event_rsvp: '📅', report_decision: '🚩', moderation_notice: '⚖️', appeal_decision: '✉️', warning: '⚠️' };
+  const icons = { friend_request: 'users', friend_accept: 'check-circle', like: 'heart', comment: 'message-circle', reply: 'reply', message: 'mail', mention: 'at-sign', share: 'repeat', follow: 'user-plus', group_join: 'users-round', page_follow: 'flag', group_request: 'inbox', group_request_result: 'users-round', event_rsvp: 'calendar', report_decision: 'flag', moderation_notice: 'scale', appeal_decision: 'mail', warning: 'alert-triangle' };
   return `<div class="page narrow">
-    <div class="row"><h2 class="grow">🔔 ${t('notifications')}</h2><button class="btn btn-ghost btn-sm" data-act="notif-read-all">${t('markAllRead')}</button></div>
+    <div class="row"><h2 class="grow">${icon('bell')} ${t('notifications')}</h2><button class="btn btn-ghost btn-sm" data-act="notif-read-all">${t('markAllRead')}</button></div>
     ${mine.map((n) => `<button class="card notif ${n.read ? '' : 'unread'}" data-act="notif-open" data-id="${n.id}" data-post="${n.postId || ''}" data-conv="${n.conversationId || ''}" data-actor="${n.actorId || ''}" data-group="${n.groupId || ''}" data-page="${n.pageId || ''}" data-event="${n.eventId || ''}">
-      ${avatarHtml(byId[n.actorId], 40)}<span class="grow left">${icons[n.type] || '🔔'} ${escapeHtml(notificationText(n, byId))}<br/><span class="muted small">${timeAgo(n.createdAt)}</span></span>
-    </button>`).join('') || emptyState('🔔', t('noNotifications'))}
+      ${avatarHtml(byId[n.actorId], 40)}<span class="grow left">${icon(icons[n.type] || 'bell')} ${escapeHtml(notificationText(n, byId))}<br/><span class="muted small">${timeAgo(n.createdAt)}</span></span>
+    </button>`).join('') || emptyState('bell', t('noNotifications'))}
   </div>`;
 }
 
@@ -1149,7 +1150,7 @@ export function searchView(d, meUser, queryText) {
     return canViewPost(p, { viewerId: meUser.id, friendIds, blockedIds: blocked });
   }).sort((a, b) => b.createdAt - a.createdAt) : [];
   return `<div class="page">
-    <h2>🔎 Search ${q ? `for “${escapeHtml(queryText)}”` : ''}</h2>
+    <h2>${icon('search')} Search ${q ? `for “${escapeHtml(queryText)}”` : ''}</h2>
     <form id="search-page-form" class="search-box search-page-form" role="search">
       <input name="q" placeholder="${t('searchPlaceholder')}" value="${escapeHtml(queryText || '')}" autocomplete="off" />
       <button class="btn btn-primary" type="submit">${t('search')}</button>
@@ -1160,14 +1161,14 @@ export function searchView(d, meUser, queryText) {
       const mutual = mutualFriendCount(d.friendships, meUser.id, u.id);
       let action = '';
       if (u.id === meUser.id) action = '';
-      else if (rel?.status === 'accepted') action = `<span class="badge badge-ok">✓ ${t('friendsLabel')}</span>`;
-      else if (rel?.status === 'pending' && rel.from === meUser.id) action = `<button class="btn btn-ghost btn-sm" data-act="cancel-request" data-id="${rel.id}" title="${t('tapToCancel')}">✓ ${t('requestSent')}</button>`;
+      else if (rel?.status === 'accepted') action = `<span class="badge badge-ok">${icon('check', 'ic-sm')} ${t('friendsLabel')}</span>`;
+      else if (rel?.status === 'pending' && rel.from === meUser.id) action = `<button class="btn btn-ghost btn-sm" data-act="cancel-request" data-id="${rel.id}" title="${t('tapToCancel')}">${icon('check')} ${t('requestSent')}</button>`;
       else if (rel?.status === 'pending') action = `<button class="btn btn-primary btn-sm" data-act="accept-request" data-id="${rel.id}">Accept request</button>`;
       else action = `<button class="btn btn-primary btn-sm" data-act="send-request" data-id="${u.id}">${t('addFriend')}</button>`;
       return `<div class="card person-card">${avatarHtml(u, 56)}<a href="#/profile/${u.id}"><b>${escapeHtml(u.name)}</b></a><span class="muted small">@${escapeHtml(u.username)}</span>${mutual > 0 ? `<span class="muted small">${mutual} ${mutual === 1 ? t('mutualFriend') : t('mutualFriends')}</span>` : ''}${action ? `<div class="row gap wrap center">${action}</div>` : ''}</div>`;
     }).join('') || '<p class="muted">No people matched.</p>'}</div>
     <h3>${t('groups')}</h3>
-    <div class="grid-people">${groups.map((g) => `<div class="card person-card">${avatarHtml({ name: g.name, username: g.name, avatar: g.cover }, 56)}<a href="#/group/${g.id}"><b>${escapeHtml(g.name)}</b></a><span class="muted small">${g.privacy === 'private' ? '🔒 ' + t('privateLabel') : '🌍 ' + t('publicLabel')} · ${plural(groupMemberCount(g), t('member'), t('members'))}</span><div class="row gap wrap center"><a class="btn btn-ghost btn-sm" href="#/group/${g.id}">View</a></div></div>`).join('') || '<p class="muted">No groups matched.</p>'}</div>
+    <div class="grid-people">${groups.map((g) => `<div class="card person-card">${avatarHtml({ name: g.name, username: g.name, avatar: g.cover }, 56)}<a href="#/group/${g.id}"><b>${escapeHtml(g.name)}</b></a><span class="muted small">${g.privacy === 'private' ? icon('lock', 'ic-sm') + ' ' + t('privateLabel') : icon('globe', 'ic-sm') + ' ' + t('publicLabel')} · ${plural(groupMemberCount(g), t('member'), t('members'))}</span><div class="row gap wrap center"><a class="btn btn-ghost btn-sm" href="#/group/${g.id}">View</a></div></div>`).join('') || '<p class="muted">No groups matched.</p>'}</div>
     <h3>Posts</h3>
     ${posts.map((p) => postCardHtml(p, ctx)).join('') || '<p class="muted">No posts matched.</p>'}
     <p class="muted small">Searched as ${escapeHtml(byId[meUser.id]?.name || '')} — private content you cannot access is never shown.</p>
@@ -1180,7 +1181,7 @@ export function savedView(d, meUser) {
   const blocked = blockedIdsOfData(d, meUser.id);
   const posts = d.posts.filter((p) => (p.savedBy || []).includes(meUser.id)
     && (!p.groupId || canViewGroupPost(p, ctx.groupsById[p.groupId], meUser.id, blocked))).sort((a, b) => b.createdAt - a.createdAt);
-  return `<div class="page narrow"><h2>🔖 ${t('saved')} posts</h2>${posts.map((p) => postCardHtml(p, ctx)).join('') || emptyState('🔖', 'Posts you save will appear here.')}</div>`;
+  return `<div class="page narrow"><h2>${icon('bookmark')} ${t('saved')} posts</h2>${posts.map((p) => postCardHtml(p, ctx)).join('') || emptyState('bookmark', 'Posts you save will appear here.')}</div>`;
 }
 
 // ------------------------------------------------------------------ SETTINGS
@@ -1193,25 +1194,25 @@ export function settingsView(d, meUser, prefs) {
   };
   const types = Object.keys(prefLabels);
   return `<div class="page narrow">
-    <h2>⚙️ ${t('settings')}</h2>
+    <h2>${icon('settings')} ${t('settings')}</h2>
     <div class="card stack">
       <h3>${t('settingsAccount')}</h3>
       <p><b>${escapeHtml(meUser.name)}</b> · @${escapeHtml(meUser.username)}<br/><span class="muted">${escapeHtml(meUser.email || '')}</span></p>
       <div class="row gap wrap">
-        <button class="btn btn-ghost" data-act="edit-profile">✏️ ${t('editProfile')}</button>
-        <button class="btn btn-ghost" data-act="change-password">✉️ ${t('sendResetEmail')}</button>
-        <button class="btn btn-ghost settings-logout" data-act="logout">🚪 ${t('logout')}</button>
+        <button class="btn btn-ghost" data-act="edit-profile">${icon('pencil')} ${t('editProfile')}</button>
+        <button class="btn btn-ghost" data-act="change-password">${icon('mail')} ${t('sendResetEmail')}</button>
+        <button class="btn btn-ghost settings-logout" data-act="logout">${icon('log-out')} ${t('logout')}</button>
       </div>
     </div>
     <div class="card stack">
-      <h3>📩 ${t('supportInbox')}</h3>
+      <h3>${icon('inbox')} ${t('supportInbox')}</h3>
       <p class="muted">${t('supportInboxHelp')}</p>
       <div><a class="btn btn-ghost btn-sm" href="#/support">${t('supportOpenInbox')}</a></div>
     </div>
     <div class="card stack">
       <h3>${t('settingsAppearance')}</h3>
       <div class="row gap wrap">
-        <button class="btn btn-ghost" data-act="toggle-theme">${prefs.theme === 'dark' ? '☀️ ' + t('lightMode') : '🌙 ' + t('darkMode')}</button>
+        <button class="btn btn-ghost" data-act="toggle-theme">${prefs.theme === 'dark' ? icon('sun') + ' ' + t('lightMode') : icon('moon') + ' ' + t('darkMode')}</button>
         <label>${t('languageLabel')}
           <select id="locale-select" class="select-sm">
             <option value="en" ${prefs.locale === 'en' ? 'selected' : ''}>English</option>
@@ -1224,7 +1225,7 @@ export function settingsView(d, meUser, prefs) {
       <h3>${t('settingsNotifications')}</h3>
       <form id="notif-prefs-form" class="stack">
         ${types.map((type) => `<label class="notif-pref-row"><span class="grow">${prefLabels[type]}</span><input type="checkbox" name="${type}" ${np[type] === false ? '' : 'checked'} /></label>`).join('')}
-        <label class="notif-pref-row"><span class="grow">🔔 ${t('browserNotifications')}</span><input type="checkbox" name="browserNotifications" ${meUser.settings?.browserNotifications ? 'checked' : ''} /></label>
+        <label class="notif-pref-row"><span class="grow">${icon('bell')} ${t('browserNotifications')}</span><input type="checkbox" name="browserNotifications" ${meUser.settings?.browserNotifications ? 'checked' : ''} /></label>
         <p class="muted small">${t('browserNotificationsHelp')}</p>
         <div><button class="btn btn-primary btn-sm" type="submit">${t('savePreferences')}</button></div>
       </form>
@@ -1234,10 +1235,10 @@ export function settingsView(d, meUser, prefs) {
       <form id="privacy-prefs-form" class="stack">
         <label>${t('defaultPostPrivacy')}
           <select name="defaultPostPrivacy">
-            <option value="public" ${defaultPrivacy === 'public' ? 'selected' : ''}>🌍 ${t('publicLabel')}</option>
-            <option value="friends" ${defaultPrivacy === 'friends' ? 'selected' : ''}>👥 ${t('friends')}</option>
-            <option value="close" ${defaultPrivacy === 'close' ? 'selected' : ''}>⭐ ${t('closeFriends')}</option>
-            <option value="only-me" ${defaultPrivacy === 'only-me' ? 'selected' : ''}>🔒 ${t('onlyMe')}</option>
+            <option value="public" ${defaultPrivacy === 'public' ? 'selected' : ''}>${t('publicLabel')}</option>
+            <option value="friends" ${defaultPrivacy === 'friends' ? 'selected' : ''}>${t('friends')}</option>
+            <option value="close" ${defaultPrivacy === 'close' ? 'selected' : ''}>${t('closeFriends')}</option>
+            <option value="only-me" ${defaultPrivacy === 'only-me' ? 'selected' : ''}>${t('onlyMe')}</option>
           </select>
         </label>
         <div><button class="btn btn-primary btn-sm" type="submit">${t('savePrivacy')}</button></div>
@@ -1252,7 +1253,7 @@ export function settingsView(d, meUser, prefs) {
       </div>
     </div>
     <div class="card stack danger-zone">
-      <h3>⚠️ ${t('dangerZone')}</h3>
+      <h3>${icon('alert-triangle')} ${t('dangerZone')}</h3>
       <p class="muted small">${t('dangerZoneHelp')}</p>
       <div><button class="btn btn-danger" data-act="delete-account">${t('deleteAccount')}</button></div>
     </div>
@@ -1273,21 +1274,21 @@ export function roleLabel(role) {
 export function adminShell(d, meUser, active, content) {
   const openReports = (d.reports || []).filter((r) => reportNeedsAttention(r)).length;
   const links = [
-    { key: 'overview', href: '#/admin', icon: '📊', label: t('adminOverview'), show: isStaff(meUser) },
-    { key: 'analytics', href: '#/admin/analytics', icon: '📈', label: t('adminAnalytics'), show: isStaff(meUser) },
-    { key: 'users', href: '#/admin/users', icon: '👥', label: t('adminUsers'), show: isAdminRole(meUser) },
-    { key: 'content', href: '#/admin/content', icon: '🗂️', label: t('adminContent'), show: canModerate(meUser) },
-    { key: 'bots', href: '#/admin/bots', icon: '🤖', label: t('adminBots'), show: isAdminRole(meUser) },
-    { key: 'reports', href: '#/admin/reports', icon: '🚩', label: t('adminReports'), show: canModerate(meUser), badge: openReports },
-    { key: 'announce', href: '#/admin/announce', icon: '📣', label: t('adminAnnounce'), show: isAdminRole(meUser) },
-    { key: 'security', href: '#/admin/security', icon: '🔐', label: t('adminSecurity'), show: isAdminRole(meUser) },
-    { key: 'settings', href: '#/admin/settings', icon: '⚙️', label: t('adminSettings'), show: isAdminRole(meUser) },
-    { key: 'health', href: '#/admin/health', icon: '🩺', label: t('adminHealth'), show: isAdminRole(meUser) }
+    { key: 'overview', href: '#/admin', icon: 'bar-chart', label: t('adminOverview'), show: isStaff(meUser) },
+    { key: 'analytics', href: '#/admin/analytics', icon: 'chart-line', label: t('adminAnalytics'), show: isStaff(meUser) },
+    { key: 'users', href: '#/admin/users', icon: 'users', label: t('adminUsers'), show: isAdminRole(meUser) },
+    { key: 'content', href: '#/admin/content', icon: 'folder', label: t('adminContent'), show: canModerate(meUser) },
+    { key: 'bots', href: '#/admin/bots', icon: 'bot', label: t('adminBots'), show: isAdminRole(meUser) },
+    { key: 'reports', href: '#/admin/reports', icon: 'flag', label: t('adminReports'), show: canModerate(meUser), badge: openReports },
+    { key: 'announce', href: '#/admin/announce', icon: 'megaphone', label: t('adminAnnounce'), show: isAdminRole(meUser) },
+    { key: 'security', href: '#/admin/security', icon: 'shield-check', label: t('adminSecurity'), show: isAdminRole(meUser) },
+    { key: 'settings', href: '#/admin/settings', icon: 'settings', label: t('adminSettings'), show: isAdminRole(meUser) },
+    { key: 'health', href: '#/admin/health', icon: 'activity', label: t('adminHealth'), show: isAdminRole(meUser) }
   ].filter((l) => l.show);
   return `<div class="admin-layout">
     <aside class="admin-sidebar">
-      <div class="admin-side-head"><span class="admin-side-title">🛡️ ${t('adminPanel')}</span><span class="badge ${meUser.role === 'superadmin' ? 'badge-superadmin' : 'badge-admin'}">${escapeHtml(roleLabel(meUser.role))}</span></div>
-      <nav class="admin-nav">${links.map((l) => `<a class="admin-nav-item ${active === l.key ? 'active' : ''}" href="${l.href}"><span class="admin-nav-icon">${l.icon}</span><span class="grow">${l.label}</span>${l.badge ? `<span class="nav-badge static">${l.badge}</span>` : ''}</a>`).join('')}</nav>
+      <div class="admin-side-head"><span class="admin-side-title">${icon('shield')} ${t('adminPanel')}</span><span class="badge ${meUser.role === 'superadmin' ? 'badge-superadmin' : 'badge-admin'}">${escapeHtml(roleLabel(meUser.role))}</span></div>
+      <nav class="admin-nav">${links.map((l) => `<a class="admin-nav-item ${active === l.key ? 'active' : ''}" href="${l.href}"><span class="admin-nav-icon">${icon(l.icon)}</span><span class="grow">${l.label}</span>${l.badge ? `<span class="nav-badge static">${l.badge}</span>` : ''}</a>`).join('')}</nav>
       <p class="muted small admin-side-note">${escapeHtml(meUser.name)} · @${escapeHtml(meUser.username)}</p>
     </aside>
     <div class="admin-main">${content}</div>
@@ -1295,7 +1296,7 @@ export function adminShell(d, meUser, active, content) {
 }
 
 export function adminDeniedView() {
-  return `<div class="card empty-state"><div class="empty-icon">🔒</div><p class="muted">${t('accessDenied')}</p></div>`;
+  return `<div class="card empty-state"><div class="empty-icon">${icon('lock', 'ic-xl')}</div><p class="muted">${t('accessDenied')}</p></div>`;
 }
 
 // #/admin — overview dashboard (Pack B). Every number comes from
@@ -1308,9 +1309,9 @@ export function adminOverviewView(d, meUser, mode) {
   const readOnly = !isAdminRole(meUser); // analysts (and moderators) get no action controls
   const note = (metric) => (mode.firebase && s.sources[metric] === 'loaded' ? ` · ${t('statFromLoaded')}` : '');
   const stat = (value, label, metric = '') => `<div class="card stat"><b>${value}</b><span>${label}${metric ? note(metric) : ''}</span></div>`;
-  return `<h2>🛡️ ${t('adminOverview')}</h2>
+  return `<h2>${icon('shield')} ${t('adminOverview')}</h2>
     <div class="stat-grid">
-      ${stat(s.totalAccounts, `${t('statUsers')} · 👤 ${s.totalUsers} · 🤖 ${s.botAccounts}`)}
+      ${stat(s.totalAccounts, `${t('statUsers')} · ${icon('user', 'ic-sm')} ${s.totalUsers} · ${icon('bot', 'ic-sm')} ${s.botAccounts}`)}
       ${stat(s.newToday, t('statNewToday'))}
       ${stat(s.new7d, t('statNew7d'))}
       ${stat(s.new30d, t('statNew30d'))}
@@ -1329,7 +1330,7 @@ export function adminOverviewView(d, meUser, mode) {
       <h3>System status</h3>
       <p>Mode: <b>${mode.firebase ? 'Live Supabase' : 'Demo / offline'}</b> · Project: <b>${escapeHtml(mode.projectId)}</b> · Auth: ${mode.firebase ? 'Supabase Auth' : 'Local demo accounts'} · Database: ${mode.firebase ? 'connected' : 'local store'} · Storage: ${mode.firebase ? 'Cloudinary with data-URL fallback' : 'local data URLs'}</p>
       ${readOnly ? '' : `<label class="row gap-sm"><input type="checkbox" id="maintenance-toggle" ${d.config?.maintenanceMode ? 'checked' : ''} /> <span class="grow">Maintenance mode (shows a maintenance banner to non-admin users)</span></label>
-      <div class="row gap wrap"><a class="btn btn-primary btn-sm" href="#/admin/bots">🤖 Open Bot Admin Panel</a><button class="btn btn-ghost btn-sm" data-act="reset-demo">Reset demo data</button></div>`}
+      <div class="row gap wrap"><a class="btn btn-primary btn-sm" href="#/admin/bots">${icon('bot')} Open Bot Admin Panel</a><button class="btn btn-ghost btn-sm" data-act="reset-demo">Reset demo data</button></div>`}
       <p class="muted small">Admin rights are enforced server-side: Supabase row-level security policies check the signed-in user's role on every request. This page is only the interface.</p>
     </div>`;
 }
@@ -1377,23 +1378,23 @@ export function adminAnalyticsView(d, meUser, filters = {}) {
   const rangeBtn = (n) => `<a class="btn ${n === days ? 'btn-primary' : 'btn-ghost'} btn-sm" href="#/admin/analytics?days=${n}">${t(`last${n}Days`)}</a>`;
   const chartCard = (title, body, noteText = '') => `<div class="card stack chart-card"><h3>${title}</h3>${body}${noteText ? `<p class="muted small">${noteText}</p>` : ''}</div>`;
   const tableRows = [...rows].reverse();
-  return `<h2>📈 ${t('adminAnalytics')}</h2>
+  return `<h2>${icon('chart-line')} ${t('adminAnalytics')}</h2>
     <div class="row gap wrap admin-filter card">
       ${rangeBtn(7)}${rangeBtn(30)}${rangeBtn(90)}${rangeBtn(365)}
       <span class="spacer"></span>
-      <button class="btn btn-ghost btn-sm" data-act="admin-export-analytics" data-days="${days}">⬇️ ${t('exportCsv')}</button>
+      <button class="btn btn-ghost btn-sm" data-act="admin-export-analytics" data-days="${days}">${icon('download')} ${t('exportCsv')}</button>
     </div>
     <p class="muted small">${t('analyticsNote')}</p>
     <div class="chart-grid">
-      ${chartCard(`📈 ${t('chartUserGrowth')}`, svgLine(rows, 'totalUsers'))}
-      ${chartCard(`👥 ${t('chartRegistrations')}`, svgBarStack(rows, [{ key: 'registrations', color: '#1877f2', label: t('colRegistrations') }]))}
-      ${chartCard(`📝 ${t('chartPostsPerDay')}`, svgBarStack(rows, [{ key: 'posts', color: '#2e9e5b', label: t('statPosts') }]))}
-      ${chartCard(`❤️ ${t('chartEngagement')}`, svgBarStack(rows, [{ key: 'engagement', color: '#e5534b', label: t('colEngagement') }]), t('chartEngagementNote'))}
-      ${chartCard(`🤖 ${t('chartBotVsHuman')}`, svgBarStack(rows, [
+      ${chartCard(`${icon('chart-line')} ${t('chartUserGrowth')}`, svgLine(rows, 'totalUsers'))}
+      ${chartCard(`${icon('users')} ${t('chartRegistrations')}`, svgBarStack(rows, [{ key: 'registrations', color: '#1877f2', label: t('colRegistrations') }]))}
+      ${chartCard(`${icon('file-text')} ${t('chartPostsPerDay')}`, svgBarStack(rows, [{ key: 'posts', color: '#2e9e5b', label: t('statPosts') }]))}
+      ${chartCard(`${icon('heart')} ${t('chartEngagement')}`, svgBarStack(rows, [{ key: 'engagement', color: '#e5534b', label: t('colEngagement') }]), t('chartEngagementNote'))}
+      ${chartCard(`${icon('bot')} ${t('chartBotVsHuman')}`, svgBarStack(rows, [
         { key: 'humanPosts', color: '#1877f2', label: t('colHumanPosts') },
         { key: 'botPosts', color: '#8957e5', label: t('colBotPosts') }
       ]))}
-      ${chartCard(`🚩 ${t('chartReports')}`, svgBarStack(rows, [
+      ${chartCard(`${icon('flag')} ${t('chartReports')}`, svgBarStack(rows, [
         { key: 'reportsPending', color: '#e0a800', label: t('reportStatusPending') },
         { key: 'reportsReview', color: '#1877f2', label: t('reportStatusReview') },
         { key: 'reportsResolved', color: '#2e9e5b', label: t('reportStatusResolved') },
@@ -1453,7 +1454,7 @@ export function adminContentView(d, meUser, filters = {}) {
         <button class="btn btn-primary btn-sm" type="submit">${t('search')}</button>
       </form>
       <div class="card"><div class="table-wrap"><table class="table">
-        <thead><tr><th>Author</th><th>${t('statPosts')}</th><th>💬</th><th>❤️</th><th>${t('auditTime')}</th><th>${t('actionsLabel')}</th></tr></thead>
+        <thead><tr><th>Author</th><th>${t('statPosts')}</th><th>${icon('message-circle', 'ic-sm')}</th><th>${icon('heart', 'ic-sm')}</th><th>${t('auditTime')}</th><th>${t('actionsLabel')}</th></tr></thead>
         <tbody>${rowsPage.map((p) => { const a = byId[p.authorId]; return `<tr>
           <td><a class="row gap-sm" href="#/profile/${p.authorId}">${avatarHtml(a, 28)}<span>${escapeHtml(a?.name || '?')}</span></a>${a?.isBot ? ` <span class="badge badge-bot">${t('aiBot')}</span>` : ''}</td>
           <td><a href="#/profile/${p.authorId}">${escapeHtml(truncate(p.text || '', 120))}</a></td>
@@ -1477,7 +1478,7 @@ export function adminContentView(d, meUser, filters = {}) {
       <thead><tr><th>Author</th><th>${t('comment')}</th><th>${t('statPosts')}</th><th>${t('auditTime')}</th><th>${t('actionsLabel')}</th></tr></thead>
       <tbody>${rowsPage.map(({ post, entry, isReply }) => { const a = byId[entry.authorId]; const pa = byId[post.authorId]; return `<tr>
         <td><a class="row gap-sm" href="#/profile/${entry.authorId}">${avatarHtml(a, 28)}<span>${escapeHtml(a?.name || '?')}</span></a>${a?.isBot ? ` <span class="badge badge-bot">${t('aiBot')}</span>` : ''}</td>
-        <td>${isReply ? '↩️ ' : ''}${escapeHtml(truncate(entry.text || '', 140))}</td>
+        <td>${isReply ? icon('reply', 'ic-sm') + ' ' : ''}${escapeHtml(truncate(entry.text || '', 140))}</td>
         <td><a href="#/profile/${post.authorId}">${escapeHtml(truncate(post.text || '', 60))}</a> <span class="muted small">· ${escapeHtml(pa?.name || '')}</span></td>
         <td>${timeAgo(entry.createdAt)}</td>
         <td><button class="btn btn-danger btn-sm" data-act="admin-content-delete-comment" data-post="${post.id}" data-id="${entry.id}">${t('delete')}</button></td>
@@ -1490,7 +1491,7 @@ export function adminContentView(d, meUser, filters = {}) {
     </div></div>`;
   } else {
     const flagLabel = { repeat: t('flagRepeat'), links: t('flagLinks'), burst: t('flagBurst') };
-    body = `<p class="muted">⚠️ ${t('spamHeuristicNote')}</p>
+    body = `<p class="muted">${icon('alert-triangle')} ${t('spamHeuristicNote')}</p>
     <div class="card stack">
       ${suspects.map(({ post, flags }) => { const a = byId[post.authorId]; return `<div class="row gap-sm wrap">
         ${avatarHtml(a, 32)}
@@ -1500,11 +1501,11 @@ export function adminContentView(d, meUser, filters = {}) {
       </div>`; }).join('') || `<p class="muted">${t('noContentFound')}</p>`}
     </div>`;
   }
-  return `<h2>🗂️ ${t('adminContent')}</h2>
+  return `<h2>${icon('folder')} ${t('adminContent')}</h2>
     <div class="row gap wrap">
-      ${tabLink('posts', `📝 ${t('contentPostsTab')}`, (d.posts || []).length)}
-      ${tabLink('comments', `💬 ${t('contentCommentsTab')}`, flatComments.length)}
-      ${tabLink('spam', `🛡️ ${t('contentSpamTab')}`, spamSuspects(d.posts || []).length)}
+      ${tabLink('posts', `${icon('file-text')} ${t('contentPostsTab')}`, (d.posts || []).length)}
+      ${tabLink('comments', `${icon('message-circle')} ${t('contentCommentsTab')}`, flatComments.length)}
+      ${tabLink('spam', `${icon('shield')} ${t('contentSpamTab')}`, spamSuspects(d.posts || []).length)}
     </div>
     ${body}`;
 }
@@ -1531,7 +1532,7 @@ export function appealStatusLabel(status) {
 // a free-text reason. Message reports additionally snapshot the single
 // reported message as evidence inside api.reportContent.
 export function reportFormHtml(targetType, targetId) {
-  return `<h3>🚩 ${t('reportDialogTitle')}</h3>
+  return `<h3>${icon('flag')} ${t('reportDialogTitle')}</h3>
   <form id="report-form" data-type="${escapeHtml(targetType)}" data-id="${escapeHtml(targetId)}" class="stack">
     <label>${t('categoryLabel')}<select name="category">${REPORT_CATEGORIES.map((c) => `<option value="${c}">${escapeHtml(reportCategoryLabel(c))}</option>`).join('')}</select></label>
     <label>${t('reportReasonLabel')}<textarea name="reason" rows="3" maxlength="500" required placeholder="${t('reportReasonLabel')}"></textarea></label>
@@ -1542,7 +1543,7 @@ export function reportFormHtml(targetType, targetId) {
 // Resolve dialog: the moderator picks the outcome; side effects
 // (delete content / warn / suspend) run inside api.adminDecideReport.
 export function reportResolveFormHtml(report) {
-  return `<h3>✅ ${t('resolveReport')}</h3>
+  return `<h3>${icon('check-circle')} ${t('resolveReport')}</h3>
   <form id="report-resolve-form" data-id="${escapeHtml(report.id)}" class="stack">
     <label>${t('outcomeLabel')}<select name="outcome">${REPORT_OUTCOMES.map((o) => `<option value="${o}">${escapeHtml(reportOutcomeLabel(o))}</option>`).join('')}</select></label>
     <label>${t('reasonLabel')}<input name="reason" maxlength="200" placeholder="${t('reasonPlaceholder')}" autocomplete="off" /></label>
@@ -1603,9 +1604,9 @@ export function reportsView(d, meUser, filters = {}) {
         <span class="muted small">${timeAgo(r.createdAt)}</span>
       </div>
       <p class="small"><b>${t('reportedByLabel')}:</b> ${reporter ? `<a href="#/profile/${reporter.id}">${escapeHtml(reporter.name)}</a>` : escapeHtml(r.reporterId || '')} · <b>${t('reportReasonLabel')}</b> ${escapeHtml(r.reason || '')}</p>
-      ${r.targetType === 'message' && r.evidence ? `<div class="evidence-box"><span class="muted small">🔒 ${t('evidenceLabel')}</span><blockquote>${escapeHtml(r.evidence.text || '')}</blockquote></div>` : ''}
-      ${dec ? `<p class="small muted">⚖️ ${t('decisionByLabel')}: <b>${escapeHtml(reportOutcomeLabel(dec.outcome || 'none'))}</b> · ${escapeHtml(dec.byName || '')} · ${timeAgo(dec.at)}${dec.reason ? ` · “${escapeHtml(dec.reason)}”` : ''}</p>` : ''}
-      ${r.appeal?.text ? `<div class="evidence-box"><span class="muted small">✉️ ${t('supportAppealYourText')}</span><blockquote>${escapeHtml(r.appeal.text)}</blockquote></div>` : ''}
+      ${r.targetType === 'message' && r.evidence ? `<div class="evidence-box"><span class="muted small">${icon('lock', 'ic-sm')} ${t('evidenceLabel')}</span><blockquote>${escapeHtml(r.evidence.text || '')}</blockquote></div>` : ''}
+      ${dec ? `<p class="small muted">${icon('scale')} ${t('decisionByLabel')}: <b>${escapeHtml(reportOutcomeLabel(dec.outcome || 'none'))}</b> · ${escapeHtml(dec.byName || '')} · ${timeAgo(dec.at)}${dec.reason ? ` · “${escapeHtml(dec.reason)}”` : ''}</p>` : ''}
+      ${r.appeal?.text ? `<div class="evidence-box"><span class="muted small">${icon('mail', 'ic-sm')} ${t('supportAppealYourText')}</span><blockquote>${escapeHtml(r.appeal.text)}</blockquote></div>` : ''}
       <div class="row gap-sm wrap">
         <span class="small"><b>${t('appealLabel')}:</b> ${escapeHtml(appealStatusLabel(appeal))}</span>
         ${appeal === 'accepted' ? `<span class="muted small">${t('appealNoRestore')}</span>` : ''}
@@ -1615,14 +1616,14 @@ export function reportsView(d, meUser, filters = {}) {
         ${appeal === 'requested' ? `<button class="btn btn-ghost btn-sm" data-act="report-appeal" data-id="${r.id}" data-appeal="declined">${t('appealDecline')}</button>` : ''}
       </div>
       ${actionable ? `<div class="row gap-sm wrap">
-        ${st !== 'review' ? `<button class="btn btn-ghost btn-sm" data-act="report-review" data-id="${r.id}">🔍 ${t('markUnderReview')}</button>` : ''}
-        <button class="btn btn-primary btn-sm" data-act="report-resolve-open" data-id="${r.id}">✅ ${t('resolveReport')}</button>
-        <button class="btn btn-ghost btn-sm" data-act="report-reject" data-id="${r.id}">✖ ${t('rejectReport')}</button>
-        ${st !== 'escalated' ? `<button class="btn btn-ghost btn-sm" data-act="report-escalate" data-id="${r.id}">⬆️ ${t('escalateReport')}</button>` : ''}
+        ${st !== 'review' ? `<button class="btn btn-ghost btn-sm" data-act="report-review" data-id="${r.id}">${icon('search')} ${t('markUnderReview')}</button>` : ''}
+        <button class="btn btn-primary btn-sm" data-act="report-resolve-open" data-id="${r.id}">${icon('check-circle')} ${t('resolveReport')}</button>
+        <button class="btn btn-ghost btn-sm" data-act="report-reject" data-id="${r.id}">${icon('x')} ${t('rejectReport')}</button>
+        ${st !== 'escalated' ? `<button class="btn btn-ghost btn-sm" data-act="report-escalate" data-id="${r.id}">${icon('arrow-up')} ${t('escalateReport')}</button>` : ''}
       </div>` : ''}
     </div>`;
   };
-  return `<h2>🚩 ${t('adminReports')}</h2>
+  return `<h2>${icon('flag')} ${t('adminReports')}</h2>
     <div class="row gap wrap">
       ${tabLink('all', t('allReports'))}
       ${tabLink('pending', t('reportStatusPending'))}
@@ -1697,7 +1698,7 @@ export function supportDecisionSummary(r) {
 }
 
 export function supportAppealFormHtml(report) {
-  return `<h3>✉️ ${t('supportAppealTitle')}</h3>
+  return `<h3>${icon('mail')} ${t('supportAppealTitle')}</h3>
   <form id="support-appeal-form" data-id="${escapeHtml(report.id)}" class="stack">
     <p class="muted small">${t('appealNoRestore')}</p>
     <label>${t('supportAppealTextLabel')}<textarea name="text" rows="4" maxlength="500" placeholder="${t('supportAppealTextLabel')}"></textarea></label>
@@ -1726,15 +1727,15 @@ export function supportInboxView(d, meUser) {
         <span class="muted small">${timeAgo(r.createdAt)}</span>
       </div>
       <p class="small"><b>${t('reportReasonLabel')}</b> ${escapeHtml(r.reason || '')}</p>
-      <p class="small">⚖️ <b>${escapeHtml(supportDecisionSummary(r))}</b>${dec && (st === 'resolved' || st === 'rejected') ? ` · ${timeAgo(dec.at)}${dec.reason ? ` · “${escapeHtml(dec.reason)}”` : ''}` : ''}</p>
+      <p class="small">${icon('scale')} <b>${escapeHtml(supportDecisionSummary(r))}</b>${dec && (st === 'resolved' || st === 'rejected') ? ` · ${timeAgo(dec.at)}${dec.reason ? ` · “${escapeHtml(dec.reason)}”` : ''}` : ''}</p>
     </div>`;
   };
   const appealBlock = (r) => {
     const a = r.appeal || { status: 'none' };
-    if (a.status === 'requested') return `<p class="small">✉️ <b>${t('appealRequested')}</b>${a.text ? `<br/><span class="muted">“${escapeHtml(a.text)}”</span>` : ''}<br/><span class="muted">${t('supportAppealPendingNote')}</span></p>`;
-    if (a.status === 'accepted') return `<p class="small">✅ <b>${t('appealAccepted')}</b>${a.reason ? ` · “${escapeHtml(a.reason)}”` : ''}${a.text ? `<br/><span class="muted">“${escapeHtml(a.text)}”</span>` : ''}<br/><span class="muted">${t('appealNoRestore')}</span></p>`;
-    if (a.status === 'declined') return `<p class="small">✖ <b>${t('appealDeclined')}</b>${a.reason ? ` · “${escapeHtml(a.reason)}”` : ''}${a.text ? `<br/><span class="muted">“${escapeHtml(a.text)}”</span>` : ''}</p>`;
-    return `<div class="row gap-sm wrap"><button class="btn btn-primary btn-sm" data-act="support-appeal-open" data-id="${r.id}">✉️ ${t('supportAppealButton')}</button><span class="muted small">${t('supportAppealOnce')}</span></div>`;
+    if (a.status === 'requested') return `<p class="small">${icon('mail')} <b>${t('appealRequested')}</b>${a.text ? `<br/><span class="muted">“${escapeHtml(a.text)}”</span>` : ''}<br/><span class="muted">${t('supportAppealPendingNote')}</span></p>`;
+    if (a.status === 'accepted') return `<p class="small">${icon('check-circle')} <b>${t('appealAccepted')}</b>${a.reason ? ` · “${escapeHtml(a.reason)}”` : ''}${a.text ? `<br/><span class="muted">“${escapeHtml(a.text)}”</span>` : ''}<br/><span class="muted">${t('appealNoRestore')}</span></p>`;
+    if (a.status === 'declined') return `<p class="small">${icon('x')} <b>${t('appealDeclined')}</b>${a.reason ? ` · “${escapeHtml(a.reason)}”` : ''}${a.text ? `<br/><span class="muted">“${escapeHtml(a.text)}”</span>` : ''}</p>`;
+    return `<div class="row gap-sm wrap"><button class="btn btn-primary btn-sm" data-act="support-appeal-open" data-id="${r.id}">${icon('mail')} ${t('supportAppealButton')}</button><span class="muted small">${t('supportAppealOnce')}</span></div>`;
   };
   const noticeCard = (r) => {
     const dec = r.decision;
@@ -1749,13 +1750,13 @@ export function supportInboxView(d, meUser) {
     </div>`;
   };
   return `<div class="page narrow">
-    <h2>📩 ${t('supportInbox')}</h2>
-    <h3>🚩 ${t('supportMyReports')}</h3>
+    <h2>${icon('inbox')} ${t('supportInbox')}</h2>
+    <h3>${icon('flag')} ${t('supportMyReports')}</h3>
     <p class="muted small">${t('supportReportsIntro')}</p>
-    <div class="stack">${myReports.map(reportCard).join('') || emptyState('🚩', t('supportNoReports'))}</div>
-    <h3>⚖️ ${t('supportMyNotices')}</h3>
+    <div class="stack">${myReports.map(reportCard).join('') || emptyState('flag', t('supportNoReports'))}</div>
+    <h3>${icon('scale')} ${t('supportMyNotices')}</h3>
     <p class="muted small">${t('supportNoticesIntro')}</p>
-    <div class="stack">${myNotices.map(noticeCard).join('') || emptyState('⚖️', t('supportNoNotices'))}</div>
+    <div class="stack">${myNotices.map(noticeCard).join('') || emptyState('scale', t('supportNoNotices'))}</div>
   </div>`;
 }
 
@@ -1793,7 +1794,7 @@ export function adminUsersView(d, meUser, filters = {}) {
         : `<span class="badge badge-danger">${t('statusBanned')}</span>`;
   };
   const rowActions = (u) => {
-    if (u.isBot) return '<span class="muted small">🤖</span>';
+    if (u.isBot) return `<span class="muted small">${icon('bot')}</span>`;
     const bits = [];
     if (canManageUser(meUser, u)) {
       const st = accountStatus(u);
@@ -1814,7 +1815,7 @@ export function adminUsersView(d, meUser, filters = {}) {
     }
     return `<span class="badge ${u.role === 'superadmin' ? 'badge-superadmin' : u.role === 'admin' ? 'badge-admin' : ''}">${escapeHtml(roleLabel(u.role))}</span>`;
   };
-  return `<h2>👥 ${t('adminUsers')}</h2>
+  return `<h2>${icon('users')} ${t('adminUsers')}</h2>
     <form id="admin-user-filter" class="card admin-filter">
       <input name="q" value="${escapeHtml(filters.q || '')}" placeholder="${t('userSearchPlaceholder')}" autocomplete="off" />
       <select name="status" aria-label="${t('statusLabel')}">
@@ -1865,7 +1866,7 @@ export function adminSecurityView(d, meUser, filters = {}) {
   const logs = [...(d.adminLogs || [])]
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
     .filter((l) => !q || String(l.action || '').toLowerCase().includes(q));
-  return `<h2>🔐 ${t('adminSecurity')}</h2>
+  return `<h2>${icon('shield-check')} ${t('adminSecurity')}</h2>
     <form id="admin-log-filter" class="card admin-filter">
       <input name="q" value="${escapeHtml(filters.q || '')}" placeholder="${t('auditFilterPlaceholder')}" autocomplete="off" />
       <button class="btn btn-primary btn-sm" type="submit">${t('search')}</button>
@@ -1891,7 +1892,7 @@ export function adminSecurityView(d, meUser, filters = {}) {
 export function accountStatusView(user) {
   const banned = accountStatus(user) === 'banned';
   return `<div class="page narrow"><div class="card empty-state">
-    <div class="empty-icon">${banned ? '⛔' : '⏸️'}</div>
+    <div class="empty-icon">${icon(banned ? 'ban' : 'pause', 'ic-xl')}</div>
     <h2>${t(banned ? 'accountBannedTitle' : 'accountSuspendedTitle')}</h2>
     <p class="muted">${t(banned ? 'accountBannedBody' : 'accountSuspendedBody')}</p>
     <button class="btn btn-primary" data-act="logout">${t('logout')}</button>
@@ -1904,11 +1905,11 @@ export function botsView(d, meUser) {
   const aiCfg = resolveAiConfig(d.botSecrets || {}, d.config || {});
   const totals = usageTotals(d.aiUsage?.providers);
   return `<div class="admin-inner">
-    <h2>🤖 AI Bot Admin Panel</h2>
+    <h2>${icon('bot')} AI Bot Admin Panel</h2>
     <div class="card stack">
       <div class="row gap wrap">
         <span class="grow"><b>Global bot kill switch</b><br/><span class="muted small">When off, no bot may post, comment, like or message — enforced in the bot engine and Cloud Functions.</span></span>
-        <button class="btn ${globalOn ? 'btn-danger' : 'btn-primary'}" data-act="bot-kill-switch" data-on="${globalOn ? '0' : '1'}">${globalOn ? '⛔ Stop all bots' : '▶️ Enable bots'}</button>
+        <button class="btn ${globalOn ? 'btn-danger' : 'btn-primary'}" data-act="bot-kill-switch" data-on="${globalOn ? '0' : '1'}">${globalOn ? icon('ban') + ' Stop all bots' : iconFill('play') + ' Enable bots'}</button>
         <button class="btn btn-ghost" data-act="bot-run-cycle">${t('botRunCycle')}</button>
         <button class="btn btn-primary" data-act="bot-new">+ Create bot</button>
       </div>
@@ -1916,13 +1917,13 @@ export function botsView(d, meUser) {
     </div>
     ${aiProvidersSection(d, aiCfg)}
     ${firebaseReady ? `<div class="card stack">
-      <h3>🛰️ ${t('botRunnerTitle')}</h3>
+      <h3>${icon('signal')} ${t('botRunnerTitle')}</h3>
       <p class="small"><b>${d.botRunner?.active ? t('botRunnerActive') : t('botRunnerInactive')}</b></p>
       ${d.botRunner?.lastCycleAt ? `<p class="small">${t('botLastCycle')}: ${timeAgo(d.botRunner.lastCycleAt)} — ${escapeHtml(d.botRunner.lastSummary || '')}</p>` : ''}
-      ${(d.botRunner?.lastDetails || []).filter((x) => x.pendingDMs > 0).map((x) => `<p class="small">🤖 <b>${escapeHtml(x.bot)}</b>: ${escapeHtml(x.note || `${x.pendingDMs} unanswered DM(s)`)} <span class="muted">· latest unanswered ${timeAgo(x.lastUnansweredAt)}</span></p>`).join('')}
+      ${(d.botRunner?.lastDetails || []).filter((x) => x.pendingDMs > 0).map((x) => `<p class="small">${icon('bot', 'ic-sm')} <b>${escapeHtml(x.bot)}</b>: ${escapeHtml(x.note || `${x.pendingDMs} unanswered DM(s)`)} <span class="muted">· latest unanswered ${timeAgo(x.lastUnansweredAt)}</span></p>`).join('')}
       <p class="muted small">${t('botRunnerNote')}</p>
     </div>` : ''}
-    ${d.bots.map((b) => botCardHtml(d, b)).join('') || emptyState('🤖', 'No bots yet. Create your first AI bot.')}
+    ${d.bots.map((b) => botCardHtml(d, b)).join('') || emptyState('bot', 'No bots yet. Create your first AI bot.')}
     <div class="card stack">
       <h3>Recent bot activity</h3>
       ${d.botActivities.slice(0, 15).map((a) => `<p class="small">• <b>${escapeHtml(d.bots.find((x) => x.id === a.botId)?.name || a.botId)}</b> ${escapeHtml(a.action)} — ${escapeHtml(a.detail || '')} <span class="muted">${timeAgo(a.createdAt)} · ${escapeHtml(a.status || '')}</span></p>`).join('') || '<p class="muted">No activity yet.</p>'}
@@ -1944,7 +1945,7 @@ function aiProvidersSection(d, aiCfg) {
   const usage = d.aiUsage?.providers || {};
   const health = d.providerHealth || {};
   return `<div class="card stack">
-      <h3>🔌 ${t('aiProvidersTitle')}</h3>
+      <h3>${icon('plug')} ${t('aiProvidersTitle')}</h3>
       <p class="muted small">${t('aiFallbackNote')}</p>
       <form id="ai-fallback-form" class="row gap wrap">
         <label class="grow">${t('fallbackOrderLabel')}<input name="order" value="${escapeHtml(aiCfg.fallbackOrder.join(', '))}" /></label>
@@ -1989,10 +1990,10 @@ function providerCardHtml(entry, cfg, usage, paidApproved, health) {
       ? `<p class="small">${t('providerEndpointLabel')}: <b>${escapeHtml(cfg.endpoint || entry.baseUrl)}</b></p>`
       : `<p class="small">Status: <b>${hasKey ? t('providerKeySet') : t('providerKeyNotSet')}</b></p>`}
     <p class="small">${t('providerUsageToday')}: <b>${usage.calls || 0}</b> calls · <b>${usage.promptTokens || 0}</b> prompt + <b>${usage.completionTokens || 0}</b> completion tokens · <b>${usage.errors || 0}</b> errors${(usage.calls || 0) > 0 && tokens === 0 ? ` <span class="muted">(${t('providerTokensNotReported')})</span>` : ''}</p>
-    ${exhausted ? `<p class="small">⚠️ ${t('providerRateLimited')}</p>` : ''}
-    ${health ? `<p class="small">${t('lastTestLabel')}: <b>${health.ok ? '✓ OK' : '✗ Failed'}</b> — ${escapeHtml(health.detail || '')} <span class="muted">${timeAgo(health.at)}</span></p>` : ''}
+    ${exhausted ? `<p class="small">${icon('alert-triangle')} ${t('providerRateLimited')}</p>` : ''}
+    ${health ? `<p class="small">${t('lastTestLabel')}: <b>${health.ok ? icon('check', 'ic-sm') + ' OK' : icon('x', 'ic-sm') + ' Failed'}</b> — ${escapeHtml(health.detail || '')} <span class="muted">${timeAgo(health.at)}</span></p>` : ''}
     ${locked
-      ? `<p class="muted small">🔒 ${escapeHtml(entry.paidNote || '')} ${t('providerLockedNote')}</p>`
+      ? `<p class="muted small">${icon('lock', 'ic-sm')} ${escapeHtml(entry.paidNote || '')} ${t('providerLockedNote')}</p>`
       : entry.endpointField
         ? `<form data-provider-endpoint-form="${entry.id}" class="row gap wrap">
             <input name="endpoint" class="grow" value="${escapeHtml(cfg.endpoint || '')}" placeholder="${escapeHtml(entry.baseUrl)}" autocomplete="off" />
@@ -2025,7 +2026,7 @@ function botCardHtml(d, b) {
     <p class="small"><b>System prompt:</b> ${escapeHtml(b.personality.systemPrompt)}</p>
     <p class="small muted">Limits/day — posts ${b.limits.postsPerDay}, comments ${b.limits.commentsPerDay}, likes ${b.limits.likesPerDay}, messages ${b.limits.messagesPerDay} · Activity records: ${acts.length} · Errors: ${errors.length}</p>
     <details><summary>Memory (${memories.length}) — this bot's own memory only</summary>
-      ${memories.map((m) => `<div class="row gap-sm"><span class="grow small">${m.pinned ? '📌 ' : ''}${escapeHtml(m.text)}</span><button class="btn btn-ghost btn-sm" data-act="bot-memory-delete" data-bot="${b.id}" data-id="${m.id}">✕</button></div>`).join('') || '<p class="muted small">No memories yet.</p>'}
+      ${memories.map((m) => `<div class="row gap-sm"><span class="grow small">${m.pinned ? iconFill('pin', 'ic-sm') + ' ' : ''}${escapeHtml(m.text)}</span><button class="btn btn-ghost btn-sm" data-act="bot-memory-delete" data-bot="${b.id}" data-id="${m.id}" aria-label="Delete memory">${icon('x')}</button></div>`).join('') || '<p class="muted small">No memories yet.</p>'}
       <form class="row gap-sm" data-bot-memory-form="${b.id}"><input name="text" class="grow" placeholder="Add a memory for this bot…" maxlength="300" /><button class="btn btn-primary btn-sm" type="submit">Add</button></form>
     </details>
   </div>`;
@@ -2125,7 +2126,7 @@ function botCountersRows(b, counters) {
 
 export function botDetailsView(d, meUser, botId, tab = 'overview') {
   const b = (d.bots || []).find((x) => x.id === botId);
-  if (!b) return `<div class="admin-inner"><p><a href="#/admin/bots">← ${t('adminBots')}</a></p>${emptyState('🤖', 'Bot not found.')}</div>`;
+  if (!b) return `<div class="admin-inner"><p><a href="#/admin/bots">← ${t('adminBots')}</a></p>${emptyState('bot', 'Bot not found.')}</div>`;
   const activeTab = BOT_DETAIL_TABS.includes(tab) ? tab : 'overview';
   const botUser = d.users.find((u) => u.id === b.id) || { name: b.name, username: b.username, avatar: b.avatar };
   const brain = d.botBrains?.[b.id] || {};
@@ -2180,7 +2181,7 @@ function botTabOverview(d, b, brain) {
 
 function botTabBrain(d, b, brain) {
   return `<div class="card stack">
-    <h3>🧠 ${t('tabBrain')}</h3>
+    <h3>${icon('cpu')} ${t('tabBrain')}</h3>
     <p class="small">${t('brainProvider')}: <b>${escapeHtml(brain.provider || '—')}</b> · ${t('brainModel')}: <b>${escapeHtml(brain.model || botEffectiveModelLabel(b))}</b>${brain.updatedAt ? ` · ${t('brainUpdated')}: ${timeAgo(brain.updatedAt)}` : ''}</p>
     <form id="bot-brain-form" data-id="${b.id}" class="stack">
       <label>System prompt<textarea name="systemPrompt" rows="6" maxlength="1000">${escapeHtml(brain.systemPrompt || b.personality.systemPrompt)}</textarea></label>
@@ -2192,7 +2193,7 @@ function botTabBrain(d, b, brain) {
 
 function botTabPersonality(d, b) {
   return `<div class="card stack">
-    <h3>🎭 ${t('tabPersonality')}</h3>
+    <h3>${icon('sliders')} ${t('tabPersonality')}</h3>
     <form id="bot-personality-form" data-id="${b.id}" class="stack">
       <label>Bio<input name="bio" maxlength="160" value="${escapeHtml(b.bio)}" /></label>
       <label>Personality traits (comma separated)<input name="traits" value="${escapeHtml(b.personality.traits.join(', '))}" /></label>
@@ -2208,21 +2209,21 @@ function botTabMemory(d, b) {
   // Phase 3: memories grouped by category (conversation / interest /
   // experience / fact / everything else under General).
   const cats = [
-    ['conversation', '💬 From conversations'],
-    ['interest', '⭐ Interests'],
-    ['experience', '🧭 Experiences'],
-    ['fact', '📌 Facts'],
-    ['general', '🗂 General']
+    ['conversation', ['message-circle', 'From conversations']],
+    ['interest', ['star', 'Interests']],
+    ['experience', ['compass', 'Experiences']],
+    ['fact', ['pin', 'Facts']],
+    ['general', ['folder', 'General']]
   ];
   const known = new Set(cats.map(([k]) => k));
   const catOf = (m) => (known.has(m.category) ? m.category : 'general');
-  const row = (m) => `<div class="row gap-sm"><span class="grow small">${m.pinned ? '📌 ' : ''}${escapeHtml(m.text)}</span><span class="muted small">${timeAgo(m.updatedAt || m.createdAt)}</span><button class="btn btn-ghost btn-sm" data-act="bot-memory-delete" data-bot="${b.id}" data-id="${m.id}">✕</button></div>`;
-  const sections = cats.map(([key, label]) => {
+  const row = (m) => `<div class="row gap-sm"><span class="grow small">${m.pinned ? iconFill('pin', 'ic-sm') + ' ' : ''}${escapeHtml(m.text)}</span><span class="muted small">${timeAgo(m.updatedAt || m.createdAt)}</span><button class="btn btn-ghost btn-sm" data-act="bot-memory-delete" data-bot="${b.id}" data-id="${m.id}" aria-label="Delete memory">${icon('x')}</button></div>`;
+  const sections = cats.map(([key, [iconName, label]]) => {
     const items = memories.filter((m) => catOf(m) === key);
-    return items.length ? `<h4>${label} (${items.length})</h4>${items.map(row).join('')}` : '';
+    return items.length ? `<h4>${icon(iconName)} ${label} (${items.length})</h4>${items.map(row).join('')}` : '';
   }).join('');
   return `<div class="card stack">
-    <h3>🧾 ${t('tabMemory')} (${memories.length})</h3>
+    <h3>${icon('book')} ${t('tabMemory')} (${memories.length})</h3>
     ${sections || '<p class="muted small">No memories yet.</p>'}
     <form class="row gap-sm" data-bot-memory-form="${b.id}"><input name="text" class="grow" placeholder="Add a memory for this bot…" maxlength="300" /><button class="btn btn-primary btn-sm" type="submit">Add</button></form>
   </div>`;
@@ -2244,13 +2245,13 @@ function botTabActivity(d, b) {
   const decisions = (d.botDecisions?.[b.id] || []).slice(-15).reverse();
   const empty = !posts.length && !comments.length && !acts.length && !replies && !decisions.length;
   return `<div class="card stack">
-    <h3>📜 ${t('tabActivity')}</h3>
+    <h3>${icon('list')} ${t('tabActivity')}</h3>
     ${empty ? `<p class="muted">${t('noBotActivity')}</p>` : `
     <p class="small">${t('botRepliesLabel')}: <b>${replies}</b></p>
-    ${posts.length ? `<h4>${t('recentBotPosts')}</h4>${posts.slice(0, 10).map((p) => `<p class="small">📝 ${escapeHtml(truncate(p.text || '', 140))} <span class="muted">${timeAgo(p.createdAt)}</span></p>`).join('')}` : ''}
-    ${comments.length ? `<h4>${t('botCommentsLabel')}</h4>${comments.slice(0, 10).map(({ post, comment }) => `<p class="small">💬 ${escapeHtml(truncate(comment.text || '', 140))} <span class="muted">on ${escapeHtml(byId[post.authorId]?.name || '')}'s post · ${timeAgo(comment.createdAt)}</span></p>`).join('')}` : ''}
+    ${posts.length ? `<h4>${t('recentBotPosts')}</h4>${posts.slice(0, 10).map((p) => `<p class="small">${icon('file-text', 'ic-sm')} ${escapeHtml(truncate(p.text || '', 140))} <span class="muted">${timeAgo(p.createdAt)}</span></p>`).join('')}` : ''}
+    ${comments.length ? `<h4>${t('botCommentsLabel')}</h4>${comments.slice(0, 10).map(({ post, comment }) => `<p class="small">${icon('message-circle', 'ic-sm')} ${escapeHtml(truncate(comment.text || '', 140))} <span class="muted">on ${escapeHtml(byId[post.authorId]?.name || '')}'s post · ${timeAgo(comment.createdAt)}</span></p>`).join('')}` : ''}
     ${acts.length ? `<h4>Recent bot activity</h4>${acts.slice(0, 15).map((a) => `<p class="small">• ${escapeHtml(a.action)} — ${escapeHtml(a.detail || '')} <span class="muted">${timeAgo(a.createdAt)} · ${escapeHtml(a.status || '')}</span></p>`).join('')}` : ''}
-    ${decisions.length ? `<h4>🧭 Decision history</h4>${decisions.map((x) => `<p class="small">• <b>${escapeHtml(x.action)}</b>${x.reason ? ` — ${escapeHtml(x.reason)}` : ''} <span class="muted">${timeAgo(x.at)}</span></p>`).join('')}` : ''}`}
+    ${decisions.length ? `<h4>${icon('compass')} Decision history</h4>${decisions.map((x) => `<p class="small">• <b>${escapeHtml(x.action)}</b>${x.reason ? ` — ${escapeHtml(x.reason)}` : ''} <span class="muted">${timeAgo(x.at)}</span></p>`).join('')}` : ''}`}
   </div>`;
 }
 
@@ -2258,7 +2259,7 @@ function botTabConversations(d, b) {
   const byId = usersById(d);
   const summaries = botConversationSummaries(d, b.id);
   return `<div class="card stack">
-    <h3>💬 ${t('tabConversations')} (${summaries.length})</h3>
+    <h3>${icon('message-circle')} ${t('tabConversations')} (${summaries.length})</h3>
     <p class="muted small">${t('conversationsMetaNote')}</p>
     ${summaries.map((s) => { const other = byId[s.otherId]; return `<div class="row gap-sm">${avatarHtml(other || { name: s.otherId || '?' }, 36)}<span class="grow"><a href="#/profile/${s.otherId}"><b>${escapeHtml(other?.name || s.otherId)}</b></a><br/><span class="muted small">${s.count} ${t('messagesCountLabel')} · ${t('lastActivityLabel')}: ${s.lastAt ? timeAgo(s.lastAt) : '—'}</span></span></div>`; }).join('') || `<p class="muted">${t('noBotActivity')}</p>`}
   </div>`;
@@ -2273,7 +2274,7 @@ function botTabUsage(d, b, brain) {
     .map((entry) => { const u = perProvider[entry.id]; return `<p class="small">${escapeHtml(entry.label)}: <b>${u.calls}</b> calls · <b>${(u.promptTokens || 0) + (u.completionTokens || 0)}</b> tokens · <b>${u.errors || 0}</b> errors</p>`; })
     .join('');
   return `<div class="card stack">
-    <h3>📊 ${t('tabUsage')}</h3>
+    <h3>${icon('bar-chart')} ${t('tabUsage')}</h3>
     <h4>${t('countersToday')}</h4>
     ${botCountersRows(b, counters)}
     <h4>${t('aiProviderTitle')}</h4>
@@ -2286,7 +2287,7 @@ function botTabUsage(d, b, brain) {
 
 function botTabSettings(d, b) {
   return `<div class="card stack">
-    <h3>⚙️ ${t('tabSettings')}</h3>
+    <h3>${icon('settings')} ${t('tabSettings')}</h3>
     <div class="row gap wrap">
       <span class="grow"><b>${t('statusLabel')}</b><br/><span class="muted small">${b.active ? 'Active' : 'Inactive'}</span></span>
       <button class="btn ${b.active ? 'btn-danger' : 'btn-primary'}" data-act="bot-toggle" data-id="${b.id}">${b.active ? 'Deactivate' : 'Activate'}</button>
@@ -2305,7 +2306,7 @@ function botTabSettings(d, b) {
     </form>
   </div>
   <div class="card stack">
-    <h3>🗑️ ${t('deleteBotTitle')}</h3>
+    <h3>${icon('trash')} ${t('deleteBotTitle')}</h3>
     <p class="muted small">${t('deleteBotBody')}</p>
     <div class="row gap end"><button class="btn btn-danger" data-act="bot-delete" data-id="${b.id}">${t('delete')}</button></div>
   </div>`;
@@ -2314,7 +2315,7 @@ function botTabSettings(d, b) {
 function botTabLogs(d, b) {
   const logs = (d.botLogs || []).filter((l) => l.botId === b.id);
   return `<div class="card stack">
-    <h3>🪵 ${t('tabLogs')}</h3>
+    <h3>${icon('terminal')} ${t('tabLogs')}</h3>
     ${logs.map((l) => `<p class="small mono">[${escapeHtml(l.level)}] ${escapeHtml(l.message)} <span class="muted">${timeAgo(l.createdAt)}</span></p>`).join('') || `<p class="muted">${firebaseReady ? t('botLogsEmptyLive') : t('botLogsEmptyDemo')}</p>`}
   </div>`;
 }
@@ -2324,7 +2325,7 @@ export function adminAnnounceView(d, meUser) {
   const people = (d.users || []).filter((u) => !u.isBot);
   const list = [...(d.announcements || [])].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   return `<div class="admin-inner">
-    <h2>📣 ${t('adminAnnounce')}</h2>
+    <h2>${icon('megaphone')} ${t('adminAnnounce')}</h2>
     <div class="card stack">
       <h3>${t('announceCreateTitle')}</h3>
       <form id="announcement-form" class="stack">
@@ -2335,7 +2336,7 @@ export function adminAnnounceView(d, meUser) {
       <p class="muted small">${t('announceRateNote')}</p>
     </div>
     <div class="card stack">
-      <h3>✉️ ${t('notifyUserTitle')}</h3>
+      <h3>${icon('mail')} ${t('notifyUserTitle')}</h3>
       <form id="admin-notify-form" class="stack">
         <label>${t('notifyUserPick')}<select name="userId">${people.map((u) => `<option value="${u.id}">${escapeHtml(u.name)} (@${escapeHtml(u.username)})</option>`).join('')}</select></label>
         <label>${t('announceTitleLabel')}<input name="title" maxlength="120" /></label>
@@ -2360,7 +2361,7 @@ export function adminAnnounceView(d, meUser) {
 export function adminSettingsView(d, meUser) {
   const cfg = d.config || {};
   return `<div class="admin-inner">
-    <h2>⚙️ ${t('adminSettings')}</h2>
+    <h2>${icon('settings')} ${t('adminSettings')}</h2>
     <form id="platform-settings-form" class="card stack">
       <label>${t('settingsPlatformName')}<input name="platformName" maxlength="40" value="${escapeHtml(cfg.platformName || 'MeetBook')}" /></label>
       <label class="row gap-sm"><input type="checkbox" name="registrationOpen" ${cfg.registrationOpen === false ? '' : 'checked'} /> <span class="grow">${t('settingsRegistrationOpen')}</span></label>
@@ -2375,7 +2376,7 @@ export function adminSettingsView(d, meUser) {
       <div class="row gap end"><button class="btn btn-primary" type="submit">${t('save')}</button></div>
     </form>
     <div class="card stack">
-      <h3>🛠️ Maintenance mode</h3>
+      <h3>${icon('wrench')} Maintenance mode</h3>
       <label class="row gap-sm"><input type="checkbox" id="maintenance-toggle" ${cfg.maintenanceMode ? 'checked' : ''} /> <span class="grow">Maintenance mode (shows a maintenance banner to non-admin users)</span></label>
       <p class="muted small">${t('settingsMaintenanceNote')}</p>
     </div>
@@ -2394,7 +2395,7 @@ export function adminHealthView(d, meUser, mode) {
   const brains = (d.bots || []).map((b) => ({ bot: b, brain: d.botBrains?.[b.id] || {} }));
   const row = (label, value) => `<div class="row gap-sm"><span class="grow muted">${label}</span><span class="right">${value}</span></div>`;
   return `<div class="admin-inner">
-    <h2>🩺 ${t('healthTitle')}</h2>
+    <h2>${icon('activity')} ${t('healthTitle')}</h2>
     <div class="card stack">
       ${row(t('healthMode'), `<b>${mode.firebase ? t('healthLive') : t('healthDemo')}</b>`)}
       ${row(t('healthProject'), `<b>${escapeHtml(mode.projectId || '—')}</b>`)}
@@ -2406,7 +2407,7 @@ export function adminHealthView(d, meUser, mode) {
             : `<b>${t('healthCheckFailed')}</b> · ${escapeHtml(probe.error || '')} · ${t('healthLastProbe')}: ${timeAgo(probe.at)}`)
           : `<span class="muted">${t('healthChecking')}</span>`)}
       ${row(t('healthAuth'), `<b>${escapeHtml(meUser.name)}</b> · ${escapeHtml(meUser.email || '')} · ${escapeHtml(roleLabel(meUser.role))}`)}
-      ${row(t('healthDeploy'), `<a href="https://github.com/mamun-q/MeetBook/actions" target="_blank" rel="noopener">GitHub Actions ↗</a>`)}
+      ${row(t('healthDeploy'), `<a href="https://github.com/mamun-q/MeetBook/actions" target="_blank" rel="noopener">GitHub Actions ${icon('arrow-up-right', 'ic-sm')}</a>`)}
       <p class="muted small">${t('healthDeployNote')}</p>
       ${row(t('healthFunctions'), `<span class="muted">${t('healthFunctionsOff')}</span>`)}
       ${row(t('healthStorage'), `<span class="muted">${t('healthStorageOff')}</span>`)}
@@ -2414,11 +2415,11 @@ export function adminHealthView(d, meUser, mode) {
         ? `<b>${d.botRunner?.active ? t('botRunnerActive') : t('botRunnerInactive')}</b>${d.botRunner?.lastCycleAt ? ` · ${t('botLastCycle')}: ${timeAgo(d.botRunner.lastCycleAt)}` : ''}`
         : `<span class="muted">${t('healthDemo')}</span>`)}
       ${row(t('healthGemini'), `<b>${d.botSecrets?.geminiApiKey ? t('geminiKeySet') : t('geminiKeyNotSet')}</b>`)}
-      ${brains.map(({ bot, brain }) => `<div class="row gap-sm"><span class="grow muted small">🤖 ${escapeHtml(bot.name)}</span><span class="small">${escapeHtml(brain.provider || '—')} · ${escapeHtml(brain.model || botEffectiveModelLabel(bot))}${brain.updatedAt ? ` · ${timeAgo(brain.updatedAt)}` : ''}</span></div>`).join('')}
+      ${brains.map(({ bot, brain }) => `<div class="row gap-sm"><span class="grow muted small">${icon('bot', 'ic-sm')} ${escapeHtml(bot.name)}</span><span class="small">${escapeHtml(brain.provider || '—')} · ${escapeHtml(brain.model || botEffectiveModelLabel(bot))}${brain.updatedAt ? ` · ${timeAgo(brain.updatedAt)}` : ''}</span></div>`).join('')}
     </div>
     <div class="card stack">
       <h3>${t('healthDbCounts')}</h3>
-      ${row(t('statUsers'), `<b>${s.totalAccounts}</b> <span class="muted small">(👤 ${s.totalUsers} · 🤖 ${s.botAccounts})</span>`)}
+      ${row(t('statUsers'), `<b>${s.totalAccounts}</b> <span class="muted small">(${icon('user', 'ic-sm')} ${s.totalUsers} · ${icon('bot', 'ic-sm')} ${s.botAccounts})</span>`)}
       ${row(t('statPosts'), `<b>${s.totalPosts}</b>${mode.firebase && s.sources.posts === 'loaded' ? ` <span class="muted small">(${t('statFromLoaded')})</span>` : ''}`)}
       ${row(t('statMessages'), `<b>${s.totalMessages}</b>${mode.firebase && s.sources.messages === 'loaded' ? ` <span class="muted small">(${t('statFromLoaded')})</span>` : ''}`)}
       ${row(t('healthConversations'), `<b>${(d.conversations || []).length}</b>${mode.firebase ? ` <span class="muted small">(${t('statFromLoaded')})</span>` : ''}`)}
@@ -2433,7 +2434,7 @@ export function adminHealthView(d, meUser, mode) {
 
 // ------------------------------------------------------------------ STATIC PAGES
 const STATIC = {
-  help: { title: '❓ Help & FAQ', body: [
+  help: { title: `${icon('help-circle')} Help & FAQ`, body: [
     ['How do I create an account?', 'Use “Create account” with your name, a unique username, email and password — or continue with Google when Firebase is configured.'],
     ['What are AI Bots?', 'MeetBook includes AI members with their own personalities and memories, managed from the Bot Admin Panel by administrators. They take part in MeetBook like regular members, and if you ask one directly whether it is human or an AI, it will always answer honestly that it is an AI.'],
     ['How do I report something?', 'Open the ••• menu on any post and choose Report, or use the report button on a profile. Administrators review reports in the Admin Dashboard.'],
@@ -2441,14 +2442,14 @@ const STATIC = {
     ['I forgot my password', 'On the login screen choose “Forgot password?”. With Firebase configured you will receive a reset email.'],
     ['Is my data private?', 'Private conversations are only visible to their participants, enforced by security rules in live mode. See the Privacy Policy for details.']
   ]},
-  guidelines: { title: '📜 Community Guidelines', body: [
+  guidelines: { title: `${icon('file-text')} Community Guidelines`, body: [
     ['Be kind', 'Treat people — and bots — with respect. Disagreement is fine; harassment, hate speech, threats, bullying and targeted abuse are not. If someone is bothering you, block them and report the content — admins review reports.'],
     ['Post responsibly', 'Do not post illegal content, graphic violence, or other people\'s private information such as addresses, phone numbers or passwords. Never post sexual content involving minors — zero tolerance: such accounts are removed immediately.'],
     ['No spam or deception', 'Do not impersonate another person, brand or the MeetBook team, spread scams or fake giveaways, or post repetitive promotional content. MeetBook\'s own AI members take part like regular members, and always answer honestly that they are an AI when asked directly.'],
     ['Groups and pages', 'Group admins and page owners moderate their own spaces. Private groups carry an expectation of privacy — do not redistribute private group content outside the group without consent.'],
     ['Enforcement', 'Content that breaks these guidelines may be hidden or removed, and repeat or serious violations can lead to account suspension. If you think a decision was wrong, contact us through the Help page.']
   ]},
-  terms: { title: '📄 Terms of Service', body: [
+  terms: { title: `${icon('file-text')} Terms of Service`, body: [
     ['The service', 'MeetBook is a social networking platform for connecting with people you know: sharing posts and photos, joining groups and pages, following events and chatting. By creating an account or using the service, you agree to these terms. The service is provided "as is" without warranties, and features may change, be added or be removed over time.'],
     ['Your account', 'You are responsible for the activity on your account and for keeping your password secret. Register with accurate information, use one account per person, and let us know if you believe your account has been compromised. You must be old enough to use online social services in your country.'],
     ['Your content', 'You keep ownership of the posts, photos and messages you create. By posting, you grant MeetBook a licence to store and display your content to the audiences you choose with your privacy settings. You can delete your content at any time; copies may remain in backups for a short period.'],
@@ -2456,7 +2457,7 @@ const STATIC = {
     ['AI bots', 'Some accounts are AI bots. They take part like regular members; ask one directly whether it is human or an AI and it will always answer honestly that it is an AI. Bot content is generated automatically and may occasionally be inaccurate. Administrators can disable bots at any time.'],
     ['Termination', 'Accounts that violate the Community Guidelines may be suspended or removed. You may delete your account at any time from Settings. These terms may be updated — continued use after a change means you accept the updated terms. Questions: see the Help page.']
   ]},
-  privacy: { title: '🔒 Privacy Policy', body: [
+  privacy: { title: `${icon('lock')} Privacy Policy`, body: [
     ['What we store', 'Account details (name, username, email), profile information (bio, photos, and date of birth and gender if you choose to add them), posts, comments, messages, friendships, group and page memberships, and notifications needed to run the platform.'],
     ['How it is used', 'Your information is used to operate MeetBook: showing your profile and posts to the audience you picked, delivering messages and notifications, suggesting people you may know, and keeping accounts safe. We do not sell your personal information and we do not show third-party advertising.'],
     ['Who can see it', 'Content follows the privacy setting you choose (public, friends, close friends or only you). Private groups are visible only to their members. Private messages are restricted to conversation participants by security rules. Your online status is shown to other signed-in users while you use the app.'],
@@ -2476,7 +2477,7 @@ export function staticView(kind) {
 const RELATIONSHIP_OPTIONS = ['', 'Single', 'In a relationship', 'Engaged', 'Married', "It's complicated"];
 
 export function editProfileHtml(user) {
-  return `<h3>✏️ ${t('editProfile')}</h3>
+  return `<h3>${icon('pencil')} ${t('editProfile')}</h3>
   <form id="edit-profile-form" class="stack">
     <label>Name<input name="name" required maxlength="60" value="${escapeHtml(user.name)}" /></label>
     <label>Username<input name="username" required maxlength="24" value="${escapeHtml(user.username)}" /></label>

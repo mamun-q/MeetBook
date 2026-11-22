@@ -111,6 +111,30 @@ html[data-theme="dark"] .badge-superadmin { background: #4d3d05; color: #ffd75e;
 .badge-ok { background: #e6f4ea; color: #137333; }
 .badge-warn { background: #fef7e0; color: #b06000; }
 
+/* icons — one SVG family (src/icons.js): stroke-based, inherits
+   currentColor, sized in em so it tracks the surrounding label. */
+.ic { width: 1.25em; height: 1.25em; flex: none; vertical-align: -0.24em; }
+.ic-sm { width: 1em; height: 1em; vertical-align: -0.14em; }
+.ic-lg { width: 1.6em; height: 1.6em; }
+.ic-xl { width: 2.2rem; height: 2.2rem; }
+h2 > .ic, h3 > .ic, h4 > .ic { vertical-align: -0.18em; }
+.bottom-nav-item .ic { width: 24px; height: 24px; }
+.topnav-link .ic { width: 20px; height: 20px; }
+.rail-item .ic { width: 20px; height: 20px; }
+.intro-icon .ic { width: 18px; height: 18px; }
+.badge-verified .ic { width: 1.15em; height: 1.15em; }
+.badge-superadmin .ic { width: 1em; height: 1em; }
+.admin-nav-icon .ic { width: 20px; height: 20px; vertical-align: -0.3em; }
+.story-plus .ic { width: 14px; height: 14px; }
+.msg-send-btn .ic { width: 20px; height: 20px; }
+.pw-eye .ic { width: 20px; height: 20px; }
+.thread-back .ic { width: 22px; height: 22px; }
+.empty-icon .ic { color: var(--muted); }
+.stars .ic { width: 1.05em; height: 1.05em; vertical-align: -0.16em; }
+.star-picker .ic { width: 1.5em; height: 1.5em; }
+.icon-btn .ic { width: 20px; height: 20px; }
+.menu button .ic, .menu a .ic { vertical-align: -0.2em; }
+
 /* buttons — Premium + Professional pack: ONE system for every button
    family. 44px standard height (36px compact), a 12px/10px radius
    scale, 600-weight labels, inline-flex icon+label alignment, a lit

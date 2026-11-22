@@ -145,7 +145,7 @@ describe('messagesView — useful pack rendering', () => {
     await api.setConversationFlag('conv_1', 'pinnedBy', true);
     const html = V.messagesView(api.data(), meUser, '');
     expect(html).toContain('data-act="conv-pin"');
-    expect(html).toContain('📌');
+    expect(html).toContain('ic-pin');
     expect(html).toContain('data-ms="3600000"');
     await api.setConversationFlag('conv_1', 'pinnedBy', false);
   });

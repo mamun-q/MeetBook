@@ -9,6 +9,7 @@ import { toast, clearToasts, openModal, closeModal, confirmModal, adminActionMod
 import { providerById } from './aiProviders.js';
 import { cldImg } from './cloudinary.js';
 import * as V from './views.js';
+import { icon } from './icons.js';
 
 // ------------------------------------------------------------- preferences
 const PREF_KEY = 'meetbook_prefs_v1';
@@ -111,30 +112,30 @@ function headerHtml(d, user) {
       <input name="q" placeholder="${t('searchPlaceholder')}" autocomplete="off" />
       <button class="btn btn-primary btn-sm" type="submit">${t('search')}</button>
     </form>
-    <a class="icon-btn mobile-search" href="#/search" title="${t('search')}" aria-label="${t('search')}">🔎</a>
+    <a class="icon-btn mobile-search" href="#/search" title="${t('search')}" aria-label="${t('search')}">${icon('search')}</a>
     <nav class="topnav">
-      ${navItem('#/', '🏠', t('home'))}
-      ${navItem('#/friends', '👥', t('friends'))}
-      ${navItem('#/events', '📅', t('events'))}
-      ${navItem('#/groups', '🏘️', t('groups'))}
-      ${navItem('#/pages', '📄', t('pages'))}
-      ${navItem('#/messages', '💬', t('messages'), um)}
-      ${navItem('#/notifications', '🔔', t('notifications'), un)}
-      ${isStaff(user) ? navItem('#/admin', '🛡️', t('admin')) : ''}${isAdminRole(user) ? navItem('#/admin/bots', '🤖', t('bots')) : ''}
-      <button class="icon-btn" data-act="toggle-theme" title="Theme">${prefs.theme === 'dark' ? '☀️' : '🌙'}</button>
-      ${deferredInstallPrompt ? '<button class="btn btn-ghost btn-sm install-btn" data-act="install-app">⬇️ Install</button>' : ''}
+      ${navItem('#/', icon('home'), t('home'))}
+      ${navItem('#/friends', icon('users'), t('friends'))}
+      ${navItem('#/events', icon('calendar'), t('events'))}
+      ${navItem('#/groups', icon('users-round'), t('groups'))}
+      ${navItem('#/pages', icon('flag'), t('pages'))}
+      ${navItem('#/messages', icon('message-circle'), t('messages'), um)}
+      ${navItem('#/notifications', icon('bell'), t('notifications'), un)}
+      ${isStaff(user) ? navItem('#/admin', icon('shield'), t('admin')) : ''}${isAdminRole(user) ? navItem('#/admin/bots', icon('bot'), t('bots')) : ''}
+      <button class="icon-btn" data-act="toggle-theme" title="Theme">${prefs.theme === 'dark' ? icon('sun') : icon('moon')}</button>
+      ${deferredInstallPrompt ? `<button class="btn btn-ghost btn-sm install-btn" data-act="install-app">${icon('download')} Install</button>` : ''}
       <div class="avatar-wrap">
         <button class="avatar-btn topnav-avatar" data-act="avatar-menu" title="${t('accountMenu')}" aria-label="${t('accountMenu')}">${avatarHtml(user, 34)}</button>
         <div class="menu avatar-menu hidden" id="avatar-menu">
           <div class="menu-user">${avatarHtml(user, 36)}<span class="grow"><b>${escapeHtml(user.name)}</b><br/><span class="muted small">@${escapeHtml(user.username)}</span></span></div>
-          <a href="#/profile/${user.id}">👤 ${t('myProfile')}</a>
-          <a href="#/saved">🔖 ${t('savedPosts')}</a>
-          <a href="#/events">📅 ${t('events')}</a>
-          <a href="#/memories">🕰️ ${t('memories')}</a>
-          <a href="#/settings">⚙️ ${t('settings')}</a>
-          ${isStaff(user) ? `<a href="#/admin">🛡️ ${t('adminPanel')}</a>` : ''}
-          <a href="#/help">❓ ${t('help')}</a>
-          <button data-act="logout">🚪 ${t('logout')}</button>
+          <a href="#/profile/${user.id}">${icon('user')} ${t('myProfile')}</a>
+          <a href="#/saved">${icon('bookmark')} ${t('savedPosts')}</a>
+          <a href="#/events">${icon('calendar')} ${t('events')}</a>
+          <a href="#/memories">${icon('history')} ${t('memories')}</a>
+          <a href="#/settings">${icon('settings')} ${t('settings')}</a>
+          ${isStaff(user) ? `<a href="#/admin">${icon('shield')} ${t('adminPanel')}</a>` : ''}
+          <a href="#/help">${icon('help-circle')} ${t('help')}</a>
+          <button data-act="logout">${icon('log-out')} ${t('logout')}</button>
         </div>
       </div>
     </nav>
@@ -149,12 +150,12 @@ function bottomNavHtml(d, user, route, seg) {
   const um = unreadMsgCount(d, user);
   const item = (href, icon, label, active, badge = 0) => `<a class="bottom-nav-item ${active ? 'active' : ''}" href="${href}">${icon}${badge ? `<span class="nav-badge">${badge}</span>` : ''}<span class="bottom-nav-label">${label}</span></a>`;
   return `<nav class="bottom-nav" aria-label="Primary">
-    ${item('#/', '🏠', t('home'), route === '')}
-    ${item('#/friends', '👥', t('friends'), route === 'friends')}
-    ${item('#/groups', '🏘️', t('groups'), route === 'groups' || route === 'group')}
-    ${item('#/pages', '📄', t('pages'), route === 'pages' || route === 'page')}
-    ${item('#/messages', '💬', t('messages'), route === 'messages', um)}
-    ${item('#/notifications', '🔔', t('notifications'), route === 'notifications', un)}
+    ${item('#/', icon('home'), t('home'), route === '')}
+    ${item('#/friends', icon('users'), t('friends'), route === 'friends')}
+    ${item('#/groups', icon('users-round'), t('groups'), route === 'groups' || route === 'group')}
+    ${item('#/pages', icon('flag'), t('pages'), route === 'pages' || route === 'page')}
+    ${item('#/messages', icon('message-circle'), t('messages'), route === 'messages', um)}
+    ${item('#/notifications', icon('bell'), t('notifications'), route === 'notifications', un)}
     ${item(`#/profile/${user.id}`, avatarHtml(user, 24), t('profile'), route === 'profile' && seg[1] === user.id)}
   </nav>`;
 }
@@ -247,8 +248,8 @@ export function render() {
 
   appEl.innerHTML = `
     ${headerHtml(d, user)}
-    ${maintenance ? '<div class="maintenance-banner">🛠️ MeetBook is briefly under maintenance. You can browse, but changes may be paused.</div>' : ''}
-    ${!firebaseReady ? `<div class="demo-banner">🧪 ${t('demoMode')} — sign in with a demo account or create one. <button class="link-btn" data-act="dismiss-demo">Dismiss</button></div>` : ''}
+    ${maintenance ? `<div class="maintenance-banner">${icon('wrench')} MeetBook is briefly under maintenance. You can browse, but changes may be paused.</div>` : ''}
+    ${!firebaseReady ? `<div class="demo-banner">${icon('flask')} ${t('demoMode')} — sign in with a demo account or create one. <button class="link-btn" data-act="dismiss-demo">Dismiss</button></div>` : ''}
     <div class="shell">${body}</div>
     <footer class="footer muted small">${escapeHtml(brand)} · ${t('taglineShort')} · <a href="#/help">${t('help')}</a> · <a href="#/terms">${t('termsOfService')}</a> · <a href="#/privacy">${t('privacyPolicy')}</a> · <a href="#/guidelines">${t('communityGuidelines')}</a></footer>
     ${bottomNavHtml(d, user, route, seg)}`;
@@ -548,7 +549,7 @@ let typingTicker = null; // 1s interval refreshing #typing-row (setupThread)
 function showReplyPreview() {
   const el = document.getElementById('reply-preview');
   if (!el || !replyTarget) return;
-  el.innerHTML = `<span class="grow small"><b>${escapeHtml(t('replyingTo').replace('{name}', replyTarget.name))}</b><br/>${escapeHtml(replyTarget.text)}</span><button type="button" class="btn btn-ghost btn-sm" data-act="cancel-reply" aria-label="${t('cancel')}">✕</button>`;
+  el.innerHTML = `<span class="grow small"><b>${escapeHtml(t('replyingTo').replace('{name}', replyTarget.name))}</b><br/>${escapeHtml(replyTarget.text)}</span><button type="button" class="btn btn-ghost btn-sm" data-act="cancel-reply" aria-label="${t('cancel')}">${icon('x')}</button>`;
   el.classList.remove('hidden');
 }
 
@@ -742,8 +743,8 @@ function renderStoryViewer() {
       <div class="story-author">
         ${avatarHtml(author, 34)}
         <span class="grow"><b>${escapeHtml(author?.name || '')}</b> <span class="story-time">${timeAgo(s.createdAt)}</span></span>
-        ${isMine ? `<button class="story-icon-btn" data-act="story-delete" aria-label="${t('deleteStory')}">🗑️</button>` : ''}
-        <button class="story-icon-btn" data-act="story-close" aria-label="Close">✕</button>
+        ${isMine ? `<button class="story-icon-btn" data-act="story-delete" aria-label="${t('deleteStory')}">${icon('trash')}</button>` : ''}
+        <button class="story-icon-btn" data-act="story-close" aria-label="Close">${icon('x')}</button>
       </div>
     </div>
     <div class="story-stage">
@@ -751,7 +752,7 @@ function renderStoryViewer() {
       <button class="story-zone left" data-act="story-prev" aria-label="Previous">‹</button>
       <button class="story-zone right" data-act="story-next" aria-label="Next">›</button>
     </div>
-    ${isMine ? `<div class="story-footer">👁 ${viewers.length} ${t('viewers')}${viewers.length ? ` · ${t('seenBy')}: ${viewers.map((v) => escapeHtml(v.name)).join(', ')}` : ` · ${t('noViewersYet')}`}</div>` : `
+    ${isMine ? `<div class="story-footer">${icon('eye')} ${viewers.length} ${t('viewers')}${viewers.length ? ` · ${t('seenBy')}: ${viewers.map((v) => escapeHtml(v.name)).join(', ')}` : ` · ${t('noViewersYet')}`}</div>` : `
     <form id="story-reply-form" class="story-reply" data-author="${s.authorId}">
       <input id="story-reply-input" name="text" maxlength="500" placeholder="${t('storyReplyPlaceholder')}" autocomplete="off" />
       <button class="btn btn-primary btn-sm" type="submit">${t('send')}</button>
@@ -956,7 +957,7 @@ document.addEventListener('click', async (e) => {
       if (input) {
         const show = input.type === 'password';
         input.type = show ? 'text' : 'password';
-        actEl.textContent = show ? '🙈' : '👁️';
+        actEl.innerHTML = show ? icon('eye-off') : icon('eye');
         actEl.setAttribute('aria-label', show ? t('hidePassword') : t('showPassword'));
         actEl.title = show ? t('hidePassword') : t('showPassword');
       }
@@ -985,7 +986,7 @@ document.addEventListener('click', async (e) => {
       if (rows.length >= 4) { toast('A poll can have up to 4 options.', 'error'); break; }
       const row = document.createElement('div');
       row.className = 'row gap-sm poll-opt-row';
-      row.innerHTML = `<input name="pollOption" maxlength="60" placeholder="${t('pollOption')} ${rows.length + 1}" autocomplete="off" /><button type="button" class="btn btn-ghost btn-sm" data-act="poll-remove-option" aria-label="Remove option">✕</button>`;
+      row.innerHTML = `<input name="pollOption" maxlength="60" placeholder="${t('pollOption')} ${rows.length + 1}" autocomplete="off" /><button type="button" class="btn btn-ghost btn-sm" data-act="poll-remove-option" aria-label="Remove option">${icon('x')}</button>`;
       list.appendChild(row);
       row.querySelector('input')?.focus();
       break;
@@ -1126,11 +1127,11 @@ document.addEventListener('click', async (e) => {
       }, () => toast(t('locationUnavailable'), 'error'), { timeout: 10000, maximumAge: 60000 });
       break;
     }
-    case 'poll-open': openModal(`<h3>📊 ${t('createPoll')}</h3><form id="chat-poll-form" data-conv="${actEl.dataset.conv}" class="stack"><input name="question" placeholder="${t('pollQuestion')}" maxlength="120" required /><input name="option1" placeholder="${t('pollOption')} 1" maxlength="60" required /><input name="option2" placeholder="${t('pollOption')} 2" maxlength="60" required /><input name="option3" placeholder="${t('pollOption')} 3 (${t('optional')})" maxlength="60" /><input name="option4" placeholder="${t('pollOption')} 4 (${t('optional')})" maxlength="60" /><div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">${t('createPoll')}</button></div></form>`); break;
+    case 'poll-open': openModal(`<h3>${icon('bar-chart')} ${t('createPoll')}</h3><form id="chat-poll-form" data-conv="${actEl.dataset.conv}" class="stack"><input name="question" placeholder="${t('pollQuestion')}" maxlength="120" required /><input name="option1" placeholder="${t('pollOption')} 1" maxlength="60" required /><input name="option2" placeholder="${t('pollOption')} 2" maxlength="60" required /><input name="option3" placeholder="${t('pollOption')} 3 (${t('optional')})" maxlength="60" /><input name="option4" placeholder="${t('pollOption')} 4 (${t('optional')})" maxlength="60" /><div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">${t('createPoll')}</button></div></form>`); break;
     case 'vote-poll': await handle(api.voteChatPoll(actEl.dataset.id, actEl.dataset.option)); break;
     case 'set-nickname': {
       const d = api.data(); const conv = d.conversations.find((c) => c.id === actEl.dataset.conv); const target = d.users.find((u) => u.id === actEl.dataset.id);
-      openModal(`<h3>🏷️ ${t('setNickname')}</h3><form id="nickname-form" data-conv="${actEl.dataset.conv}" data-user="${actEl.dataset.id}" class="stack"><label>${escapeHtml(target?.name || '')}<input name="nickname" value="${escapeHtml(conv?.nicknames?.[actEl.dataset.id] || '')}" placeholder="${escapeHtml(target?.name || '')}" maxlength="40" /></label><p class="muted small">${t('nicknameHint')}</p><div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">Save</button></div></form>`);
+      openModal(`<h3>${icon('tag')} ${t('setNickname')}</h3><form id="nickname-form" data-conv="${actEl.dataset.conv}" data-user="${actEl.dataset.id}" class="stack"><label>${escapeHtml(target?.name || '')}<input name="nickname" value="${escapeHtml(conv?.nicknames?.[actEl.dataset.id] || '')}" placeholder="${escapeHtml(target?.name || '')}" maxlength="40" /></label><p class="muted small">${t('nicknameHint')}</p><div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">Save</button></div></form>`);
       break;
     }
     case 'pin-message': { const pinned = await handle(api.togglePinMessage(actEl.dataset.id)); if (pinned !== null) toast(pinned ? t('messagePinned') : t('messageUnpinned'), 'success'); break; }
@@ -1158,7 +1159,7 @@ document.addEventListener('click', async (e) => {
         const targets = d.conversations.filter((c) => c.participants.includes(user.id) && c.id !== msg.conversationId);
         openModal(`<h3>${t('forwardMessage')}</h3><div class="stack">${targets.length ? targets.map((c) => {
           const title = c.isGroup ? (c.title || t('groupChat')) : (byId[c.participants.find((p) => p !== user.id)]?.name || 'Unknown');
-          return `<button class="conv-item" data-act="forward-to" data-id="${msg.id}" data-conv="${c.id}">${avatarHtml(c.isGroup ? { name: title, username: title, avatar: c.photo || '' } : (byId[c.participants.find((p) => p !== user.id)] || { name: 'Unknown', username: 'unknown' }), 36)}<span>${c.isGroup ? '👥 ' : ''}${escapeHtml(title)}</span></button>`;
+          return `<button class="conv-item" data-act="forward-to" data-id="${msg.id}" data-conv="${c.id}">${avatarHtml(c.isGroup ? { name: title, username: title, avatar: c.photo || '' } : (byId[c.participants.find((p) => p !== user.id)] || { name: 'Unknown', username: 'unknown' }), 36)}<span>${c.isGroup ? icon('users', 'ic-sm') + ' ' : ''}${escapeHtml(title)}</span></button>`;
         }).join('') : `<p class="muted">${t('noForwardTargets')}</p>`}</div>`);
       }
       break;
@@ -2000,7 +2001,7 @@ document.addEventListener('change', async (e) => {
     const preview = document.getElementById('composer-preview');
     if (file && preview) {
       const url = URL.createObjectURL(file);
-      preview.innerHTML = `<div class="composer-preview-wrap"><img class="post-image" src="${url}" alt="Selected photo preview" /><button type="button" class="preview-remove" data-act="remove-composer-photo" aria-label="Remove photo" title="Remove photo">✕</button></div>`;
+      preview.innerHTML = `<div class="composer-preview-wrap"><img class="post-image" src="${url}" alt="Selected photo preview" /><button type="button" class="preview-remove" data-act="remove-composer-photo" aria-label="Remove photo" title="Remove photo">${icon('x')}</button></div>`;
     }
   }
   if (e.target.id === 'msg-image-input') {
@@ -2011,7 +2012,7 @@ document.addEventListener('change', async (e) => {
     const preview = document.getElementById('message-preview');
     if (file && preview) {
       const url = URL.createObjectURL(file);
-      preview.innerHTML = `<img src="${url}" alt="Selected photo preview" /><span class="grow small">${escapeHtml(file.name)}</span><button type="button" class="btn btn-ghost btn-sm" data-act="clear-message-photo" aria-label="${t('removePhoto')}" title="${t('removePhoto')}">✕</button>`;
+      preview.innerHTML = `<img src="${url}" alt="Selected photo preview" /><span class="grow small">${escapeHtml(file.name)}</span><button type="button" class="btn btn-ghost btn-sm" data-act="clear-message-photo" aria-label="${t('removePhoto')}" title="${t('removePhoto')}">${icon('x')}</button>`;
       preview.classList.remove('hidden');
     }
   }
@@ -2020,7 +2021,7 @@ document.addEventListener('change', async (e) => {
     const file = e.target.files?.[0];
     const preview = document.getElementById('message-preview');
     if (file && preview) {
-      preview.innerHTML = `<span class="grow small">📎 ${escapeHtml(file.name)} (${Math.max(1, Math.round(file.size / 1024))} KB)</span><button type="button" class="btn btn-ghost btn-sm" data-act="clear-message-file" aria-label="${t('attachFile')}" title="${t('attachFile')}">✕</button>`;
+      preview.innerHTML = `<span class="grow small">${icon('paperclip')} ${escapeHtml(file.name)} (${Math.max(1, Math.round(file.size / 1024))} KB)</span><button type="button" class="btn btn-ghost btn-sm" data-act="clear-message-file" aria-label="${t('attachFile')}" title="${t('attachFile')}">${icon('x')}</button>`;
       preview.classList.remove('hidden');
     }
   }

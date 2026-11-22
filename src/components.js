@@ -2,6 +2,7 @@
 import { escapeHtml, initials, avatarColor, timeAgo, pollResults, feelingByKey, shouldClearToast } from './utils.js';
 import { cldImg } from './cloudinary.js';
 import { t } from './i18n.js';
+import { icon, iconFill, hasIcon } from './icons.js';
 
 export function toast(message, type = 'info') {
   const root = document.getElementById('toast-root');
@@ -92,24 +93,24 @@ export function userNameHtml(user) {
   if (!user) return '<span class="muted">Unknown user</span>';
   // Badges are joined with explicit spaces — concatenated badge spans
   // with nothing between them render (and extract) as one run-on word.
-  // The verified ✓ (users.verified, set from Admin → Users) renders
+  // The verified check (users.verified, set from Admin → Users) renders
   // everywhere names appear through this helper. Super Admins get
-  // their own gold 👑 badge; plain admins keep the red "Admin" one.
+  // their own gold crown badge; plain admins keep the red "Admin" one.
   // Bot accounts get NO badge here (Natural Presence pack): in user
   // surfaces they render exactly like human users; bot identification
   // lives only in the Admin panel, which renders its own markup.
   const badges = [
-    user.verified ? `<span class="badge badge-verified" title="${t('verified')}">✓</span>` : '',
-    user.role === 'superadmin' ? `<span class="badge badge-superadmin" title="${t('roleSuperadmin')}">👑 ${t('roleSuperadmin')}</span>` : '',
+    user.verified ? `<span class="badge badge-verified" title="${t('verified')}">${icon('check')}</span>` : '',
+    user.role === 'superadmin' ? `<span class="badge badge-superadmin" title="${t('roleSuperadmin')}">${iconFill('crown')} ${t('roleSuperadmin')}</span>` : '',
     user.role === 'admin' ? `<span class="badge badge-admin">${t('roleAdmin')}</span>` : ''
   ].filter(Boolean).join(' ');
   return `<span class="user-name">${escapeHtml(user.name)}${badges ? ` ${badges}` : ''}</span>`;
 }
 
-// Small ✓ badge for the hand-rolled name markup in comment threads
-// (kept in step with userNameHtml's verified treatment).
+// Small verified-check badge for the hand-rolled name markup in
+// comment threads (kept in step with userNameHtml's verified treatment).
 export function verifiedBadgeHtml(user) {
-  return user?.verified ? ` <span class="badge badge-verified" title="${t('verified')}">✓</span>` : '';
+  return user?.verified ? ` <span class="badge badge-verified" title="${t('verified')}">${icon('check')}</span>` : '';
 }
 
 export function postCardHtml(post, ctx) {
@@ -142,10 +143,10 @@ export function postCardHtml(post, ctx) {
       ${(post.shares || 0) > 0 ? `<span>${post.shares} ${post.shares === 1 ? 'share' : 'shares'}</span>` : ''}
     </div>` : '';
   const comments = (post.comments || []).map((c) => commentHtml(c, post, ctx)).join('');
-  const sharedNote = post.sharedFrom ? `<div class="shared-note">🔁 Shared from ${escapeHtml(usersById[post.sharedFrom]?.name || 'a post')}</div>` : '';
-  const groupNote = group && ctx.showGroupContext !== false ? `<div class="shared-note">🏘️ Posted in <a href="#/group/${group.id}">${escapeHtml(group.name)}</a></div>` : '';
-  const pinnedNote = post.pinned && post.groupId ? `<div class="pinned-note">📌 ${t('announcement')}</div>` : '';
-  const visIcon = post.visibility === 'friends' ? '👥' : post.visibility === 'close' ? '⭐' : (post.visibility === 'only-me' || post.visibility === 'private') ? '🔒' : '🌍';
+  const sharedNote = post.sharedFrom ? `<div class="shared-note">${icon('repeat')} Shared from ${escapeHtml(usersById[post.sharedFrom]?.name || 'a post')}</div>` : '';
+  const groupNote = group && ctx.showGroupContext !== false ? `<div class="shared-note">${icon('users-round')} Posted in <a href="#/group/${group.id}">${escapeHtml(group.name)}</a></div>` : '';
+  const pinnedNote = post.pinned && post.groupId ? `<div class="pinned-note">${icon('pin')} ${t('announcement')}</div>` : '';
+  const visIcon = icon(post.visibility === 'friends' ? 'users' : post.visibility === 'close' ? 'star' : (post.visibility === 'only-me' || post.visibility === 'private') ? 'lock' : 'globe', 'ic-sm');
   // Facebook-style header suffix: "— feeling grateful 🙏 at Lalbagh Fort".
   const feelingObj = feelingByKey(post.feeling);
   const feelBits = [];
@@ -169,12 +170,12 @@ export function postCardHtml(post, ctx) {
     <header class="post-head">
       ${authorBlock}
       <div class="post-menu-wrap">
-        <button class="icon-btn" data-menu="${post.id}" aria-label="Post options">•••</button>
+        <button class="icon-btn" data-menu="${post.id}" aria-label="Post options">${icon('more-horizontal')}</button>
         <div class="menu hidden" id="menu-${post.id}">
-          ${post.authorId === me?.id ? `<button data-act="edit-post">✏️ ${t('edit')}</button><button data-act="delete-post">🗑️ ${t('delete')}</button>` : ''}
-          ${post.groupId && group?.createdBy === me?.id ? `<button data-act="toggle-pin">📌 ${post.pinned ? t('unpinAnnouncement') : t('pinAnnouncement')}</button>` : ''}
-          <button data-act="save-post">${saved ? '🔖 ' + t('saved') : '🔖 ' + t('save')}</button>
-          ${post.authorId !== me?.id ? `<button data-act="report-post">🚩 ${t('report')}</button>` : ''}
+          ${post.authorId === me?.id ? `<button data-act="edit-post">${icon('pencil')} ${t('edit')}</button><button data-act="delete-post">${icon('trash')} ${t('delete')}</button>` : ''}
+          ${post.groupId && group?.createdBy === me?.id ? `<button data-act="toggle-pin">${icon('pin')} ${post.pinned ? t('unpinAnnouncement') : t('pinAnnouncement')}</button>` : ''}
+          <button data-act="save-post">${saved ? iconFill('bookmark') + ' ' + t('saved') : icon('bookmark') + ' ' + t('save')}</button>
+          ${post.authorId !== me?.id ? `<button data-act="report-post">${icon('flag')} ${t('report')}</button>` : ''}
         </div>
       </div>
     </header>
@@ -183,9 +184,9 @@ export function postCardHtml(post, ctx) {
     ${post.poll ? pollBlockHtml(post, me) : ''}
     ${statsHtml}
     <div class="post-actions">
-      <button class="action-btn ${liked ? 'active' : ''}" data-act="like">${liked ? '❤️' : '🤍'} ${t('like')}</button>
-      <button class="action-btn" data-act="focus-comment">💬 ${t('comment')}</button>
-      <button class="action-btn" data-act="share">🔁 ${t('share')}</button>
+      <button class="action-btn ${liked ? 'active' : ''}" data-act="like">${liked ? iconFill('heart') : icon('heart')} ${t('like')}</button>
+      <button class="action-btn" data-act="focus-comment">${icon('message-circle')} ${t('comment')}</button>
+      <button class="action-btn" data-act="share">${icon('share-2')} ${t('share')}</button>
       <span class="reaction-bar">
         ${['❤️', '😆', '😮', '😢', '👏'].map((e) => `<button class="reaction-btn ${myReaction === e ? 'active' : ''}" data-act="react" data-emoji="${e}" aria-label="React ${e}">${e}</button>`).join('')}
       </span>
@@ -208,7 +209,7 @@ function pollBlockHtml(post, meUser) {
   return `<div class="poll">
     ${res.options.map((o) => `<button class="poll-option ${myVote === o.id ? 'mine' : ''}" data-act="poll-vote" data-option="${o.id}" aria-pressed="${myVote === o.id}">
       <span class="poll-bar" style="width:${o.pct}%"></span>
-      <span class="poll-option-text">${escapeHtml(o.text)}${myVote === o.id ? ' ✓' : ''}</span>
+      <span class="poll-option-text">${escapeHtml(o.text)}${myVote === o.id ? ` ${icon('check', 'ic-sm')}` : ''}</span>
       <span class="poll-pct">${o.pct}%</span>
     </button>`).join('')}
     <p class="muted small poll-total">${res.totalVotes} ${res.totalVotes === 1 ? t('voter') : t('voters')}</p>
@@ -244,8 +245,12 @@ export function linkify(text) {
   return escapeHtml(text || '').replace(/@([a-zA-Z0-9_.]{3,24})/g, '<span class="mention">@$1</span>');
 }
 
-export function emptyState(icon, text) {
-  return `<div class="card empty-state"><div class="empty-icon">${icon}</div><p class="muted">${escapeHtml(text)}</p></div>`;
+// Empty state: the first argument is an ICON NAME from icons.js
+// (rendered as a large vector glyph). A value that is not a known
+// icon name is rendered as-is, so legacy callers keep working.
+export function emptyState(iconName, text) {
+  const glyph = hasIcon(iconName) ? icon(iconName, 'ic-xl') : iconName;
+  return `<div class="card empty-state"><div class="empty-icon">${glyph}</div><p class="muted">${escapeHtml(text)}</p></div>`;
 }
 
 export function loadingHtml(text = 'Loading…') {

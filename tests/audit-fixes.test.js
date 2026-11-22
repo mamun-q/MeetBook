@@ -166,18 +166,22 @@ describe('#9 event buttons and header layout', () => {
     location: 'Dhaka', cover: '', createdBy: 'u_friend', visibility: 'public', audienceIds: [],
     going, interested: [], createdAt: NOW - 1000
   });
-  it('detail button shows ✓ only when the viewer is going', () => {
+  it('detail button shows the check icon only when the viewer is going', () => {
+    const goingBtn = (html) => (html.match(/data-kind="going"[^>]*>([\s\S]*?)<\/button>/) || [])[1] || '';
     const notGoing = V.eventView(baseData({ events: [ev([])] }), me, 'e1');
-    expect(notGoing).toContain(`>${t('going')} (0)</button>`);
-    expect(notGoing).not.toContain(`>✓ ${t('going')}`);
+    expect(goingBtn(notGoing)).toContain(`${t('going')} (0)`);
+    expect(goingBtn(notGoing)).not.toContain('ic-check');
     const going = V.eventView(baseData({ events: [ev(['u_me'])] }), me, 'e1');
-    expect(going).toContain(`>✓ ${t('going')} (1)</button>`);
+    expect(goingBtn(going)).toContain('ic-check');
+    expect(goingBtn(going)).toContain(`${t('going')} (1)`);
   });
-  it('card button shows ✓ only when the viewer is going', () => {
+  it('card button shows the check icon only when the viewer is going', () => {
+    const goingBtn = (html) => (html.match(/data-kind="going"[^>]*>([\s\S]*?)<\/button>/) || [])[1] || '';
     const notGoing = V.eventsView(baseData({ events: [ev([])] }), me);
-    expect(notGoing).not.toContain(`>✓ ${t('going')}</button>`);
+    expect(goingBtn(notGoing)).not.toContain('ic-check');
     const going = V.eventsView(baseData({ events: [ev(['u_me'])] }), me);
-    expect(going).toContain(`>✓ ${t('going')}</button>`);
+    expect(goingBtn(going)).toContain('ic-check');
+    expect(goingBtn(going)).toContain(t('going'));
   });
   it('the big-avatar overlap rule is scoped to direct children, so nested avatars (event host) are untouched', () => {
     const css = readFileSync(new URL('../src/styles.css', import.meta.url), 'utf8');
@@ -234,8 +238,8 @@ describe('#11 Bangla gaps closed', () => {
     const main = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
     const views = readFileSync(new URL('../src/views.js', import.meta.url), 'utf8');
     expect(main + views).not.toContain('>Search</button>');
-    expect(main).toContain("navItem('#/admin', '🛡️', t('admin'))");
-    expect(main).toContain("navItem('#/admin/bots', '🤖', t('bots'))");
+    expect(main).toContain("navItem('#/admin', icon('shield'), t('admin'))");
+    expect(main).toContain("navItem('#/admin/bots', icon('bot'), t('bots'))");
     expect(views).toContain("${t('search')}</button>");
   });
 });
@@ -251,6 +255,7 @@ describe('#12 admin counts: Overview counts every account, bots broken out', () 
   it('the Overview headline shows the all-accounts total with the split', () => {
     const html = V.adminOverviewView(baseData({ users: [me, friend, novaUser] }), me, { firebase: false, projectId: 'demo' });
     expect(html).toContain('<b>3</b>');
-    expect(html).toContain('👤 2 · 🤖 1');
+    expect(html).toMatch(/ic-user[\s\S]*?> 2 ·/);
+    expect(html).toMatch(/ic-bot[\s\S]*?> 1</);
   });
 });

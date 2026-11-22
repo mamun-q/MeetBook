@@ -176,8 +176,8 @@ describe('Natural Presence — Admin still identifies bots fully', () => {
     expect(html).toContain('badge-bot');
   });
 
-  it('the admin users table still marks the bot row with 🤖', () => {
+  it('the admin users table still marks the bot row with the bot icon', () => {
     const html = V.adminUsersView(d, admin, {});
-    expect(html).toContain('🤖');
+    expect(html).toContain('ic-bot');
   });
 });
