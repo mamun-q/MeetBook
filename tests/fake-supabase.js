@@ -232,6 +232,11 @@ function makeChannel(name, opts = {}) {
     on(type, filter, cb) { this.bindings.push({ type, filter, cb }); return this; },
     subscribe(cb) {
       channels.add(ch);
+      // The status callback is RETAINED (real supabase-js keeps it
+      // for the channel's whole life) so tests can drive later
+      // statuses — CHANNEL_ERROR / TIMED_OUT / CLOSED — through
+      // fakeControl.emitChannelStatus.
+      ch.statusCallback = typeof cb === 'function' ? cb : null;
       for (const b of ch.bindings) {
         if (b.type === 'postgres_changes') {
           b.table = b.filter.table;
@@ -401,6 +406,18 @@ export const fakeControl = {
     const id = user.id || user.uid;
     session = { user: makeUser(id, user.email || ''), access_token: 'fake-token' };
     fireAuth('SIGNED_IN');
+  },
+  // Live channel objects currently registered under a name — a
+  // rebuild shows up here as a NEW object replacing the old one.
+  channelsNamed(name) { return [...channels].filter((c) => c.name === name); },
+  // Drive a realtime status (CHANNEL_ERROR / TIMED_OUT / CLOSED /
+  // SUBSCRIBED) into every live channel with this name, the way a
+  // dying websocket would deliver it in production.
+  emitChannelStatus(name, status) {
+    for (const ch of [...channels]) {
+      if (ch.name !== name || typeof ch.statusCallback !== 'function') continue;
+      try { ch.statusCallback(status); } catch { /* app's problem */ }
+    }
   },
   seed(col, id, data) { tableMap(col).set(id, { id, ...structuredClone(data) }); scheduleFlush(); },
   get(col, id) { const d = tableMap(col).get(id); return d ? structuredClone(d) : undefined; },

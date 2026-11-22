@@ -643,18 +643,240 @@ function clearRefetchWindows() {
   refetchState.clear();
 }
 
+// ---------------------------------------------------------------------------
+// Realtime recovery. A phone browser kills the realtime websocket
+// without ceremony — the tab is backgrounded, the OS freezes the
+// page, the network blips — and supabase-js does not always notice:
+// no event, no error, just a mirror that silently stops moving
+// until a full reload (Limon's "new messages don't show until I
+// reload" report). Three defences, all feeding the SAME coalesced
+// refetch path above so a healthy connection behaves exactly as
+// before:
+//  1. Every table channel subscribes WITH a status callback. A
+//     channel that had joined and then reports CHANNEL_ERROR /
+//     TIMED_OUT / CLOSED is rebuilt (remove + recreate) behind a
+//     growing backoff, and its table is refetched immediately so
+//     anything the dead channel missed lands without waiting for
+//     the rebuild.
+//  2. Lifecycle resync: when the tab becomes visible again, the
+//     window regains focus, or the network comes back online, every
+//     watched table is refetched (and any channel already known to
+//     be failed is rebuilt on the spot instead of waiting out its
+//     backoff). The compare-and-suppress merges make this free when
+//     nothing actually changed.
+//  3. A visible-tab safety net: while the page is visible, the
+//     chat-critical tables (messages / conversations /
+//     notifications) are refetched on a slow interval, so even a
+//     socket that died without reporting anything heals within a
+//     minute. The net stops when the tab hides or the user signs
+//     out.
+// The presence and typing channels get the same status-based
+// rebuild (they carry no data, so no refetch rides along).
+// ---------------------------------------------------------------------------
+const CHANNEL_REBUILD_BASE_MS = 1000;
+const CHANNEL_REBUILD_MAX_MS = 30000;
+const SAFETY_NET_MS = 45000;
+const SAFETY_NET_TABLES = ['messages', 'conversations', 'notifications'];
+const channelHealth = new Map(); // table -> { wasSubscribed, failed, failures, timer }
+const auxChannelHealth = {
+  presence: { failures: 0, timer: null },
+  typing: { failures: 0, timer: null }
+};
+let safetyNetTimer = null;
+let lifecycleHooksRegistered = false;
+
+function unrefTimer(t) {
+  if (t && typeof t === 'object' && typeof t.unref === 'function') t.unref();
+}
+
+function channelBackoffMs(failures) {
+  return Math.min(CHANNEL_REBUILD_BASE_MS * 2 ** failures, CHANNEL_REBUILD_MAX_MS);
+}
+
+function isChannelFailure(status) {
+  return status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED';
+}
+
+function channelHealthFor(table) {
+  let h = channelHealth.get(table);
+  if (!h) { h = { wasSubscribed: false, failed: false, failures: 0, timer: null }; channelHealth.set(table, h); }
+  return h;
+}
+
+function dropSyncChannel(ch) {
+  const i = syncChannels.indexOf(ch);
+  if (i >= 0) syncChannels.splice(i, 1);
+  try { supabase.removeChannel(ch); } catch { /* already gone */ }
+}
+
+function createTableChannel(table) {
+  const ch = supabase.channel(`mb-sync-${table}`)
+    .on('postgres_changes', { event: '*', schema: 'public', table }, () => scheduleTableRefetch(table));
+  // Registered in the maps BEFORE subscribing, so a status that
+  // arrives synchronously from subscribe() already sees itself as
+  // the current channel for the table.
+  channelByTable.set(table, ch);
+  syncChannels.push(ch);
+  ch.subscribe((status) => handleTableChannelStatus(table, ch, status));
+  return ch;
+}
+
+function handleTableChannelStatus(table, ch, status) {
+  // A status from a channel that has been replaced or torn down is
+  // not a failure — our own removeChannel reports CLOSED, and
+  // stopRemoteSync flips syncStarted before removing anything.
+  if (!syncStarted || channelByTable.get(table) !== ch) return;
+  const h = channelHealthFor(table);
+  if (status === 'SUBSCRIBED') {
+    h.wasSubscribed = true;
+    h.failed = false;
+    h.failures = 0;
+    if (h.timer) { clearTimeout(h.timer); h.timer = null; }
+    return;
+  }
+  if (!isChannelFailure(status)) return;
+  // Only a channel that once joined can be LOST. A join that never
+  // succeeded is still being retried by supabase-js's own rejoin
+  // loop, and the boot fetch already loaded this table's data.
+  if (!h.wasSubscribed) return;
+  h.failed = true;
+  // Land anything the dead channel missed right away; the rebuild
+  // itself waits behind the backoff so a flapping socket cannot
+  // spin a tight remove/recreate loop.
+  scheduleTableRefetch(table);
+  scheduleChannelRebuild(table);
+}
+
+function scheduleChannelRebuild(table) {
+  const h = channelHealthFor(table);
+  if (h.timer) return; // one rebuild already queued for this table
+  const delay = channelBackoffMs(h.failures);
+  h.failures += 1;
+  h.timer = setTimeout(() => {
+    h.timer = null;
+    rebuildTableChannel(table);
+  }, delay);
+  unrefTimer(h.timer);
+}
+
+function rebuildTableChannel(table) {
+  if (!syncStarted) return;
+  const h = channelHealth.get(table);
+  if (h && h.timer) { clearTimeout(h.timer); h.timer = null; }
+  const old = channelByTable.get(table);
+  if (!old) return;
+  channelByTable.delete(table);
+  dropSyncChannel(old);
+  createTableChannel(table);
+  // Catch up on anything published while the channel was down or
+  // being rebuilt — the fresh channel only sees future changes.
+  scheduleTableRefetch(table);
+}
+
+// Lifecycle resync (defence 2): refetch every watched table through
+// the coalescer; rebuild any channel already known to be failed
+// immediately rather than waiting out its backoff — the user is
+// looking at the app NOW.
+function resyncWatchedTables() {
+  if (!syncStarted) return;
+  for (const table of [...channelByTable.keys()]) {
+    const h = channelHealth.get(table);
+    if (h && h.failed) rebuildTableChannel(table);
+    else scheduleTableRefetch(table);
+  }
+}
+
+function startSafetyNet() {
+  if (safetyNetTimer) return;
+  safetyNetTimer = setInterval(() => {
+    if (!syncStarted) return;
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    for (const table of SAFETY_NET_TABLES) {
+      if (channelByTable.has(table)) scheduleTableRefetch(table);
+    }
+  }, SAFETY_NET_MS);
+  unrefTimer(safetyNetTimer);
+}
+
+function stopSafetyNet() {
+  if (!safetyNetTimer) return;
+  clearInterval(safetyNetTimer);
+  safetyNetTimer = null;
+}
+
+function handleVisibilityChange() {
+  if (typeof document === 'undefined') return;
+  if (document.visibilityState === 'visible') {
+    if (syncStarted) startSafetyNet();
+    resyncWatchedTables();
+  } else {
+    stopSafetyNet();
+  }
+}
+
+// Registered exactly once per page load, no matter how many
+// sign-in/out cycles run: the handlers themselves no-op while
+// signed out (syncStarted false), so they never need removing.
+function registerLifecycleHooks() {
+  if (lifecycleHooksRegistered) return;
+  lifecycleHooksRegistered = true;
+  if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+  }
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('focus', resyncWatchedTables);
+    window.addEventListener('online', resyncWatchedTables);
+  }
+}
+
+// Presence / typing rebuilds: same backoff discipline as the table
+// channels, minus the refetch (these channels carry no data).
+function resetAuxChannelHealth(kind) {
+  const h = auxChannelHealth[kind];
+  h.failures = 0;
+  if (h.timer) { clearTimeout(h.timer); h.timer = null; }
+}
+
+function scheduleAuxChannelRebuild(kind, ch) {
+  if (!syncStarted) return;
+  const current = kind === 'presence' ? presenceChannel : typingChannel;
+  if (current !== ch) return; // stale channel (replaced or torn down)
+  const h = auxChannelHealth[kind];
+  if (h.timer) return;
+  const delay = channelBackoffMs(h.failures);
+  h.failures += 1;
+  h.timer = setTimeout(() => {
+    h.timer = null;
+    if (!syncStarted) return;
+    if (kind === 'presence') {
+      if (presenceChannel) { dropSyncChannel(presenceChannel); presenceChannel = null; }
+      startPresenceChannel();
+    } else {
+      if (typingChannel) { dropSyncChannel(typingChannel); typingChannel = null; }
+      startTypingChannel();
+    }
+  }, delay);
+  unrefTimer(h.timer);
+}
+
 function watchTable(table, refetch) {
   if (!tableRefetchers.has(table)) tableRefetchers.set(table, new Set());
   tableRefetchers.get(table).add(refetch);
   if (channelByTable.has(table)) return;
-  const ch = supabase.channel(`mb-sync-${table}`)
-    .on('postgres_changes', { event: '*', schema: 'public', table }, () => scheduleTableRefetch(table))
-    .subscribe();
-  channelByTable.set(table, ch);
-  syncChannels.push(ch);
+  createTableChannel(table);
 }
 
 function stopRemoteSync() {
+  // syncStarted flips FIRST: the removeChannel calls below make the
+  // dying channels report CLOSED, and the recovery handlers must
+  // read those as our own teardown, never as failures to rebuild.
+  // Pending rebuild timers and the safety net die with the session
+  // too — nothing may resurrect a channel for the next account.
+  syncStarted = false;
+  stopSafetyNet();
+  for (const h of channelHealth.values()) { if (h.timer) clearTimeout(h.timer); }
+  channelHealth.clear();
+  for (const kind of Object.keys(auxChannelHealth)) resetAuxChannelHealth(kind);
   for (const ch of syncChannels) {
     try { supabase.removeChannel(ch); } catch { /* already gone */ }
   }
@@ -666,7 +888,6 @@ function stopRemoteSync() {
   typingChannel = null;
   presenceChannel = null;
   typingState.clear();
-  syncStarted = false;
   syncUid = '';
   // Per-session state must not leak into the next account on this tab:
   // the bot-secrets loaded flag (a fresh admin would never re-read the
@@ -696,14 +917,23 @@ function stopRemoteSync() {
 // ---------------------------------------------------------------------------
 function startPresenceChannel() {
   if (!supabase || !remoteUid) return;
-  presenceChannel = supabase.channel('meetbook-presence', { config: { presence: { key: remoteUid } } });
-  presenceChannel.on('presence', { event: 'sync' }, () => applyPresenceState());
-  presenceChannel.subscribe((status) => {
+  const ch = supabase.channel('meetbook-presence', { config: { presence: { key: remoteUid } } });
+  presenceChannel = ch;
+  ch.on('presence', { event: 'sync' }, () => applyPresenceState());
+  ch.subscribe((status) => {
     if (status === 'SUBSCRIBED') {
-      presenceChannel.track({ online_at: Date.now() }).catch(() => {});
+      resetAuxChannelHealth('presence');
+      // Track only while this channel is still the live session's
+      // presence channel — a late SUBSCRIBED from a torn-down
+      // channel must not resurrect a dead session's presence.
+      if (syncStarted && presenceChannel === ch) {
+        ch.track({ online_at: Date.now() }).catch(() => {});
+      }
+    } else if (isChannelFailure(status)) {
+      scheduleAuxChannelRebuild('presence', ch);
     }
   });
-  syncChannels.push(presenceChannel);
+  syncChannels.push(ch);
 }
 
 function applyPresenceState() {
@@ -732,10 +962,14 @@ function applyPresenceState() {
 // ---------------------------------------------------------------------------
 function startTypingChannel() {
   if (!supabase) return;
-  typingChannel = supabase.channel('meetbook-typing');
-  typingChannel.on('broadcast', { event: 'typing' }, ({ payload }) => handleTypingBroadcast(payload));
-  typingChannel.subscribe();
-  syncChannels.push(typingChannel);
+  const ch = supabase.channel('meetbook-typing');
+  typingChannel = ch;
+  ch.on('broadcast', { event: 'typing' }, ({ payload }) => handleTypingBroadcast(payload));
+  ch.subscribe((status) => {
+    if (status === 'SUBSCRIBED') resetAuxChannelHealth('typing');
+    else if (isChannelFailure(status)) scheduleAuxChannelRebuild('typing', ch);
+  });
+  syncChannels.push(ch);
 }
 
 function handleTypingBroadcast(payload) {
@@ -754,15 +988,19 @@ function handleTypingBroadcast(payload) {
 
 function startRemoteSync() {
   if (!live) return;
+  // Realtime recovery hooks (visibility / focus / online resync):
+  // registered once per page load, however often sync restarts.
+  registerLifecycleHooks();
   // Account-switch guard: onAuthStateChanged can fire again (token
   // refresh, a second sign-in) while listeners are already running for
   // THIS user — restarting them would churn the UI. But if the
   // signed-in user CHANGED, the previous user's listeners (some
   // user-scoped) must be replaced.
-  if (syncStarted && syncUid === remoteUid) return;
+  if (syncStarted && syncUid === remoteUid) { startSafetyNet(); return; }
   if (syncStarted) stopRemoteSync();
   syncStarted = true;
   syncUid = remoteUid;
+  startSafetyNet();
   remote = blankRemote();
   const uid = remoteUid;
   // Groups boot-sync tracking (see groupsSyncPending): the three
