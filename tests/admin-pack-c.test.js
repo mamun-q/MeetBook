@@ -266,8 +266,8 @@ describe('adminHealthView', () => {
     recordClientError('Fixture boom error');
     const html = V.adminHealthView(fixtureD, admin, { firebase: false, projectId: 'meetbook-d8a44' });
     expect(html).toContain('meetbook-d8a44');
-    expect(html).toContain('Not deployed — Spark plan');
-    expect(html).toContain('requires the Blaze plan');
+    expect(html).toContain('Not deployed. The bot engine runs from the bot runner');
+    expect(html).toContain('hosted on Cloudinary');
     expect(html).toContain('Document counts only');
     expect(html).toContain('Fixture boom error');
   });

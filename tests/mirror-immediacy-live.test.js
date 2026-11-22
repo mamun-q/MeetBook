@@ -241,9 +241,13 @@ describe('mirror immediacy — reports, blocks, messaging (user session)', () =>
 
   it('toggleBlock mirrors block and unblock at once', async () => {
     expect(await api.toggleBlock('human2')).toBe(true);
-    expect(api.data().blocks.some((b) => b.blockedId === 'human2' && b.blockerId === 'human1')).toBe(true);
+    expect(api.data().blocks.some((b) => b.target === 'human2' && b.by === 'human1')).toBe(true);
+    // The stored row carries exactly the live table's columns
+    // (id/by/target/createdAt) — see tests/blocks-live.test.js.
+    expect(Object.keys(fake.get('blocks', 'human1_human2')).sort()).toEqual(['by', 'createdAt', 'id', 'target']);
     expect(await api.toggleBlock('human2')).toBe(false);
-    expect(api.data().blocks.some((b) => b.blockedId === 'human2')).toBe(false);
+    expect(api.data().blocks.some((b) => b.target === 'human2')).toBe(false);
+    expect(fake.get('blocks', 'human1_human2')).toBeUndefined();
   });
 
   it('createGroupConversation mirrors the new conversation at once', async () => {

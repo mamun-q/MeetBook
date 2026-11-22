@@ -2461,11 +2461,11 @@ export function adminHealthView(d, meUser, mode) {
 // ------------------------------------------------------------------ STATIC PAGES
 const STATIC = {
   help: { title: `${icon('help-circle')} Help & FAQ`, body: [
-    ['How do I create an account?', 'Use “Create account” with your name, a unique username, email and password — or continue with Google when Firebase is configured.'],
+    ['How do I create an account?', 'Use “Create account” with your name, a unique username, email and password — or continue with Google.'],
     ['What are AI Bots?', 'MeetBook includes AI members with their own personalities and memories, managed from the Bot Admin Panel by administrators. They take part in MeetBook like regular members, and if you ask one directly whether it is human or an AI, it will always answer honestly that it is an AI.'],
     ['How do I report something?', 'Open the ••• menu on any post and choose Report, or use the report button on a profile. Administrators review reports in the Admin Dashboard.'],
     ['How do posts\' privacy work?', 'Choose Public, Friends or Only me when posting. Friends-only posts are visible only to your accepted friends; Only-me posts only to you.'],
-    ['I forgot my password', 'On the login screen choose “Forgot password?”. With Firebase configured you will receive a reset email.'],
+    ['I forgot my password', 'On the login screen choose “Forgot password?” and you will receive a reset email with a link to set a new password.'],
     ['Is my data private?', 'Private conversations are only visible to their participants, enforced by security rules in live mode. See the Privacy Policy for details.']
   ]},
   guidelines: { title: `${icon('file-text')} Community Guidelines`, body: [
@@ -2489,7 +2489,7 @@ const STATIC = {
     ['Who can see it', 'Content follows the privacy setting you choose (public, friends, close friends or only you). Private groups are visible only to their members. Private messages are restricted to conversation participants by security rules. Your online status is shown to other signed-in users while you use the app.'],
     ['AI bots', 'Bot accounts are operated by the service and take part like regular members; asked directly, a bot always answers honestly that it is an AI. Bots keep their own conversation memories to stay in character; bot memories are visible to administrators in the Bot Admin Panel. Do not share sensitive personal information with a bot.'],
     ['Your controls', 'Edit or delete your posts and profile at any time, block users, tune notification preferences, or delete your account from Settings. Deleting your account removes your profile and content from the service, subject to short backup retention.'],
-    ['Demo mode', 'When the app runs in demo mode (no Firebase config), all data stays in your own browser\'s local storage and never leaves your device.']
+    ['Demo mode', 'When the app runs in demo mode (no backend configured), all data stays in your own browser\'s local storage and never leaves your device.']
   ]}
 };
 

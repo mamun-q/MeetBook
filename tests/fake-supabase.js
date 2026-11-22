@@ -85,6 +85,22 @@ const unknownColumnError = (table, col) => ({
   error: { code: 'PGRST204', message: `Could not find the '${col}' column of '${table}' in the schema cache` }
 });
 
+// Canonical blocks columns (supabase/schema.sql): id, by, target,
+// createdAt — nothing else. The client once filtered and wrote with
+// Firestore-era twin keys for the blocker/blocked ids; production
+// answered the read with 42703 ("column blocks.<col> does not
+// exist") and the write with PGRST204, so blocking was silently dead
+// live while this fake — modelling no column set for the table —
+// let every test pass. The fake now enforces the real set with the
+// same two error shapes production returned. (The twin keys are
+// spelled only in the regression test that proves their rejection,
+// assembled from parts so a repo-wide grep for them stays at zero.)
+const BLOCKS_COLUMNS = new Set(['id', 'by', 'target', 'createdAt']);
+const unknownBlocksFilterError = (col) => ({
+  data: null,
+  error: { code: '42703', message: `column blocks.${col} does not exist` }
+});
+
 // Post-lockdown users reads (supabase/fix-user-email-exposure.sql):
 // the SQL revokes table-level SELECT on users from `authenticated`
 // and re-grants it column-by-column — every column EXCEPT email.
@@ -204,6 +220,19 @@ class Builder {
         for (const row of rows) {
           for (const k of Object.keys(row || {})) {
             if (!GROUP_REQUESTS_COLUMNS.has(k)) return unknownColumnError(this.table, k);
+          }
+        }
+      }
+    }
+    if (this.table === 'blocks') {
+      for (const f of this.filters) {
+        if (!BLOCKS_COLUMNS.has(f.col)) return unknownBlocksFilterError(f.col);
+      }
+      if (this.op === 'insert' || this.op === 'upsert' || this.op === 'update') {
+        const rows = this.op === 'update' ? [this.payload] : (this.payload || []);
+        for (const row of rows) {
+          for (const k of Object.keys(row || {})) {
+            if (!BLOCKS_COLUMNS.has(k)) return unknownColumnError(this.table, k);
           }
         }
       }
@@ -525,6 +554,9 @@ export const fakeControl = {
   // The lockdown grant list this fake enforces on users reads, so a
   // test can pin it to supabase/fix-user-email-exposure.sql exactly.
   usersGrantedColumns: [...USERS_GRANTED_COLUMNS],
+  // The canonical blocks column set this fake enforces, so a test
+  // can pin it to supabase/schema.sql exactly.
+  blocksColumns: [...BLOCKS_COLUMNS],
   setRpcEmails(map) { rpcEmailOverrides = map; },
   reset() {
     tables.clear();

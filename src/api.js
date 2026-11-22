@@ -1433,7 +1433,7 @@ function startRemoteSync() {
     tier1.push(fetchMessages);
     watchTable('messages', fetchMessages);
 
-    const fetchBlocks = async () => { if (stale()) return; try { setSlice('blocks', await sbSelect('blocks', (q) => q.eq('blockerId', uid))); } catch { /* leave untouched */ } };
+    const fetchBlocks = async () => { if (stale()) return; try { setSlice('blocks', await sbSelect('blocks', (q) => q.eq('by', uid))); } catch { /* leave untouched */ } };
     tier1.push(fetchBlocks);
     watchTable('blocks', fetchBlocks);
 
@@ -2786,9 +2786,9 @@ export async function toggleFollow(targetId) {
 export async function toggleBlock(targetId) {
   const user = me(); if (!user) throw new Error('Sign in first.');
   if (live) {
-    // Deterministic row id ({blocker}_{blocked}); both field spellings
-    // are stored — the RLS helpers key off blockerId/blockedId, the
-    // app reads by/target.
+    // Deterministic row id ({by}_{target}); the live blocks table's
+    // columns are exactly id/by/target/createdAt (supabase/schema.sql)
+    // and its RLS policies key off `by`.
     const blockId = `${user.id}_${targetId}`;
     const existingBlock = await sbGet('blocks', blockId);
     if (existingBlock) {
@@ -2798,7 +2798,7 @@ export async function toggleBlock(targetId) {
       patchMirror((r) => { r.blocks = (r.blocks || []).filter((b) => b.id !== blockId); });
       return false;
     }
-    const row = { id: blockId, by: user.id, target: targetId, blockerId: user.id, blockedId: targetId, createdAt: Date.now() };
+    const row = { id: blockId, by: user.id, target: targetId, createdAt: Date.now() };
     await sbInsert('blocks', row);
     // Mirror the block at once (see the unblock above).
     patchMirror((r) => { (r.blocks = r.blocks || []).push(row); });
