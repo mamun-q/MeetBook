@@ -945,11 +945,30 @@ function startRemoteSync() {
   watchTable('pages', fetchPages);
 
   const mapGroup = (row) => ({ id: row.id, ...normaliseGroup(normaliseTimeFields(row, ['createdAt'])) });
+  // Discovery rows (group_discovery RPC, supabase/group-discovery.sql):
+  // metadata ONLY for groups the other two slices cannot deliver —
+  // above all private groups the user does not belong to, which the
+  // groups SELECT policy hides entirely. The row is shaped so no
+  // consumer can mistake it for a full row: members stays EMPTY,
+  // metaOnly marks it, and memberCount carries the one number the UI
+  // may show. createdBy rides along (the creator is the group's
+  // public admin, and the join-request path addresses its request +
+  // notification to them).
+  const mapDiscoveryGroup = (row) => ({
+    id: row.id,
+    ...normaliseGroup({ ...normaliseTimeFields(row, ['createdAt']), members: [] }),
+    memberCount: Number(row.memberCount) || 0,
+    metaOnly: true
+  });
   let publicGroups = [];
   let memberGroups = [];
+  let discoveryGroups = [];
   const mergeGroups = () => {
     const byIdMap = new Map();
-    for (const g of [...publicGroups, ...memberGroups]) byIdMap.set(g.id, g);
+    // Discovery FIRST: a full row from the public/member slices
+    // always wins over the metadata-only row for the same id, so a
+    // group the user can actually read is never downgraded.
+    for (const g of [...discoveryGroups, ...publicGroups, ...memberGroups]) byIdMap.set(g.id, g);
     const serverGroups = [...byIdMap.values()];
     const serverIds = new Set(serverGroups.map((g) => g.id));
     // Local echoes (see mergePosts): pruned once a slice delivers
@@ -963,9 +982,14 @@ function startRemoteSync() {
   remergeGroups = mergeGroups;
   const fetchPublicGroups = async () => { if (stale()) return; try { publicGroups = (await sbSelect('groups', (q) => q.eq('privacy', 'public').limit(200))).map(mapGroup); mergeGroups(); } catch { /* leave untouched */ } };
   const fetchMemberGroups = async () => { if (stale()) return; try { memberGroups = (await sbSelect('groups', (q) => q.contains('members', [uid]))).map(mapGroup); mergeGroups(); } catch { /* leave untouched */ } };
+  // Fails soft until supabase/group-discovery.sql is applied: the
+  // mirror then simply holds what the two slices above deliver.
+  const fetchDiscoveryGroups = async () => { if (stale()) return; try { discoveryGroups = (await sbRpc('group_discovery')).map(mapDiscoveryGroup); mergeGroups(); } catch { /* leave untouched */ } };
   tier2.push(fetchPublicGroups);
   watchTable('groups', fetchPublicGroups);
   if (uid) { tier2.push(fetchMemberGroups); watchTable('groups', fetchMemberGroups); }
+  tier2.push(fetchDiscoveryGroups);
+  watchTable('groups', fetchDiscoveryGroups);
 
   const fetchBots = async () => { if (stale()) return; try { setSlice('bots', (await sbSelect('bots', (q) => q.order('id', { ascending: true }).limit(100))).map((row) => normaliseBot(normaliseTimeFields(row, ['createdAt'])))); } catch { /* leave untouched */ } };
   tier2.push(fetchBots);
@@ -1851,8 +1875,25 @@ export async function deleteGroup(groupId) {
 // 'withdrawn' so the UI can toast accurately.
 export async function toggleGroupMembership(groupId) {
   const user = me(); if (!user) throw new Error('Sign in to join groups.');
-  const group = (data().groups || []).find((g) => g.id === groupId);
+  let group = (data().groups || []).find((g) => g.id === groupId);
   if (!group) throw new Error('Group not found.');
+  if (live && group.metaOnly && group.privacy !== 'private') {
+    // A metadata-only PUBLIC row (discovery overflow past the public
+    // slice's cap): its members array is empty BY DESIGN, so the
+    // membership write below must never be computed from it. Public
+    // groups are readable by every signed-in user, so fetch the real
+    // row fresh and upgrade the mirror copy while we are here.
+    // (Private metadata-only rows skip this: their path is the
+    // join-request branch, which never touches members.)
+    const fresh = await sbGet('groups', groupId).catch(() => null);
+    if (fresh) {
+      group = { id: fresh.id, ...normaliseGroup(normaliseTimeFields(fresh, ['createdAt'])) };
+      patchMirror((r) => {
+        const i = (r.groups || []).findIndex((x) => x.id === groupId);
+        if (i >= 0) r.groups[i] = group; else (r.groups = r.groups || []).push(group);
+      });
+    }
+  }
   const isMember = (group.members || []).includes(user.id);
   if (group.createdBy === user.id) {
     if (!isMember) return 'joined'; // the creator always counts as a member

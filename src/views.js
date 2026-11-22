@@ -476,6 +476,13 @@ export function friendsView(d, meUser) {
 }
 
 // ------------------------------------------------------------------ GROUPS
+// Member count for a group row: full rows count their members
+// array; metadata-only discovery rows (private groups the viewer
+// does not belong to) carry the server-computed memberCount
+// instead — their members array is empty by design and must never
+// be read as "0 members".
+export const groupMemberCount = (g) => (g.metaOnly ? (g.memberCount || 0) : (g.members || []).length);
+
 export function groupsView(d, meUser, queryText = '') {
   // Private groups are DISCOVERABLE by name/description (Facebook-style)
   // so people can request to join; their posts and member list stay
@@ -488,7 +495,7 @@ export function groupsView(d, meUser, queryText = '') {
     return `<div class="card person-card">
     ${avatarHtml({ name: g.name, username: g.name, avatar: g.cover }, 56)}
     <a href="#/group/${g.id}"><b>${escapeHtml(g.name)}</b></a>
-    <span class="muted small">${g.privacy === 'private' ? '🔒 ' + t('privateLabel') : '🌍 ' + t('publicLabel')} · ${plural((g.members || []).length, t('member'), t('members'))}</span>
+    <span class="muted small">${g.privacy === 'private' ? '🔒 ' + t('privateLabel') : '🌍 ' + t('publicLabel')} · ${plural(groupMemberCount(g), t('member'), t('members'))}</span>
     <span class="muted small">${escapeHtml(truncate(g.description || '', 90))}</span>
     <div class="row gap wrap center">
       ${isGroupMember(g, meUser.id) ? `<span class="badge badge-ok">${t('joined')}</span>` : pendingReq ? `<span class="badge badge-warn">${t('requestPending')}</span>` : `<button class="btn btn-primary btn-sm" data-act="toggle-group-join" data-id="${g.id}">${g.privacy === 'private' ? t('requestToJoin') : t('joinGroup')}</button>`}
@@ -517,13 +524,14 @@ export function groupView(d, meUser, groupId) {
     // join-request action — no posts, no member list.
     const pending = (d.groupRequests || []).find((r) => r.groupId === group.id && r.userId === meUser.id && r.status === 'pending');
     return `<div class="profile-wrap"><div class="card profile-head">
-      <div class="cover"></div>
+      <div class="cover" style="${group.cover ? `background-image:url('${escapeHtml(group.cover)}')` : ''}"></div>
       <div class="profile-meta">
-        ${avatarHtml({ name: group.name, username: group.name, avatar: '' }, 110)}
+        ${avatarHtml({ name: group.name, username: group.name, avatar: group.cover }, 110)}
         <div class="grow">
           <h2>${escapeHtml(group.name)}</h2>
-          <p class="muted">🔒 ${t('privateLabel')} · ${plural((group.members || []).length, t('member'), t('members'))}</p>
+          <p class="muted">🔒 ${t('privateLabel')} · ${plural(groupMemberCount(group), t('member'), t('members'))}</p>
           <p>${escapeHtml(group.description || '')}</p>
+          <p class="muted small">🔒 ${t('privateGroupNotice')}</p>
         </div>
         <div class="row gap wrap">
           ${pending ? `<span class="badge badge-warn">${t('requestPending')}</span><button class="btn btn-ghost" data-act="toggle-group-join" data-id="${group.id}">${t('withdrawRequest')}</button>`
@@ -1116,6 +1124,11 @@ export function searchView(d, meUser, queryText) {
   const byId = usersById(d);
   const blocked = blockedIdsOfData(d, meUser.id);
   const users = q ? d.users.filter((u) => !blocked.has(u.id) && (u.name.toLowerCase().includes(q) || u.username.toLowerCase().includes(q))) : [];
+  // Groups: every group in the mirror is discoverable — private
+  // groups arrive as metadata-only rows and are labelled as such;
+  // their posts and member list stay behind the group page's
+  // member gate, exactly as on the Groups page.
+  const groups = q ? (d.groups || []).filter((g) => (g.name || '').toLowerCase().includes(q) || (g.description || '').toLowerCase().includes(q)) : [];
   const friendIds = friendIdsOfData(d, meUser.id);
   const ctx = viewCtx(d, meUser);
   // Post search covers EVERY loaded post the viewer may see — bot posts,
@@ -1148,6 +1161,8 @@ export function searchView(d, meUser, queryText) {
       else action = `<button class="btn btn-primary btn-sm" data-act="send-request" data-id="${u.id}">${t('addFriend')}</button>`;
       return `<div class="card person-card">${avatarHtml(u, 56)}<a href="#/profile/${u.id}"><b>${escapeHtml(u.name)}</b></a><span class="muted small">@${escapeHtml(u.username)}</span>${mutual > 0 ? `<span class="muted small">${mutual} ${mutual === 1 ? t('mutualFriend') : t('mutualFriends')}</span>` : ''}${action ? `<div class="row gap wrap center">${action}</div>` : ''}</div>`;
     }).join('') || '<p class="muted">No people matched.</p>'}</div>
+    <h3>${t('groups')}</h3>
+    <div class="grid-people">${groups.map((g) => `<div class="card person-card">${avatarHtml({ name: g.name, username: g.name, avatar: g.cover }, 56)}<a href="#/group/${g.id}"><b>${escapeHtml(g.name)}</b></a><span class="muted small">${g.privacy === 'private' ? '🔒 ' + t('privateLabel') : '🌍 ' + t('publicLabel')} · ${plural(groupMemberCount(g), t('member'), t('members'))}</span><div class="row gap wrap center"><a class="btn btn-ghost btn-sm" href="#/group/${g.id}">View</a></div></div>`).join('') || '<p class="muted">No groups matched.</p>'}</div>
     <h3>Posts</h3>
     ${posts.map((p) => postCardHtml(p, ctx)).join('') || '<p class="muted">No posts matched.</p>'}
     <p class="muted small">Searched as ${escapeHtml(byId[meUser.id]?.name || '')} — private content you cannot access is never shown.</p>

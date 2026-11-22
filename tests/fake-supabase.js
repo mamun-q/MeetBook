@@ -6,8 +6,9 @@
 // ignoreDuplicates, update/delete by filter, postgres_changes channel
 // bindings that re-fire only when a table's contents actually change,
 // broadcast + presence channels, Supabase-Auth-shaped auth methods, and
-// the three SECURITY DEFINER RPCs (file_appeal / accept_friendship /
-// join_via_invite) implemented with the same validations as the SQL.
+// the four SECURITY DEFINER RPCs (file_appeal / accept_friendship /
+// join_via_invite / group_discovery) implemented with the same
+// validations as the SQL.
 // No RLS enforcement — policies are reviewed, not executed.
 
 const tables = new Map(); // name -> Map(id -> row)
@@ -319,6 +320,20 @@ async function rpc(name, args = {}) {
     row.status = 'accepted';
     scheduleFlush();
     return { data: structuredClone(row), error: null };
+  }
+  if (name === 'group_discovery') {
+    if (!caller) return rpcError('group_discovery: caller is not signed in');
+    // Mirrors supabase/group-discovery.sql: metadata ONLY — the
+    // members array is never returned, just its cardinality, so a
+    // test can pin that the app never receives member lists here.
+    const rows = [...tableMap('groups').values()]
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .map((g) => ({
+        id: g.id, name: g.name, description: g.description, cover: g.cover,
+        privacy: g.privacy, createdBy: g.createdBy, createdAt: g.createdAt,
+        memberCount: (g.members || []).length
+      }));
+    return { data: structuredClone(rows), error: null };
   }
   if (name === 'join_via_invite') {
     if (!caller) return rpcError('join_via_invite: caller is not signed in');
