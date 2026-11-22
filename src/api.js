@@ -1489,7 +1489,16 @@ export async function togglePinPost(postId) {
   const group = (data().groups || []).find((g) => g.id === post.groupId);
   if (!group || group.createdBy !== user.id) throw new Error('Only the group creator can pin announcements.');
   const pinned = !post.pinned;
-  if (live) { await sbUpdate('posts', postId, { pinned }); return pinned; }
+  if (live) {
+    // Optimistic mirror patch with rollback (the addComment pattern):
+    // the group feed renders the pin from the mirror, so without this
+    // the announcement pin only appeared after the realtime refetch.
+    patchRemotePost(postId, (p) => { p.pinned = pinned; });
+    try {
+      await sbUpdate('posts', postId, { pinned });
+    } catch (err) { patchRemotePost(postId, (p) => { p.pinned = !pinned; }); throw err; }
+    return pinned;
+  }
   mutate((s) => { const p = s.posts.find((x) => x.id === postId); if (p) p.pinned = pinned; });
   return pinned;
 }
@@ -1673,7 +1682,16 @@ export async function reportContent(targetType, targetId, reason, opts = {}) {
     const p = data().posts.find((x) => x.id === targetId);
     if (p?.image) report.targetPhoto = true;
   }
-  if (live) { await sbInsert('reports', { id: genId('rep'), ...report }); return report; }
+  if (live) {
+    const reportId = genId('rep');
+    await sbInsert('reports', { id: reportId, ...report });
+    // Mirror the filed report at once: the filer's Support Inbox
+    // ("My reports") renders from the supportReports slice, so
+    // unpatched a just-filed report was missing from it until the
+    // realtime refetch landed.
+    patchMirror((r) => { (r.supportReports = r.supportReports || []).unshift({ id: reportId, ...report }); });
+    return report;
+  }
   let saved = null;
   mutate((s) => { saved = { id: genId('rep'), ...report }; s.reports.unshift(saved); });
   return saved;
@@ -1719,7 +1737,16 @@ export async function markStoryViewed(storyId) {
   const user = me(); if (!user) return;
   const story = (data().stories || []).find((s) => s.id === storyId);
   if (!story || story.authorId === user.id || (story.views || []).includes(user.id)) return;
-  if (live) { await sbUpdate('stories', storyId, { views: [...(story.views || []), user.id] }); return; }
+  if (live) {
+    const views = [...(story.views || []), user.id];
+    await sbUpdate('stories', storyId, { views });
+    // Mirror the view at once: the story ring's seen state and the
+    // author's viewer list render from the mirror, and the guard
+    // above reads it too — unpatched, every reopen re-wrote the row
+    // and the story kept looking unviewed until the refetch landed.
+    patchMirror((r) => { const st = (r.stories || []).find((x) => x.id === storyId); if (st) st.views = views; });
+    return;
+  }
   mutate((s) => {
     const st = (s.stories || []).find((x) => x.id === storyId);
     if (st && !(st.views || []).includes(user.id)) st.views = [...(st.views || []), user.id];
@@ -1727,7 +1754,17 @@ export async function markStoryViewed(storyId) {
 }
 
 export async function deleteStory(storyId) {
-  if (live) { await sbDelete('stories', storyId); return; }
+  if (live) {
+    await sbDelete('stories', storyId);
+    // Drop the story from the mirror (and any local echo) at once —
+    // the deletePost pattern: the stories rail renders from the
+    // mirror, so an unpatched delete left the story on screen until
+    // the realtime refetch, and a surviving echo would resurrect it
+    // at the next merge.
+    localEchoStories = localEchoStories.filter((s) => s.id !== storyId);
+    patchMirror((r) => { r.stories = (r.stories || []).filter((s) => s.id !== storyId); });
+    return;
+  }
   mutate((s) => { s.stories = (s.stories || []).filter((x) => x.id !== storyId); });
 }
 
@@ -1756,7 +1793,17 @@ export async function createGroup({ name, description, privacy, cover }) {
 }
 
 export async function updateGroup(groupId, patch) {
-  if (live) { await sbUpdate('groups', groupId, patch); return { id: groupId, ...patch }; }
+  if (live) {
+    const updated = await sbUpdate('groups', groupId, patch);
+    // Zero affected rows means the write never landed (the
+    // updateProfile lesson) — surface it instead of toasting
+    // "Group updated." over an unchanged group.
+    if (!updated) throw new Error('That group could not be updated — please try again.');
+    // Mirror the confirmed write at once: group pages and lists
+    // render name/description/cover from the mirror.
+    patchMirror((r) => { const g = (r.groups || []).find((x) => x.id === groupId); if (g) Object.assign(g, patch); });
+    return { id: groupId, ...patch };
+  }
   let updated = null;
   mutate((s) => {
     const g = (s.groups || []).find((x) => x.id === groupId);
@@ -1777,6 +1824,15 @@ export async function deleteGroup(groupId) {
     const rows = await sbSelect('posts', (q) => q.eq('groupId', groupId));
     for (const d of rows) { try { await sbDelete('posts', d.id); } catch { /* foreign post — see note above */ } }
     await sbDelete('groups', groupId);
+    // Mirror the delete at once (the deletePost pattern): the group
+    // and its posts render from the mirror, so unpatched they stayed
+    // listed until the realtime refetch; a surviving local echo
+    // would resurrect the group at the next merge.
+    localEchoGroups = localEchoGroups.filter((g) => g.id !== groupId);
+    patchMirror((r) => {
+      r.groups = (r.groups || []).filter((g) => g.id !== groupId);
+      r.posts = (r.posts || []).filter((p) => p.groupId !== groupId);
+    });
     return true;
   }
   mutate((s) => {
@@ -1807,7 +1863,14 @@ export async function toggleGroupMembership(groupId) {
     const requestId = `${groupId}_${user.id}`;
     if (pending) {
       // Withdraw the pending request.
-      if (live) { await sbDelete('groupRequests', requestId); return 'withdrawn'; }
+      if (live) {
+        await sbDelete('groupRequests', requestId);
+        // Mirror the withdrawal at once: the group page's button
+        // reads the pending request from the mirror, so unpatched it
+        // kept saying "Request pending" until the refetch.
+        patchMirror((r) => { r.groupRequests = (r.groupRequests || []).filter((x) => x.id !== requestId); });
+        return 'withdrawn';
+      }
       mutate((s) => { s.groupRequests = (s.groupRequests || []).filter((r) => r.id !== requestId); });
       return 'withdrawn';
     }
@@ -1818,6 +1881,12 @@ export async function toggleGroupMembership(groupId) {
     const request = { groupId, groupOwnerId: group.createdBy, groupAdminId: group.createdBy, userId: user.id, status: 'pending', createdAt: Date.now() };
     if (live) {
       await sbUpsert('groupRequests', { id: requestId, ...request });
+      // Mirror the request at once (see the withdrawal above): the
+      // button must flip to "Request pending" in the same tap.
+      patchMirror((r) => {
+        const i = (r.groupRequests || []).findIndex((x) => x.id === requestId);
+        if (i >= 0) r.groupRequests[i] = { id: requestId, ...request }; else (r.groupRequests = r.groupRequests || []).push({ id: requestId, ...request });
+      });
       await createNotification({ userId: group.createdBy, type: 'group_request', actorId: user.id, text: `${user.name} asked to join your private group "${group.name}".`, postId: '', conversationId: '', groupId: group.id, read: false, createdAt: Date.now() });
       return 'requested';
     }
@@ -1829,7 +1898,11 @@ export async function toggleGroupMembership(groupId) {
     return 'requested';
   }
   if (live) {
-    await sbUpdate('groups', groupId, { members: isMember ? (group.members || []).filter((m) => m !== user.id) : [...(group.members || []), user.id] });
+    const nextMembers = isMember ? (group.members || []).filter((m) => m !== user.id) : [...(group.members || []), user.id];
+    await sbUpdate('groups', groupId, { members: nextMembers });
+    // Mirror the membership flip at once: the Join/Joined button and
+    // the member count render from the mirror.
+    patchMirror((r) => { const g = (r.groups || []).find((x) => x.id === groupId); if (g) g.members = nextMembers; });
     if (!isMember) await createNotification({ userId: group.createdBy, type: 'group_join', actorId: user.id, text: `${user.name} joined your group "${group.name}".`, postId: '', conversationId: '', groupId: group.id, read: false, createdAt: Date.now() });
     return isMember ? 'left' : 'joined';
   }
@@ -1857,8 +1930,17 @@ export async function respondGroupRequest(requestId, approve) {
   if (request.status !== 'pending') return request.status;
   const status = approve ? 'approved' : 'rejected';
   if (live) {
-    if (approve) await sbUpdate('groups', group.id, { members: [...new Set([...(group.members || []), request.userId])] });
+    const nextMembers = approve ? [...new Set([...(group.members || []), request.userId])] : null;
+    if (approve) await sbUpdate('groups', group.id, { members: nextMembers });
     await sbUpdate('groupRequests', requestId, { status });
+    // Mirror the decision at once: the creator's request queue and
+    // the group's member list render from the mirror, so unpatched
+    // the request stayed "pending" on screen after the decision.
+    patchMirror((r) => {
+      const q = (r.groupRequests || []).find((x) => x.id === requestId);
+      if (q) q.status = status;
+      if (nextMembers) { const g = (r.groups || []).find((x) => x.id === group.id); if (g) g.members = nextMembers; }
+    });
     await createNotification({ userId: request.userId, type: 'group_request_result', actorId: user.id, text: approve ? `Your request to join "${group.name}" was approved.` : `Your request to join "${group.name}" was declined.`, postId: '', conversationId: '', groupId: group.id, read: false, createdAt: Date.now() });
     return status;
   }
@@ -1880,7 +1962,14 @@ export async function removeGroupMember(groupId, memberId) {
   if (!group) throw new Error('Group not found.');
   if (group.createdBy !== user.id) throw new Error('Only the group creator can remove members.');
   if (memberId === group.createdBy) throw new Error('The group creator cannot be removed.');
-  if (live) { await sbUpdate('groups', groupId, { members: (group.members || []).filter((m) => m !== memberId) }); return true; }
+  if (live) {
+    const nextMembers = (group.members || []).filter((m) => m !== memberId);
+    await sbUpdate('groups', groupId, { members: nextMembers });
+    // Mirror the removal at once: the member list renders from the
+    // mirror, so unpatched the removed member stayed listed.
+    patchMirror((r) => { const g = (r.groups || []).find((x) => x.id === groupId); if (g) g.members = nextMembers; });
+    return true;
+  }
   mutate((s) => {
     const g = (s.groups || []).find((x) => x.id === groupId);
     if (g) g.members = (g.members || []).filter((m) => m !== memberId);
@@ -1898,6 +1987,10 @@ export async function createPage({ name, category, about, avatar, cover }) {
   if (live) {
     const pageId = genId('pg');
     await sbInsert('pages', { id: pageId, ...page });
+    // Mirror the confirmed page at once (the createGroup pattern):
+    // "Your pages" renders from the mirror, so unpatched the new
+    // page was invisible to its creator until the realtime refetch.
+    patchMirror((r) => { (r.pages = r.pages || []).unshift({ id: pageId, ...page }); });
     return { id: pageId, ...page };
   }
   const full = { id: genId('pg'), ...page };
@@ -1906,7 +1999,17 @@ export async function createPage({ name, category, about, avatar, cover }) {
 }
 
 export async function updatePage(pageId, patch) {
-  if (live) { await sbUpdate('pages', pageId, patch); return { id: pageId, ...patch }; }
+  if (live) {
+    const updated = await sbUpdate('pages', pageId, patch);
+    // Zero affected rows = the write never landed (the updateProfile
+    // lesson) — surface it instead of toasting "Page updated." over
+    // an unchanged page.
+    if (!updated) throw new Error('That page could not be updated — please try again.');
+    // Mirror the confirmed write at once: page headers render
+    // name/about/avatar from the mirror.
+    patchMirror((r) => { const p = (r.pages || []).find((x) => x.id === pageId); if (p) Object.assign(p, patch); });
+    return { id: pageId, ...patch };
+  }
   let updated = null;
   mutate((s) => {
     const p = (s.pages || []).find((x) => x.id === pageId);
@@ -1920,6 +2023,13 @@ export async function deletePage(pageId) {
     const rows = await sbSelect('posts', (q) => q.eq('pageId', pageId));
     for (const d of rows) await sbDelete('posts', d.id);
     await sbDelete('pages', pageId);
+    // Mirror the delete at once (the deletePost pattern): the page
+    // and its posts render from the mirror, so unpatched they stayed
+    // listed until the realtime refetch.
+    patchMirror((r) => {
+      r.pages = (r.pages || []).filter((p) => p.id !== pageId);
+      r.posts = (r.posts || []).filter((p) => p.pageId !== pageId);
+    });
     return true;
   }
   mutate((s) => {
@@ -2010,7 +2120,15 @@ export async function deleteEvent(eventId) {
   const event = (data().events || []).find((e) => e.id === eventId);
   if (!event) throw new Error('Event not found.');
   if (event.createdBy !== user.id && !isAdmin(user)) throw new Error('Only the event creator can delete this event.');
-  if (live) { await sbDelete('events', eventId); return true; }
+  if (live) {
+    await sbDelete('events', eventId);
+    // Mirror the delete at once (the deletePost pattern): event
+    // lists render from the mirror, and a surviving local echo would
+    // resurrect the event at the next merge.
+    localEchoEvents = localEchoEvents.filter((e) => e.id !== eventId);
+    patchMirror((r) => { r.events = (r.events || []).filter((e) => e.id !== eventId); });
+    return true;
+  }
   mutate((s) => { s.events = (s.events || []).filter((e) => e.id !== eventId); });
   return true;
 }
@@ -2031,7 +2149,19 @@ export async function toggleEventRsvp(eventId, kind) {
     [other]: (event[other] || []).filter((id) => id !== user.id)
   };
   if (live) {
-    await sbUpdate('events', eventId, next);
+    // Optimistic mirror patch with rollback (the engagement
+    // pattern): the Going/Interested buttons and counts render from
+    // the mirror, so unpatched they only flipped on the refetch.
+    // prev is captured BEFORE the patch — `event` IS the mirror
+    // object, so reading it afterwards would "restore" the new lists.
+    const prev = { [kind]: event[kind], [other]: event[other] };
+    patchMirror((r) => { const e = (r.events || []).find((x) => x.id === eventId); if (e) { e[kind] = next[kind]; e[other] = next[other]; } });
+    try {
+      await sbUpdate('events', eventId, next);
+    } catch (err) {
+      patchMirror((r) => { const e = (r.events || []).find((x) => x.id === eventId); if (e) { e[kind] = prev[kind]; e[other] = prev[other]; } });
+      throw err;
+    }
     if (!active && event.createdBy !== user.id) {
       await createNotification({ userId: event.createdBy, type: 'event_rsvp', actorId: user.id, text: `${user.name} is ${kind === 'going' ? 'going to' : 'interested in'} your event "${event.title}".`, postId: '', conversationId: '', eventId: event.id, read: false, createdAt: Date.now() });
     }
@@ -2061,9 +2191,21 @@ export async function saveReview(pageId, { rating, text }) {
   const existing = (data().reviews || []).find((r) => r.pageId === pageId && r.authorId === user.id);
   const review = { pageId, authorId: user.id, rating: value, text: String(text || '').trim().slice(0, 500), createdAt: existing?.createdAt || Date.now() };
   if (live) {
-    if (existing) { await sbUpdate('reviews', existing.id, { rating: review.rating, text: review.text }); return { id: existing.id, ...review }; }
+    if (existing) {
+      const updated = await sbUpdate('reviews', existing.id, { rating: review.rating, text: review.text });
+      // Zero affected rows = the write never landed (the
+      // updateProfile lesson) — don't toast "Review saved." over an
+      // unchanged review.
+      if (!updated) throw new Error('Your review could not be saved — please try again.');
+      // Mirror the confirmed edit at once: the page's review list
+      // and average rating render from the mirror.
+      patchMirror((r) => { const rv = (r.reviews || []).find((x) => x.id === existing.id); if (rv) { rv.rating = review.rating; rv.text = review.text; } });
+      return { id: existing.id, ...review };
+    }
     const reviewId = genId('rev');
     await sbInsert('reviews', { id: reviewId, ...review });
+    // Mirror the new review at once (see the edit branch above).
+    patchMirror((r) => { (r.reviews = r.reviews || []).unshift({ id: reviewId, ...review }); });
     return { id: reviewId, ...review };
   }
   let saved = null;
@@ -2085,7 +2227,13 @@ export async function deleteReview(reviewId) {
   const review = (data().reviews || []).find((r) => r.id === reviewId);
   if (!review) throw new Error('Review not found.');
   if (review.authorId !== user.id && !isAdmin(user)) throw new Error('You can only delete your own review.');
-  if (live) { await sbDelete('reviews', reviewId); return true; }
+  if (live) {
+    await sbDelete('reviews', reviewId);
+    // Mirror the delete at once (the deletePost pattern): the
+    // review list renders from the mirror.
+    patchMirror((r) => { r.reviews = (r.reviews || []).filter((x) => x.id !== reviewId); });
+    return true;
+  }
   mutate((s) => { s.reviews = (s.reviews || []).filter((r) => r.id !== reviewId); });
   return true;
 }
@@ -2257,8 +2405,17 @@ export async function toggleBlock(targetId) {
     // app reads by/target.
     const blockId = `${user.id}_${targetId}`;
     const existingBlock = await sbGet('blocks', blockId);
-    if (existingBlock) { await sbDelete('blocks', blockId); return false; }
-    await sbInsert('blocks', { id: blockId, by: user.id, target: targetId, blockerId: user.id, blockedId: targetId, createdAt: Date.now() });
+    if (existingBlock) {
+      await sbDelete('blocks', blockId);
+      // Mirror the unblock at once: blocked-state UI (profile
+      // buttons, feed filtering) reads the mirror's blocks slice.
+      patchMirror((r) => { r.blocks = (r.blocks || []).filter((b) => b.id !== blockId); });
+      return false;
+    }
+    const row = { id: blockId, by: user.id, target: targetId, blockerId: user.id, blockedId: targetId, createdAt: Date.now() };
+    await sbInsert('blocks', row);
+    // Mirror the block at once (see the unblock above).
+    patchMirror((r) => { (r.blocks = r.blocks || []).push(row); });
     return true;
   }
   let blocked = false;
@@ -2357,6 +2514,11 @@ export async function createGroupConversation({ title, memberIds }) {
   if (live) {
     const convId = genId('conv');
     await sbInsert('conversations', { id: convId, ...conv });
+    // Mirror it at once (openConversation's get-or-create does the
+    // same): the caller navigates straight into the new thread,
+    // which renders from the mirror — unpatched it showed as
+    // missing until the realtime refetch landed.
+    mirrorConversation({ id: convId, ...conv });
     return { id: convId, ...conv };
   }
   const full = { id: genId('conv'), ...conv };
@@ -2449,7 +2611,27 @@ export async function markConversationRead(conversationId) {
   const user = me(); if (!user) return;
   if (live) {
     const mine = data().messages.filter((m) => m.conversationId === conversationId && !m.readBy?.includes(user.id));
-    for (const m of mine) await sbUpdate('messages', m.id, { readBy: [...new Set([...(m.readBy || []), user.id])], status: 'read' });
+    const done = [];
+    try {
+      for (const m of mine) {
+        await sbUpdate('messages', m.id, { readBy: [...new Set([...(m.readBy || []), user.id])], status: 'read' });
+        done.push(m.id);
+      }
+    } finally {
+      // Mirror the read state at once — one patch for the whole
+      // batch: unread badges and read receipts render from the
+      // mirror, so unpatched they stayed stale until the messages
+      // refetch (the markAllNotificationsRead lesson). `finally` so
+      // the writes that DID land still reflect if a later one fails.
+      if (done.length) {
+        const doneIds = new Set(done);
+        patchMirror((r) => {
+          for (const m of r.messages || []) {
+            if (doneIds.has(m.id)) { m.readBy = [...new Set([...(m.readBy || []), user.id])]; m.status = 'read'; }
+          }
+        });
+      }
+    }
     return;
   }
   mutate((s) => {
@@ -2826,14 +3008,26 @@ export async function joinConversationByCode(code) {
     // ONLY the caller, and returns the conversation id — being
     // already a member is a no-op success there too, exactly like
     // the branch this replaces.
+    let convId;
     try {
-      return await sbRpc('join_via_invite', { p_code: clean });
+      convId = await sbRpc('join_via_invite', { p_code: clean });
     } catch (err) {
       if (/invite code not found|conversation not found/i.test(String(err?.message || ''))) {
         throw new Error('That invite link is not valid.');
       }
       throw err;
     }
+    // The caller navigates straight into the joined conversation,
+    // which renders from the mirror — but the joiner was not a
+    // participant until now, so no slice has ever delivered it.
+    // Force the fresh read that lands it in the mirror (the
+    // openConversation pattern); best-effort, the join itself has
+    // already succeeded and the refetch would land it eventually.
+    try {
+      const row = await sbGet('conversations', convId);
+      if (row) mirrorConversation(normaliseTimeFields(row, ['createdAt']));
+    } catch { /* join already succeeded — see note above */ }
+    return convId;
   }
   const conv = data().conversations.find((c) => c.joinCode === clean);
   if (!conv) throw new Error('That invite link is not valid.');
@@ -2991,6 +3185,10 @@ export async function logAdminAction(action, target = {}, reason = '') {
     try {
       const entryId = genId('alog');
       await sbInsert('adminLogs', { id: entryId, ...entry });
+      // Mirror the entry at once: the Admin Logs view renders from
+      // the mirror, so unpatched an admin's own just-taken action
+      // was missing from the log until the realtime refetch.
+      patchMirror((r) => { (r.adminLogs = r.adminLogs || []).unshift({ id: entryId, ...entry }); });
       return { id: entryId, ...entry };
     } catch { return null; /* audit is best-effort live; the action already happened */ }
   }
@@ -3025,7 +3223,17 @@ function requireUserManager(userId, { superOnly = false } = {}) {
 }
 
 async function writeUserPatch(userId, patch) {
-  if (live) { await sbUpdate('users', userId, patch); return; }
+  if (live) {
+    const updated = await sbUpdate('users', userId, patch);
+    // Zero affected rows = the write never landed (the updateProfile
+    // lesson) — surface it instead of auditing a change that did not
+    // happen and toasting success over an unchanged user.
+    if (!updated) throw new Error('That user could not be updated — please try again.');
+    // Mirror the confirmed write at once: the admin Users list
+    // renders role/status/verified from the mirror.
+    patchMirror((r) => { const u = r.users.find((x) => x.id === userId); if (u) Object.assign(u, patch); });
+    return;
+  }
   mutate((s) => { const u = s.users.find((x) => x.id === userId); if (u) Object.assign(u, patch); });
 }
 
@@ -3075,6 +3283,14 @@ export async function adminDeleteUser(userId, reason = '') {
     const rows = await sbSelect('posts', (q) => q.eq('authorId', userId));
     for (const d of rows) { try { await sbDelete('posts', d.id); } catch { /* best-effort cleanup */ } }
     await sbDelete('users', userId);
+    // Mirror the deletion at once (the deletePost pattern): the
+    // admin Users list and every feed render from the mirror, so
+    // unpatched the deleted user and their posts stayed visible
+    // until the realtime refetch.
+    patchMirror((r) => {
+      r.users = r.users.filter((u) => u.id !== userId);
+      r.posts = (r.posts || []).filter((p) => p.authorId !== userId);
+    });
   } else {
     mutate((s) => {
       s.users = s.users.filter((u) => u.id !== userId);
@@ -3166,7 +3382,22 @@ async function sendSupportNotification(userId, actor, type, text) {
 }
 
 async function writeReportPatch(reportId, patch) {
-  if (live) { await sbUpdate('reports', reportId, patch); return; }
+  if (live) {
+    await sbUpdate('reports', reportId, patch);
+    // Mirror the confirmed write at once — in BOTH report slices:
+    // the staff Reports Center renders from `reports`, the author's
+    // Support Inbox from `supportReports`, and the same row can sit
+    // in either (or both) depending on whose session this is.
+    // Unpatched, decisions and appeal outcomes only appeared after
+    // the realtime refetch.
+    patchMirror((r) => {
+      for (const list of [r.reports, r.supportReports]) {
+        const rep = (list || []).find((x) => x.id === reportId);
+        if (rep) Object.assign(rep, patch);
+      }
+    });
+    return;
+  }
   mutate((s) => { const r = s.reports.find((x) => x.id === reportId); if (r) Object.assign(r, patch); });
 }
 
@@ -3193,7 +3424,12 @@ export async function adminDecideReport(reportId, decision, { reason = '', outco
     if (finalOutcome === 'content-removed') {
       if (rep.targetType === 'post') await deletePost(rep.targetId);
       else if (rep.targetType === 'message') {
-        if (live) await sbDelete('messages', rep.targetId);
+        if (live) {
+          await sbDelete('messages', rep.targetId);
+          // Mirror the removal at once (the deletePost pattern):
+          // staff inboxes render messages from the mirror.
+          patchMirror((r) => { r.messages = (r.messages || []).filter((m) => m.id !== rep.targetId); });
+        }
         else mutate((s) => { s.messages = s.messages.filter((m) => m.id !== rep.targetId); });
       }
     } else if (finalOutcome === 'user-warned') {
@@ -3289,6 +3525,16 @@ export async function appealReport(reportId, text = '') {
     // appeal server-side, then writes ONLY the appeal object. It
     // returns the appeal it stored (same shape as the local one).
     const filed = await sbRpc('file_appeal', { p_report_id: reportId, p_text: appeal.text });
+    // Mirror the filed appeal at once: the author's Support Inbox
+    // renders the appeal status from the mirror, so unpatched the
+    // inbox kept offering the appeal form (and hid the "appeal
+    // filed" state) until the realtime refetch landed.
+    patchMirror((r) => {
+      for (const list of [r.reports, r.supportReports]) {
+        const rep = (list || []).find((x) => x.id === reportId);
+        if (rep) rep.appeal = filed || appeal;
+      }
+    });
     return filed || appeal;
   }
   await writeReportPatch(reportId, { appeal });
@@ -3296,7 +3542,13 @@ export async function appealReport(reportId, text = '') {
 }
 
 export async function adminSetMaintenance(enabled) {
-  if (live) { await sbUpsert('config', { id: 'app', maintenanceMode: enabled }); }
+  if (live) {
+    await sbUpsert('config', { id: 'app', maintenanceMode: enabled });
+    // Mirror the flag at once: the maintenance gate/banner reads
+    // data().config, so unpatched the admin's own app kept showing
+    // the old state until the config refetch.
+    patchMirror((r) => { r.config = { ...(r.config || {}), maintenanceMode: enabled }; });
+  }
   else mutate((s) => { s.config.maintenanceMode = enabled; });
   await logAdminAction(enabled ? 'maintenance-on' : 'maintenance-off', { type: 'config', id: 'app', label: 'Maintenance mode' });
 }
@@ -3349,6 +3601,18 @@ export async function saveBot(bot) {
     // so a hiccup here (e.g. rules not yet republished) must not break
     // saving the bot's configuration.
     try { await ensureBotUserDoc(saved); } catch { /* healed by the runner */ }
+    // Mirror the saved bot at once (the demo branch's shape): the
+    // Bot Center list, the brain's provider/model stamps and the
+    // bot's public profile all render from the mirror, so unpatched
+    // a created/edited bot only appeared after the realtime refetch.
+    patchMirror((r) => {
+      const i = r.bots.findIndex((x) => x.id === id);
+      if (i >= 0) r.bots[i] = { ...saved }; else r.bots.push({ ...saved });
+      r.botBrains[id] = { botId: id, systemPrompt: saved.personality.systemPrompt, provider: prevBrain.provider || saved.provider || '', model: prevBrain.model || saved.model || '', updatedAt: Date.now() };
+      const ui = r.users.findIndex((u) => u.id === id);
+      if (ui < 0) r.users.push({ id, ...botUserProfile(saved) });
+      else Object.assign(r.users[ui], { name: saved.name, username: saved.username, avatar: saved.avatar, bio: saved.bio });
+    });
     await logAdminAction(existed ? 'bot-update' : 'bot-create', { type: 'bot', id, label: saved.name });
     return saved;
   }
@@ -3380,6 +3644,15 @@ export async function deleteBot(botId, reason = '') {
     await sbDelete('botBrains', botId);
     try { await sbDelete('botMemories', botId); } catch { /* best-effort */ }
     try { await sbDelete('users', botId); } catch { /* best-effort */ }
+    // Mirror the teardown at once (the demo branch's shape): the
+    // Bot Center and the bot's profile render from the mirror, so
+    // unpatched the deleted bot stayed listed until the refetch.
+    patchMirror((r) => {
+      r.bots = r.bots.filter((b) => b.id !== botId);
+      r.users = r.users.filter((u) => u.id !== botId);
+      delete r.botBrains[botId];
+      delete r.botMemories[botId];
+    });
   } else {
     mutate((s) => {
       s.bots = s.bots.filter((b) => b.id !== botId);
@@ -3392,7 +3665,12 @@ export async function deleteBot(botId, reason = '') {
 }
 
 export async function setGlobalBotEnabled(enabled) {
-  if (live) { await sbUpsert('botSettings', { id: 'global', enabled }); }
+  if (live) {
+    await sbUpsert('botSettings', { id: 'global', enabled });
+    // Mirror the kill switch at once: the Bot Center toggle and the
+    // live runner's gate read data().botSettings.global.
+    patchMirror((r) => { r.botSettings.global = { ...(r.botSettings.global || {}), enabled }; });
+  }
   else mutate((s) => { s.botSettings.global.enabled = enabled; });
   await logAdminAction(enabled ? 'bots-enabled' : 'bots-stopped', { type: 'config', id: 'botSettings', label: 'Global bot kill switch' });
 }
@@ -3402,7 +3680,13 @@ export async function addBotMemory(botId, text) {
   if (live) {
     const row = await sbGet('botMemories', botId);
     const items = row ? (row.items || []) : [];
-    await sbUpsert('botMemories', { id: botId, botId, items: [...items, entry] });
+    const nextItems = [...items, entry];
+    await sbUpsert('botMemories', { id: botId, botId, items: nextItems });
+    // Mirror the memory list at once: the bot details page renders
+    // memories from the mirror, and loadBotAdminData is cached per
+    // bot for the session — unpatched, an added memory never showed
+    // until a full reload.
+    patchMirror((r) => { r.botMemories[botId] = nextItems; });
   } else {
     mutate((s) => { (s.botMemories[botId] = s.botMemories[botId] || []).push(entry); });
   }
@@ -3413,7 +3697,12 @@ export async function addBotMemory(botId, text) {
 export async function deleteBotMemory(botId, memoryId) {
   if (live) {
     const row = await sbGet('botMemories', botId);
-    if (row) await sbUpsert('botMemories', { id: botId, botId, items: (row.items || []).filter((m) => m.id !== memoryId) });
+    if (row) {
+      const nextItems = (row.items || []).filter((m) => m.id !== memoryId);
+      await sbUpsert('botMemories', { id: botId, botId, items: nextItems });
+      // Mirror the removal at once (see addBotMemory).
+      patchMirror((r) => { r.botMemories[botId] = nextItems; });
+    }
   } else {
     mutate((s) => { if (s.botMemories[botId]) s.botMemories[botId] = s.botMemories[botId].filter((m) => m.id !== memoryId); });
   }
@@ -3503,6 +3792,10 @@ export async function createAnnouncement({ title, body }) {
   if (live) {
     const annId = genId('ann');
     await sbInsert('announcements', { id: annId, ...ann });
+    // Mirror the announcement at once: the home banner and the
+    // admin announcement list render from the mirror, so unpatched
+    // a just-published announcement only appeared on the refetch.
+    patchMirror((r) => { (r.announcements = r.announcements || []).unshift({ id: annId, ...ann }); });
     await logAdminAction('announcement-create', { type: 'announcement', id: annId, label: cleanTitle });
     return { id: annId, ...ann };
   }
@@ -3515,7 +3808,12 @@ export async function createAnnouncement({ title, body }) {
 export async function setAnnouncementActive(id, active) {
   requireAnnouncementAdmin();
   const ann = data().announcements.find((a) => a.id === id);
-  if (live) await sbUpdate('announcements', id, { active: Boolean(active) });
+  if (live) {
+    await sbUpdate('announcements', id, { active: Boolean(active) });
+    // Mirror the toggle at once: the home banner renders active
+    // announcements from the mirror.
+    patchMirror((r) => { const a = (r.announcements || []).find((x) => x.id === id); if (a) a.active = Boolean(active); });
+  }
   else mutate((s) => { const a = (s.announcements || []).find((x) => x.id === id); if (a) a.active = Boolean(active); });
   await logAdminAction(active ? 'announcement-activate' : 'announcement-deactivate', { type: 'announcement', id, label: ann?.title || id });
 }
@@ -3523,7 +3821,11 @@ export async function setAnnouncementActive(id, active) {
 export async function deleteAnnouncement(id, reason = '') {
   requireAnnouncementAdmin();
   const ann = data().announcements.find((a) => a.id === id);
-  if (live) await sbDelete('announcements', id);
+  if (live) {
+    await sbDelete('announcements', id);
+    // Mirror the delete at once (the deletePost pattern).
+    patchMirror((r) => { r.announcements = (r.announcements || []).filter((a) => a.id !== id); });
+  }
   else mutate((s) => { s.announcements = (s.announcements || []).filter((a) => a.id !== id); });
   await logAdminAction('announcement-delete', { type: 'announcement', id, label: ann?.title || id }, reason);
 }
@@ -3587,7 +3889,14 @@ export async function adminSavePlatformSettings(patch = {}, reason = '') {
   }
   if (patch.aiPaidApproved !== undefined) clean.aiPaidApproved = Boolean(patch.aiPaidApproved);
   if (!Object.keys(clean).length) throw new Error('Nothing to save.');
-  if (live) await sbUpsert('config', { id: 'app', ...clean });
+  if (live) {
+    await sbUpsert('config', { id: 'app', ...clean });
+    // Mirror the saved settings at once: the header brand, the
+    // registration gate and the AI router's fallback order all read
+    // data().config, so unpatched they kept the old values until
+    // the config refetch landed.
+    patchMirror((r) => { r.config = { ...(r.config || {}), ...clean }; });
+  }
   else mutate((s) => { s.config = { ...s.config, ...clean }; });
   await logAdminAction('settings-save', { type: 'config', id: 'app', label: Object.keys(clean).join(', ') }, reason);
   return clean;
