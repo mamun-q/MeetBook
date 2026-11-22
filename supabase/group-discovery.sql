@@ -18,8 +18,8 @@
 -- "createdBy" is included deliberately: the group creator is the
 -- group's public admin (Facebook shows a private group's admins
 -- too), and the client needs it to address a join request — the
--- groupRequests row denormalises groupOwnerId/groupAdminId from
--- it, and the creator is notified. It identifies ONE person who
+-- groupRequests row denormalises groupOwnerId from it, and the
+-- creator is notified. It identifies ONE person who
 -- is already the group's public face; it exposes nothing about
 -- the other members.
 --

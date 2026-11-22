@@ -70,6 +70,21 @@ function matches(row, filters) {
   return true;
 }
 
+// Canonical groupRequests columns (supabase/schema.sql). PostgREST
+// rejects any write or filter naming another column with PGRST204
+// ("Could not find the '<col>' column of 'groupRequests' in the
+// schema cache"). The fake models that for this one table so a
+// Firestore-era leftover field — the phantom second owner key that
+// silently broke private-group join requests AND the admin request
+// queue in production — fails tests instead of shipping again. (The
+// key itself is spelled only in the regression test that proves its
+// rejection, split so a repo-wide grep for it stays at zero.)
+const GROUP_REQUESTS_COLUMNS = new Set(['id', 'groupId', 'groupOwnerId', 'userId', 'status', 'createdAt']);
+const unknownColumnError = (table, col) => ({
+  data: null,
+  error: { code: 'PGRST204', message: `Could not find the '${col}' column of '${table}' in the schema cache` }
+});
+
 class Builder {
   constructor(table) {
     this.table = table;
@@ -106,6 +121,19 @@ class Builder {
   then(resolve, reject) { return this.execute().then(resolve, reject); }
   async execute() {
     const map = tableMap(this.table);
+    if (this.table === 'groupRequests') {
+      for (const f of this.filters) {
+        if (!GROUP_REQUESTS_COLUMNS.has(f.col)) return unknownColumnError(this.table, f.col);
+      }
+      if (this.op === 'insert' || this.op === 'upsert' || this.op === 'update') {
+        const rows = this.op === 'update' ? [this.payload] : (this.payload || []);
+        for (const row of rows) {
+          for (const k of Object.keys(row || {})) {
+            if (!GROUP_REQUESTS_COLUMNS.has(k)) return unknownColumnError(this.table, k);
+          }
+        }
+      }
+    }
     if (this.op === 'insert' || this.op === 'upsert') {
       // Postgres RETURNING visibility (notifications): the SELECT
       // policy is recipient-or-admin, so an INSERT ... RETURNING a

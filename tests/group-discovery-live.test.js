@@ -112,11 +112,11 @@ describe('group discovery (live mode)', () => {
     expect(row.userId).toBe('human1');
     expect(row.groupId).toBe('gsecret');
     expect(row.status).toBe('pending');
-    // The request is addressed to the creator via BOTH spellings the
-    // schema/RLS key off — resolved from the discovery row's
-    // createdBy, since the full group row is not readable here.
+    // The request is addressed to the creator via groupOwnerId, the
+    // only owner spelling the schema/RLS key off — resolved from the
+    // discovery row's createdBy, since the full group row is not
+    // readable here.
     expect(row.groupOwnerId).toBe('human2');
-    expect(row.groupAdminId).toBe('human2');
     // The creator was notified.
     expect(fake.all('notifications').some((n) => n.userId === 'human2' && n.type === 'group_request')).toBe(true);
     // Toggling again withdraws it.
@@ -140,5 +140,35 @@ describe('group discovery (live mode)', () => {
     expect(search).toContain('Secret Study Circle');
     expect(search).toContain('Private');
     expect(search).not.toContain('SECRET POST TEXT');
+  });
+});
+
+// Regression — the phantom second owner column (live bug, 2026-11-22):
+// groupRequests has exactly ONE owner column (groupOwnerId) in the
+// canonical schema, but the client once ALSO wrote/filtered by a
+// Firestore-era twin key; PostgREST rejected both, so private join
+// requests failed and the creator's queue never loaded. The fake now
+// enforces the canonical column set (PGRST204), and the request test
+// above proves the fixed client passes against the hardened fake.
+// These two pin the hardening itself so it cannot be quietly removed.
+// The phantom key is assembled from parts so a repo-wide grep for it
+// stays at zero — its absence IS the invariant under test.
+const PHANTOM_OWNER_KEY = ['group', 'AdminId'].join('');
+describe('fake groupRequests schema fidelity (PGRST204)', () => {
+  it('rejects a write carrying a non-canonical column', async () => {
+    const { fakeClient } = await import('./fake-supabase.js');
+    const res = await fakeClient.from('groupRequests').upsert({
+      id: 'gx_human1', groupId: 'gx', groupOwnerId: 'human2', [PHANTOM_OWNER_KEY]: 'human2',
+      userId: 'human1', status: 'pending', createdAt: Date.now()
+    });
+    expect(res.error?.code).toBe('PGRST204');
+    expect(res.error?.message).toContain(`Could not find the '${PHANTOM_OWNER_KEY}' column of 'groupRequests'`);
+    expect(fake.get('groupRequests', 'gx_human1')).toBeUndefined();
+  });
+
+  it('rejects a filter on a non-canonical column', async () => {
+    const { fakeClient } = await import('./fake-supabase.js');
+    const res = await fakeClient.from('groupRequests').select('*').eq(PHANTOM_OWNER_KEY, 'human2');
+    expect(res.error?.code).toBe('PGRST204');
   });
 });

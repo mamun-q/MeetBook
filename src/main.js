@@ -4,7 +4,7 @@ import * as api from './api.js';
 import { firebaseReady, firebaseConfig } from './firebase.js';
 import { subscribe as storeSubscribe, mutate as demoMutate } from './store.js';
 import { setLocale, t } from './i18n.js';
-import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError, messageSnippet, focusMovesWithinForm, rsvpToastKey } from './utils.js';
+import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError, messageSnippet, focusMovesWithinForm, rsvpToastKey, isThreadPinned, pickScrollAnchor, anchoredScrollTop, threadRestoreMode } from './utils.js';
 import { toast, clearToasts, openModal, closeModal, confirmModal, adminActionModal, avatarHtml, postCardHtml } from './components.js';
 import { providerById } from './aiProviders.js';
 import { cldImg } from './cloudinary.js';
@@ -160,6 +160,10 @@ function bottomNavHtml(d, user, route, seg) {
 }
 
 export function render() {
+  // Carry the open thread's scroll/UI state across the DOM swap
+  // below (see the thread-stability block): capture BEFORE anything
+  // is rebuilt, restore synchronously after.
+  captureThreadView();
   const d = api.data();
   const user = me();
   const brand = d.config?.platformName || 'MeetBook'; // Platform settings (Pack C)
@@ -249,16 +253,163 @@ export function render() {
     if (openMenu) openMenu.classList.remove('hidden'); else openPostMenuId = '';
   }
 
+  // Restore the open thread's scroll position + composer chrome
+  // SYNCHRONOUSLY, before paint: positioning used to wait for a
+  // 30ms timer, so every rebuild first flashed the top of the
+  // thread and then snapped — the visible "jump".
+  if (route === 'messages') restoreThreadView();
+
   maybeBrowserNotify(d, user);
 }
 
+// ------------------------------------------------------- thread stability
+// render() rebuilds the whole app DOM on every data event, so an open
+// conversation's scroll position must be carried across the swap
+// explicitly. Without this, every rebuild created a fresh #thread-body
+// at scrollTop 0 and a timer snapped it to the bottom 30ms later —
+// the thread visibly jumped up and down on ANY data change (a message
+// arriving in another chat, a typing heartbeat, a like), and a user
+// who had scrolled up to read history was yanked to the tail. The
+// model (pure helpers in utils.js): the view is either PINNED to the
+// bottom or ANCHORED to the message row being read.
+// captureThreadView() runs at the top of render(), before the swap;
+// restoreThreadView() re-applies the position synchronously after it,
+// and setupThread / image loads re-apply it as late layout (message
+// photos have no reserved box, so rows grow as they load) settles.
+// A passive scroll listener keeps the intent current between renders,
+// so panel toggles and image loads never re-apply a stale position.
+let threadIntent = null; // { convId, pinned, anchor, scrollTop }
+let threadChrome = null; // { convId, panels, convSearch, convListTop }
+// Unsent composer text per conversation, tracked from the input
+// event: a rebuild wipes the form, and softRender only protects the
+// draft while focus stays inside the input — tapping any composer
+// button (focus moves to the button) used to risk losing it on the
+// next data event.
+const composerDrafts = new Map();
+
+function measureThreadRows(el) {
+  const box = el.getBoundingClientRect();
+  return [...el.querySelectorAll('.msg-row[id]')].map((row) => ({
+    id: row.id.replace(/^msg-/, ''),
+    top: row.getBoundingClientRect().top - box.top + el.scrollTop,
+    height: row.offsetHeight
+  }));
+}
+
+function panelOpen(id) {
+  const p = document.getElementById(id);
+  return p ? !p.classList.contains('hidden') : null;
+}
+
+function setPanelOpen(id, open) {
+  if (open == null) return;
+  const p = document.getElementById(id);
+  if (p) p.classList.toggle('hidden', !open);
+}
+
+function captureThreadView() {
+  const el = document.getElementById('thread-body');
+  const convId = document.getElementById('message-form')?.dataset.conv || '';
+  if (el && el.clientHeight > 0) {
+    const pinned = isThreadPinned(el);
+    threadIntent = {
+      convId, pinned,
+      anchor: pinned ? null : pickScrollAnchor(measureThreadRows(el), el.scrollTop),
+      scrollTop: el.scrollTop
+    };
+  } else if (!el) {
+    // No thread on screen (another route, logged out): the next open
+    // is a FRESH open and must land on the latest message.
+    threadIntent = null;
+  }
+  threadChrome = {
+    convId,
+    panels: { emoji: panelOpen('emoji-panel'), sticker: panelOpen('sticker-panel'), tray: panelOpen('composer-tray') },
+    convSearch: document.getElementById('conv-search')?.value ?? null,
+    convListTop: document.querySelector('.conv-list')?.scrollTop ?? null
+  };
+}
+
+// Apply the captured scroll intent to the live thread. Used after a
+// rebuild and whenever late layout settles (image loads, panel
+// toggles) — the intent itself is kept current by captureThreadView
+// and the scroll listener, never re-read from a layout that a just
+// loaded image may have already stretched.
+function applyThreadScroll() {
+  const el = document.getElementById('thread-body');
+  if (!el || el.clientHeight === 0) return;
+  const convId = document.getElementById('message-form')?.dataset.conv || '';
+  if (threadRestoreMode(threadIntent, convId) === 'bottom') {
+    el.scrollTop = el.scrollHeight;
+    return;
+  }
+  const top = anchoredScrollTop(measureThreadRows(el), threadIntent.anchor);
+  el.scrollTop = top != null ? top : Math.min(threadIntent.scrollTop || 0, el.scrollHeight);
+}
+
+function restoreThreadView() {
+  applyThreadScroll();
+  const s = threadChrome;
+  if (!s) return;
+  const list = document.querySelector('.conv-list');
+  if (list && s.convListTop != null) list.scrollTop = s.convListTop;
+  const convId = document.getElementById('message-form')?.dataset.conv || '';
+  if (s.convId === convId) {
+    const input = document.querySelector('#message-form input[name="text"]');
+    const draft = composerDrafts.get(convId);
+    if (input && draft && input.value !== draft) input.value = draft;
+    setPanelOpen('emoji-panel', s.panels.emoji);
+    setPanelOpen('sticker-panel', s.panels.sticker);
+    setPanelOpen('composer-tray', s.panels.tray);
+  }
+  const cs = document.getElementById('conv-search');
+  if (cs && s.convSearch != null && cs.value !== s.convSearch) {
+    cs.value = s.convSearch;
+    applyConvListFilter(cs);
+  }
+}
+
+// Passive scroll listener (installed by setupThread): keeps the
+// intent describing the position the user is actually looking at, so
+// a later applyThreadScroll never snaps back to a pre-scroll spot.
+// Programmatic scrolls fire it too — they recompute the intent from
+// the position just applied, which is the same intent (stable).
+function refreshThreadIntent(e) {
+  const el = e.currentTarget;
+  if (!el || el.clientHeight === 0) return;
+  const pinned = isThreadPinned(el);
+  threadIntent = {
+    convId: document.getElementById('message-form')?.dataset.conv || '',
+    pinned,
+    anchor: pinned ? null : pickScrollAnchor(measureThreadRows(el), el.scrollTop),
+    scrollTop: el.scrollTop
+  };
+}
+
+// Explicit go-to-the-tail (own send, quick-emoji, poll create): jump
+// now AND pin the intent, so following re-renders keep the tail in
+// view instead of restoring a pre-send reading position.
 function scrollThread() {
   const el = document.getElementById('thread-body');
-  if (el) el.scrollTop = el.scrollHeight;
+  if (!el) return;
+  el.scrollTop = el.scrollHeight;
+  threadIntent = {
+    convId: document.getElementById('message-form')?.dataset.conv || '',
+    pinned: true, anchor: null, scrollTop: el.scrollTop
+  };
 }
 
 function setupThread() {
-  scrollThread();
+  restoreThreadView();
+  const threadEl = document.getElementById('thread-body');
+  if (threadEl) {
+    threadEl.addEventListener('scroll', refreshThreadIntent, { passive: true });
+    // Message photos have no reserved dimensions: when one finishes
+    // loading it grows its row (and the thread). Re-applying the
+    // intent keeps a pinned view glued to the tail and an anchored
+    // view on the same message at the same offset.
+    threadEl.addEventListener('load', (e) => { if (e.target?.tagName === 'IMG') applyThreadScroll(); }, true);
+  }
   // Voice messages need MediaRecorder + getUserMedia; hide the mic
   // button entirely where they are unavailable.
   const btn = document.getElementById('voice-btn');
@@ -703,7 +854,13 @@ document.addEventListener('click', async (e) => {
   const emojiBtn = e.target.closest('[data-emoji-insert]');
   if (emojiBtn) {
     const input = document.querySelector('#message-form input[name="text"]');
-    if (input) { input.value += emojiBtn.dataset.emojiInsert; input.focus(); }
+    if (input) {
+      input.value += emojiBtn.dataset.emojiInsert;
+      input.focus();
+      // Programmatic edit — no input event fires, so sync the draft.
+      const convId = document.getElementById('message-form')?.dataset.conv;
+      if (convId) composerDrafts.set(convId, input.value);
+    }
     return;
   }
 
@@ -770,8 +927,8 @@ document.addEventListener('click', async (e) => {
       if (ta) ta.placeholder = t('whatsOnYourMind');
       break;
     }
-    case 'emoji-toggle': { const panel = document.getElementById('emoji-panel'); panel?.classList.toggle('hidden'); if (panel && !panel.classList.contains('hidden')) scrollThread(); break; }
-    case 'composer-more': { const tray = document.getElementById('composer-tray'); tray?.classList.toggle('hidden'); if (tray && !tray.classList.contains('hidden')) scrollThread(); break; }
+    case 'emoji-toggle': { const panel = document.getElementById('emoji-panel'); panel?.classList.toggle('hidden'); if (panel && !panel.classList.contains('hidden')) applyThreadScroll(); break; }
+    case 'composer-more': { const tray = document.getElementById('composer-tray'); tray?.classList.toggle('hidden'); if (tray && !tray.classList.contains('hidden')) applyThreadScroll(); break; }
     // ---- Chat Pack: conversation info / themes / reply / reactions / pins
     case 'conv-info': {
       // The open state lives in uiState (keyed by conversation) so a
@@ -882,7 +1039,7 @@ document.addEventListener('click', async (e) => {
     case 'msg-react': await handle(api.toggleMessageReaction(actEl.dataset.id, actEl.dataset.emoji)); break;
     // ---- Fun Pack: stickers, location, chat polls, any-emoji reactions, nicknames
     case 'react-more': { document.querySelectorAll('.msg-picker-more').forEach((p) => { if (p.id !== `msg-picker-more-${actEl.dataset.id}`) p.classList.add('hidden'); }); document.getElementById(`msg-picker-more-${actEl.dataset.id}`)?.classList.toggle('hidden'); break; }
-    case 'sticker-toggle': { const panel = document.getElementById('sticker-panel'); panel?.classList.toggle('hidden'); if (panel && !panel.classList.contains('hidden')) scrollThread(); break; }
+    case 'sticker-toggle': { const panel = document.getElementById('sticker-panel'); panel?.classList.toggle('hidden'); if (panel && !panel.classList.contains('hidden')) applyThreadScroll(); break; }
     case 'send-sticker': { const convId = document.getElementById('message-form')?.dataset.conv; if (convId) { await handle(api.sendMessage(convId, { sticker: actEl.dataset.emoji })); render(); scrollThread(); } break; }
     case 'send-location': {
       const convId = document.getElementById('message-form')?.dataset.conv;
@@ -1486,7 +1643,12 @@ document.addEventListener('submit', async (e) => {
     }
     const text = String(fd.get('text') || '');
     const replyToId = replyTarget && replyTarget.convId === convId ? replyTarget.id : '';
-    const sent = await handle(api.sendMessage(convId, { text, image, replyToId, file: chatFile }));
+    // Clear the tracked draft the moment the send lands — BEFORE
+    // handle()'s re-render, or the restore would resurrect the sent
+    // text as a "draft". On failure the draft survives and the
+    // restore puts it back in the rebuilt composer.
+    const sent = await handle(api.sendMessage(convId, { text, image, replyToId, file: chatFile })
+      .then((r) => { composerDrafts.delete(convId); return r; }));
     if (sent) {
       if (replyToId) replyTarget = null; // the re-render rebuilds the (hidden) reply preview
       stopTyping();
@@ -1506,7 +1668,10 @@ document.addEventListener('submit', async (e) => {
               demoMutate((s) => {
                 s.messages.push({ id: genId('m'), conversationId: convId, senderId: otherId, text: reply, image: '', createdAt: Date.now(), status: 'delivered', readBy: [otherId] });
               });
-              render(); scrollThread();
+              // No forced scrollThread(): the reply is an INCOMING
+              // message — render()'s restore keeps a pinned view at
+              // the tail and an anchored (reading) view where it was.
+              render();
             }
           }, 900);
         }
@@ -1792,9 +1957,10 @@ document.addEventListener('meetbook:route', () => {});
 // Conversation-list search: pure DOM filter over the rendered conv items
 // (matched on the other person's name, stored lowercase in data-search),
 // so typing never triggers a re-render that would lose input focus.
-document.addEventListener('input', (e) => {
-  if (e.target.id !== 'conv-search') return;
-  const q = e.target.value.trim().toLowerCase();
+// Named so restoreThreadView can re-apply the filter after a rebuild
+// restores the search text (a rebuild used to wipe both).
+function applyConvListFilter(input) {
+  const q = input.value.trim().toLowerCase();
   document.querySelectorAll('.conv-item[data-search]').forEach((el) => {
     // Hide the whole row WRAP: the ⋯ menu button is a sibling of the
     // .conv-item inside .conv-item-wrap, and hiding only the item left
@@ -1802,6 +1968,10 @@ document.addEventListener('input', (e) => {
     const row = el.closest('.conv-item-wrap') || el;
     row.style.display = !q || (el.dataset.search || '').includes(q) ? '' : 'none';
   });
+}
+document.addEventListener('input', (e) => {
+  if (e.target.id !== 'conv-search') return;
+  applyConvListFilter(e.target);
 });
 
 // @mention picker (Useful Pack): while typing in a GROUP thread, an
@@ -1854,10 +2024,15 @@ document.addEventListener('input', (e) => {
 
 // Chat Pack typing heartbeat: keystrokes in the composer refresh my
 // typing entry (throttled inside noteTyping); emptying the input or
-// leaving it clears the entry right away.
+// leaving it clears the entry right away. The same listener tracks
+// the unsent draft per conversation (see composerDrafts above).
 document.addEventListener('input', (e) => {
   if (!e.target.matches?.('#message-form input[name="text"]')) return;
   const convId = document.getElementById('message-form')?.dataset.conv;
+  if (convId) {
+    if (e.target.value) composerDrafts.set(convId, e.target.value);
+    else composerDrafts.delete(convId);
+  }
   if (e.target.value) noteTyping(convId); else stopTyping();
 });
 document.addEventListener('focusout', (e) => {

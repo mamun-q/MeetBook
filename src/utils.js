@@ -973,6 +973,50 @@ export function focusMovesWithinForm(currentFormId, nextFormId) {
   return Boolean(currentFormId) && currentFormId === nextFormId;
 }
 
+// ------------------------------------------------------------ thread scroll
+// Messenger thread stability: the app re-renders by rebuilding the
+// whole DOM, so an open conversation's scroll position survives only
+// if main.js captures it before the swap and restores it after. The
+// DECISIONS live here as pure functions over plain measurements
+// ({ id, top, height } rows, tops relative to the scroll container's
+// content origin) so they are unit-testable without a DOM; main.js
+// only measures and applies.
+//
+// The model is the standard chat one: the view is either PINNED to
+// the tail (the user is at the bottom — new messages keep it glued
+// there) or ANCHORED to the message row the user is reading (the
+// first row whose bottom edge is past scrollTop, plus the offset of
+// scrollTop inside that row). While anchored, NOTHING may move the
+// view: a re-render restores exactly that row at exactly that offset,
+// even when rows above it changed height (images loading in).
+export const THREAD_PIN_THRESHOLD_PX = 48;
+
+export function isThreadPinned({ scrollTop, scrollHeight, clientHeight }) {
+  return scrollHeight - scrollTop - clientHeight <= THREAD_PIN_THRESHOLD_PX;
+}
+
+export function pickScrollAnchor(rows, scrollTop) {
+  for (const r of rows || []) {
+    if (r.top + r.height > scrollTop) return { id: r.id, offset: scrollTop - r.top };
+  }
+  return null;
+}
+
+export function anchoredScrollTop(rows, anchor) {
+  if (!anchor) return null;
+  const row = (rows || []).find((r) => r.id === anchor.id);
+  return row ? row.top + anchor.offset : null;
+}
+
+// What a (re)built thread should do with its scroll position:
+// 'bottom' for a fresh conversation (or one the user left pinned),
+// 'anchor' when a captured reading position exists for THIS
+// conversation.
+export function threadRestoreMode(captured, convId) {
+  if (!captured || captured.convId !== convId || captured.pinned) return 'bottom';
+  return 'anchor';
+}
+
 // The displayable body of a page review. The create path stores the
 // text under `text` (form field -> saveReview -> doc), and that is
 // the canonical field; tolerate legacy docs written as body/comment

@@ -86,7 +86,7 @@ beforeAll(async () => {
   fake.seed('groups', 'g3', groupRow('Group Three', 'public', 'human2', ['human2']));
   fake.seed('groups', 'g4', groupRow('Group Four', 'private', 'human1', ['human1']));
   fake.seed('groups', 'g_del', groupRow('Doomed Group', 'public', 'human1', ['human1']));
-  const reqRow = (userId) => ({ groupId: 'g4', groupOwnerId: 'human1', groupAdminId: 'human1', userId, status: 'pending', createdAt: Date.now() - 60_000 });
+  const reqRow = (userId) => ({ groupId: 'g4', groupOwnerId: 'human1', userId, status: 'pending', createdAt: Date.now() - 60_000 });
   fake.seed('groupRequests', 'g4_human2', reqRow('human2'));
   fake.seed('groupRequests', 'g4_human3', reqRow('human3'));
 

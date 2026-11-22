@@ -191,12 +191,16 @@ function patchRemoteMessage(messageId, apply) {
   return msg;
 }
 
-function patchRemoteConversation(convId, apply) {
+function patchRemoteConversation(convId, apply, opts = {}) {
   if (!live || !remote) return null;
   const conv = remote.conversations.find((c) => c.id === convId);
   if (!conv) return null;
   apply(conv);
-  emitData();
+  // opts.silent mirrors patchRemotePost: typing heartbeats patch
+  // silently because main.js refreshes the typing row on a 1s ticker
+  // — a full re-render per heartbeat rebuilds the open thread and
+  // resets its scroll position (the thread "jump").
+  if (!opts.silent) emitData();
   return conv;
 }
 
@@ -728,7 +732,7 @@ function handleTypingBroadcast(payload) {
   if (payload.isTyping) next[userId] = Date.now(); else delete next[userId];
   typingState.set(conversationId, next);
   if (stableStringify(conv.typing || {}) !== stableStringify(next)) {
-    patchRemoteConversation(conversationId, (c) => { c.typing = next; });
+    patchRemoteConversation(conversationId, (c) => { c.typing = next; }, { silent: true });
   }
 }
 
@@ -1104,7 +1108,7 @@ function startRemoteSync() {
       patchMirror((r) => { r.groupRequests = next; });
     };
     const fetchMyGroupRequests = async () => { if (stale()) return; try { myGroupRequests = await sbSelect('groupRequests', (q) => q.eq('userId', uid)); mergeGroupRequests(); } catch { /* leave untouched */ } };
-    const fetchAdminGroupRequests = async () => { if (stale()) return; try { adminGroupRequests = await sbSelect('groupRequests', (q) => q.eq('groupAdminId', uid)); mergeGroupRequests(); } catch { /* leave untouched */ } };
+    const fetchAdminGroupRequests = async () => { if (stale()) return; try { adminGroupRequests = await sbSelect('groupRequests', (q) => q.eq('groupOwnerId', uid)); mergeGroupRequests(); } catch { /* leave untouched */ } };
     tier1.push(fetchMyGroupRequests);
     tier2.push(fetchAdminGroupRequests);
     watchTable('groupRequests', fetchMyGroupRequests);
@@ -1917,9 +1921,9 @@ export async function toggleGroupMembership(groupId) {
     }
     // groupOwnerId is denormalized onto the request so the creator's
     // queue listener + read rule stay provable (no join to the group).
-    // groupAdminId is stored alongside groupOwnerId (the schema keeps
-    // both spellings; the RLS insert check keys off groupAdminId).
-    const request = { groupId, groupOwnerId: group.createdBy, groupAdminId: group.createdBy, userId: user.id, status: 'pending', createdAt: Date.now() };
+    // It is the ONLY owner spelling the groupRequests table has — an
+    // extra key in the payload makes PostgREST reject the whole write.
+    const request = { groupId, groupOwnerId: group.createdBy, userId: user.id, status: 'pending', createdAt: Date.now() };
     if (live) {
       await sbUpsert('groupRequests', { id: requestId, ...request });
       // Mirror the request at once (see the withdrawal above): the
@@ -2702,7 +2706,7 @@ export async function setTyping(conversationId, isTyping) {
   if (isTyping) next[user.id] = Date.now(); else delete next[user.id];
   if (live) {
     typingState.set(conversationId, next);
-    patchRemoteConversation(conversationId, (c) => { c.typing = next; });
+    patchRemoteConversation(conversationId, (c) => { c.typing = next; }, { silent: true });
     try { typingChannel?.send({ type: 'broadcast', event: 'typing', payload: { conversationId, userId: user.id, isTyping } }); } catch { /* heartbeat — best effort */ }
     return;
   }
