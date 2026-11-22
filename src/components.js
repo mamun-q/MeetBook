@@ -1,5 +1,5 @@
 // Shared UI components: avatars, toasts, modals, post cards.
-import { escapeHtml, initials, avatarColor, timeAgo, pollResults, feelingByKey, shouldClearToast } from './utils.js';
+import { escapeHtml, initials, avatarColor, timeAgo, pollResults, feelingByKey, shouldClearToast, safeMediaUrl } from './utils.js';
 import { cldImg } from './cloudinary.js';
 import { t } from './i18n.js';
 import { icon, iconFill, hasIcon } from './icons.js';
@@ -85,7 +85,7 @@ export function adminActionModal({ title, body = '', confirmLabel = 'Confirm', d
 
 export function avatarHtml(user, size = 40) {
   if (!user) return '';
-  if (user.avatar) return `<img class="avatar" style="width:${size}px;height:${size}px" src="${escapeHtml(cldImg(user.avatar, Math.min(192, size * 2)))}" alt="${escapeHtml(user.name)}" loading="lazy" decoding="async" />`;
+  if (user.avatar) return `<img class="avatar" style="width:${size}px;height:${size}px" src="${escapeHtml(safeMediaUrl(cldImg(user.avatar, Math.min(192, size * 2))))}" alt="${escapeHtml(user.name)}" loading="lazy" decoding="async" />`;
   return `<span class="avatar avatar-fallback" style="width:${size}px;height:${size}px;background:${avatarColor(user.username || user.name)}" aria-hidden="true">${escapeHtml(initials(user.name))}</span>`;
 }
 
@@ -144,7 +144,7 @@ export function postCardHtml(post, ctx) {
     </div>` : '';
   const comments = (post.comments || []).map((c) => commentHtml(c, post, ctx)).join('');
   const sharedNote = post.sharedFrom ? `<div class="shared-note">${icon('repeat')} Shared from ${escapeHtml(usersById[post.sharedFrom]?.name || 'a post')}</div>` : '';
-  const groupNote = group && ctx.showGroupContext !== false ? `<div class="shared-note">${icon('users-round')} Posted in <a href="#/group/${group.id}">${escapeHtml(group.name)}</a></div>` : '';
+  const groupNote = group && ctx.showGroupContext !== false ? `<div class="shared-note">${icon('users-round')} Posted in <a href="#/group/${escapeHtml(group.id)}">${escapeHtml(group.name)}</a></div>` : '';
   const pinnedNote = post.pinned && post.groupId ? `<div class="pinned-note">${icon('pin')} ${t('announcement')}</div>` : '';
   const visIcon = icon(post.visibility === 'friends' ? 'users' : post.visibility === 'close' ? 'star' : (post.visibility === 'only-me' || post.visibility === 'private') ? 'lock' : 'globe', 'ic-sm');
   // Facebook-style header suffix: "— feeling grateful 🙏 at Lalbagh Fort".
@@ -154,24 +154,24 @@ export function postCardHtml(post, ctx) {
   if (post.location) feelBits.push(`at <b>${escapeHtml(post.location)}</b>`);
   const feelSuffix = feelBits.length ? ` <span class="post-feeling">— ${feelBits.join(' ')}</span>` : '';
   const authorBlock = page
-    ? `<a href="#/page/${page.id}" class="row gap-sm">${avatarHtml({ name: page.name, username: page.name, avatar: page.avatar }, 44)}<span>
+    ? `<a href="#/page/${escapeHtml(page.id)}" class="row gap-sm">${avatarHtml({ name: page.name, username: page.name, avatar: page.avatar }, 44)}<span>
         <span class="user-name">${escapeHtml(page.name)} <span class="badge">${t('pageLabel')}</span></span><br/>
         <span class="muted small">${escapeHtml(page.category || t('pageLabel'))} · ${timeAgo(post.createdAt)} · ${visIcon}${post.editedAt ? ' · edited' : ''}</span>
       </span></a>`
-    : `<a href="#/profile/${post.authorId}" class="row gap-sm">${avatarHtml(author, 44)}<span>
+    : `<a href="#/profile/${escapeHtml(post.authorId)}" class="row gap-sm">${avatarHtml(author, 44)}<span>
         ${userNameHtml(author)}${feelSuffix}<br/>
         <span class="muted small">@${escapeHtml(author?.username || '')} · ${timeAgo(post.createdAt)} · ${visIcon}${post.editedAt ? ' · edited' : ''}</span>
       </span></a>`;
   return `
-  <article class="card post-card" data-post="${post.id}">
+  <article class="card post-card" data-post="${escapeHtml(post.id)}">
     ${pinnedNote}
     ${sharedNote}
     ${groupNote}
     <header class="post-head">
       ${authorBlock}
       <div class="post-menu-wrap">
-        <button class="icon-btn" data-menu="${post.id}" aria-label="Post options">${icon('more-horizontal')}</button>
-        <div class="menu hidden" id="menu-${post.id}">
+        <button class="icon-btn" data-menu="${escapeHtml(post.id)}" aria-label="Post options">${icon('more-horizontal')}</button>
+        <div class="menu hidden" id="menu-${escapeHtml(post.id)}">
           ${post.authorId === me?.id ? `<button data-act="edit-post">${icon('pencil')} ${t('edit')}</button><button data-act="delete-post">${icon('trash')} ${t('delete')}</button>` : ''}
           ${post.groupId && group?.createdBy === me?.id ? `<button data-act="toggle-pin">${icon('pin')} ${post.pinned ? t('unpinAnnouncement') : t('pinAnnouncement')}</button>` : ''}
           <button data-act="save-post">${saved ? iconFill('bookmark') + ' ' + t('saved') : icon('bookmark') + ' ' + t('save')}</button>
@@ -180,7 +180,7 @@ export function postCardHtml(post, ctx) {
       </div>
     </header>
     <p class="post-text">${linkify(post.text)}</p>
-    ${post.image ? `<img class="post-image" src="${escapeHtml(cldImg(post.image, 1080))}" alt="Post photo" loading="lazy" decoding="async" />` : ''}
+    ${post.image ? `<img class="post-image" src="${escapeHtml(safeMediaUrl(cldImg(post.image, 1080)))}" alt="Post photo" loading="lazy" decoding="async" />` : ''}
     ${post.poll ? pollBlockHtml(post, me) : ''}
     ${statsHtml}
     <div class="post-actions">
@@ -192,7 +192,7 @@ export function postCardHtml(post, ctx) {
       </span>
     </div>
     <div class="comments">${comments || `<p class="muted small">${t('noCommentsYet')}</p>`}</div>
-    <form class="comment-form" data-comment-form="${post.id}">
+    <form class="comment-form" data-comment-form="${escapeHtml(post.id)}">
       ${avatarHtml(me, 32)}
       <input name="text" placeholder="${t('writeComment')}" autocomplete="off" maxlength="500" />
       <button class="btn btn-primary btn-sm" type="submit">${t('send')}</button>
@@ -207,7 +207,7 @@ function pollBlockHtml(post, meUser) {
   const res = pollResults(post);
   const myVote = post.poll?.votes?.[meUser?.id] || '';
   return `<div class="poll">
-    ${res.options.map((o) => `<button class="poll-option ${myVote === o.id ? 'mine' : ''}" data-act="poll-vote" data-option="${o.id}" aria-pressed="${myVote === o.id}">
+    ${res.options.map((o) => `<button class="poll-option ${myVote === o.id ? 'mine' : ''}" data-act="poll-vote" data-option="${escapeHtml(o.id)}" aria-pressed="${myVote === o.id}">
       <span class="poll-bar" style="width:${o.pct}%"></span>
       <span class="poll-option-text">${escapeHtml(o.text)}${myVote === o.id ? ` ${icon('check', 'ic-sm')}` : ''}</span>
       <span class="poll-pct">${o.pct}%</span>
@@ -224,15 +224,15 @@ function commentHtml(c, post, ctx) {
     return `<div class="comment reply">
       ${avatarHtml(ra, 28)}
       <div class="comment-body"><span class="comment-author">${userNameHtml(ra)}</span> <span class="comment-text">${linkify(r.text)}</span>
-      <div class="muted small">${timeAgo(r.createdAt)}${r.authorId === me?.id || post.authorId === me?.id ? ` · <button class="link-btn" data-act="delete-comment" data-comment="${r.id}">delete</button>` : ''}</div></div>
+      <div class="muted small">${timeAgo(r.createdAt)}${r.authorId === me?.id || post.authorId === me?.id ? ` · <button class="link-btn" data-act="delete-comment" data-comment="${escapeHtml(r.id)}">delete</button>` : ''}</div></div>
     </div>`;
   }).join('');
   return `<div class="comment">
     ${avatarHtml(author, 32)}
     <div class="comment-body">
       <span class="comment-author">${userNameHtml(author)}</span> <span class="comment-text">${linkify(c.text)}</span>
-      <div class="muted small">${timeAgo(c.createdAt)} · <button class="link-btn" data-act="reply-toggle" data-comment="${c.id}">Reply</button>${c.authorId === me?.id || post.authorId === me?.id ? ` · <button class="link-btn" data-act="delete-comment" data-comment="${c.id}">delete</button>` : ''}</div>
-      <form class="reply-form hidden" data-reply-form="${c.id}">
+      <div class="muted small">${timeAgo(c.createdAt)} · <button class="link-btn" data-act="reply-toggle" data-comment="${escapeHtml(c.id)}">Reply</button>${c.authorId === me?.id || post.authorId === me?.id ? ` · <button class="link-btn" data-act="delete-comment" data-comment="${escapeHtml(c.id)}">delete</button>` : ''}</div>
+      <form class="reply-form hidden" data-reply-form="${escapeHtml(c.id)}">
         <input name="text" placeholder="${t('writeReply')}" autocomplete="off" maxlength="500" />
         <button class="btn btn-primary btn-sm" type="submit">${t('send')}</button>
       </form>

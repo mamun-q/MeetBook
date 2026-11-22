@@ -4,7 +4,7 @@ import * as api from './api.js';
 import { firebaseReady, firebaseConfig } from './firebase.js';
 import { subscribe as storeSubscribe, mutate as demoMutate } from './store.js';
 import { setLocale, t } from './i18n.js';
-import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError, messageSnippet, focusMovesWithinForm, rsvpToastKey, isThreadPinned, pickScrollAnchor, anchoredScrollTop, threadRestoreMode, threadPinnedAfterScroll } from './utils.js';
+import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError, messageSnippet, focusMovesWithinForm, rsvpToastKey, isThreadPinned, pickScrollAnchor, anchoredScrollTop, threadRestoreMode, threadPinnedAfterScroll, safeMediaUrl } from './utils.js';
 import { toast, clearToasts, openModal, closeModal, confirmModal, adminActionModal, avatarHtml, postCardHtml } from './components.js';
 import { providerById } from './aiProviders.js';
 import { cldImg } from './cloudinary.js';
@@ -46,7 +46,18 @@ function parseRoute() {
   return { seg, query, raw: hash };
 }
 
-function me() { return api.me(); }
+function me() {
+  const u = api.me();
+  if (!u) return u;
+  // Own-email displays (Settings account card, Admin health row, the
+  // change-password reset) read user.email — source it from the Auth
+  // user via api.ownEmail(), because the mirrored users row stops
+  // carrying email once fix-user-email-exposure.sql is applied. Only
+  // copies when the Auth address actually differs, so every other
+  // caller keeps the shared mirror object.
+  const email = api.ownEmail();
+  return email && email !== u.email ? { ...u, email } : u;
+}
 
 function unreadCount(d, user) {
   return d.notifications.filter((n) => n.userId === user.id && !n.read).length;
@@ -68,11 +79,23 @@ function adminRoute(d, user, seg, query) {
   switch (sub) {
     case '': return shell('overview', V.adminOverviewView(d, user, { firebase: firebaseReady, projectId: firebaseConfig.projectId }));
     case 'analytics': return shell('analytics', V.adminAnalyticsView(d, user, { days: Number(query.get('days') || 30) }));
-    case 'users': return shell('users', isAdminRole(user) ? V.adminUsersView(d, user, {
-      q: query.get('q') || '', status: query.get('status') || 'all',
-      role: query.get('role') || 'all', kind: query.get('kind') || 'all',
-      page: Number(query.get('page') || 1)
-    }) : V.adminDeniedView());
+    case 'users': {
+      // Emails come from the admin-only admin_user_emails() RPC once
+      // fix-user-email-exposure.sql closes the mirrored column; the
+      // RPC map merges OVER the mirror rows (RPC wins, mirror is the
+      // fallback). Pre-SQL the fetch no-ops and the table renders
+      // exactly as before.
+      void api.fetchAdminUserEmails();
+      const emails = api.adminUserEmails();
+      const du = Object.keys(emails).length
+        ? { ...d, users: d.users.map((u) => (emails[u.id] ? { ...u, email: emails[u.id] } : u)) }
+        : d;
+      return shell('users', isAdminRole(user) ? V.adminUsersView(du, user, {
+        q: query.get('q') || '', status: query.get('status') || 'all',
+        role: query.get('role') || 'all', kind: query.get('kind') || 'all',
+        page: Number(query.get('page') || 1)
+      }) : V.adminDeniedView());
+    }
     case 'content': return shell('content', canModerate(user) ? V.adminContentView(d, user, {
       tab: query.get('tab') || 'posts', q: query.get('q') || '',
       kind: query.get('kind') || 'all', page: Number(query.get('page') || 1)
@@ -761,7 +784,7 @@ function renderStoryViewer() {
   const posInAuthor = authorStories.indexOf(s);
   const viewers = (s.views || []).map((id) => byId[id]).filter(Boolean);
   const stage = s.image
-    ? `<img class="story-stage-img" src="${escapeHtml(cldImg(s.image, 1080))}" alt="" decoding="async" />${s.text ? `<div class="story-caption">${escapeHtml(s.text)}</div>` : ''}`
+    ? `<img class="story-stage-img" src="${escapeHtml(safeMediaUrl(cldImg(s.image, 1080)))}" alt="" decoding="async" />${s.text ? `<div class="story-caption">${escapeHtml(s.text)}</div>` : ''}`
     : `<div class="story-stage-text" style="background:${storyBackgroundCss(s.bg)}"><p>${escapeHtml(s.text)}</p></div>`;
   storyRootEl().innerHTML = `
   <div class="story-viewer" role="dialog" aria-modal="true" aria-label="${t('stories')}">

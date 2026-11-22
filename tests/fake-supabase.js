@@ -329,8 +329,30 @@ const fakeAuth = {
 // ------------------------------------------------------------------ rpc
 const rpcError = (message) => ({ data: null, error: { message } });
 
+// Test controls for the email-exposure companion patch: rpcFailures
+// simulates a function that does not exist yet (the pre-SQL world);
+// rpcEmailOverrides decouples the admin_user_emails() result from the
+// users table, mirroring production after the SQL — the table SELECT
+// hides the column while the SECURITY DEFINER RPC still returns it.
+const rpcFailures = new Set();
+let rpcEmailOverrides = null;
+
 async function rpc(name, args = {}) {
   const caller = session?.user?.id || null;
+  if (rpcFailures.has(name)) return rpcError(`function public.${name} does not exist`);
+  if (name === 'admin_user_emails') {
+    if (!caller) return rpcError('admin_user_emails: caller is not signed in');
+    // Mirrors supabase/fix-user-email-exposure.sql: the is_admin()
+    // gate means non-admins get an empty set, never an error.
+    const callerRow = tableMap('users').get(caller);
+    const isAdmin = Boolean(callerRow) && !callerRow.isBot && ['admin', 'superadmin'].includes(callerRow.role);
+    if (!isAdmin) return { data: [], error: null };
+    if (rpcEmailOverrides) {
+      return { data: Object.entries(rpcEmailOverrides).map(([id, email]) => ({ id, email })), error: null };
+    }
+    const rows = [...tableMap('users').values()].map((u) => ({ id: u.id, email: u.email || '' }));
+    return { data: structuredClone(rows), error: null };
+  }
   if (name === 'file_appeal') {
     if (!caller) return rpcError('file_appeal: caller is not signed in');
     const rep = tableMap('reports').get(args.p_report_id);
@@ -423,6 +445,9 @@ export const fakeControl = {
   get(col, id) { const d = tableMap(col).get(id); return d ? structuredClone(d) : undefined; },
   all(col) { return [...tableMap(col).entries()].map(([id, data]) => ({ id, ...structuredClone(data) })); },
   remove(col, id) { tableMap(col).delete(id); scheduleFlush(); },
+  failRpc(name) { rpcFailures.add(name); },
+  clearRpcFailures() { rpcFailures.clear(); },
+  setRpcEmails(map) { rpcEmailOverrides = map; },
   reset() {
     tables.clear();
     pgBindings.length = 0;
@@ -430,6 +455,8 @@ export const fakeControl = {
     authCallbacks.clear();
     session = null;
     authCounter = 0;
+    rpcFailures.clear();
+    rpcEmailOverrides = null;
     this.usersByEmail = {};
   }
 };

@@ -116,6 +116,10 @@ function friendlySupabaseAuthError(err) {
 // -------------------------------------------------------------------------
 let remote = null; // Firestore-mirrored dataset (same shape as demo state)
 let remoteUid = '';
+let remoteAuthEmail = ''; // the Auth user's email — the one address the
+// mirrored users row may stop carrying (fix-user-email-exposure.sql
+// revokes the email column from non-staff SELECTs), so own-email
+// displays source it from here instead (see ownEmail()).
 let emptyRemoteCache = null;
 
 // Optimistic local echo for live-mode post creation: a freshly created
@@ -251,6 +255,16 @@ export function me() {
   return id ? (data().users.find((u) => u.id === id) || null) : null;
 }
 
+// The signed-in user's OWN email. In live mode the Auth user object is
+// the source of truth: once supabase/fix-user-email-exposure.sql is
+// applied, the mirrored users row no longer carries `email` for
+// non-staff sessions, but the Auth session always knows the account
+// address. Falls back to the mirrored row (pre-SQL world / demo mode).
+export function ownEmail() {
+  if (live) return remoteAuthEmail || me()?.email || '';
+  return me()?.email || '';
+}
+
 // "Admin" across the app means the admin tier of the Pack A role
 // ladder: role 'admin' OR 'superadmin' (utils.isAdminRole). Moderators
 // and analysts are staff but are NOT admins — gate them with
@@ -320,6 +334,7 @@ export async function register({ name, username, email, password, dob = '', gend
       throw new Error('Account created — please confirm your email, then sign in.');
     }
     remoteUid = authUser.id;
+    remoteAuthEmail = authUser.email || email.trim();
     const profile = {
       name: name.trim(), username: v.value, email: email.trim(), bio: '', avatar: '', cover: '',
       work: '', education: '', currentCity: '', hometown: '', relationship: '', website: '', nickname: '',
@@ -371,6 +386,7 @@ export async function login(email, password) {
     const user = authData?.user;
     if (!user) throw new Error('Something went wrong. Please try again.');
     remoteUid = user.id;
+    remoteAuthEmail = user.email || email.trim();
     // Presence: stamp online + lastSeen (the online rail freshness check
     // keys off lastSeen). Best-effort — never block the sign-in on it.
     sbUpdate('users', user.id, { online: true, lastSeen: Date.now() }).catch(() => {});
@@ -462,7 +478,7 @@ export async function logout() {
     if (remoteUid) {
       try { await sbUpdate('users', remoteUid, { online: false, lastSeen: Date.now() }); } catch { /* best-effort */ }
     }
-    await supabase.auth.signOut(); remoteUid = ''; return;
+    await supabase.auth.signOut(); remoteUid = ''; remoteAuthEmail = ''; return;
   }
   mutate((s) => {
     const u = s.users.find((x) => x.id === s.sessionUid);
@@ -484,6 +500,7 @@ export async function deleteAccount() {
     await sbDelete('users', user.id);
     try { await supabase.auth.signOut(); } catch { /* session is over either way */ }
     remoteUid = '';
+    remoteAuthEmail = '';
     return;
   }
   mutate((s) => {
@@ -502,7 +519,10 @@ export function onAuthReady(cb) {
     // because each event's work is self-contained.
     const { data } = supabase.auth.onAuthStateChange(async (event, session) => {
       const user = session?.user || null;
+      const prevUid = remoteUid;
       remoteUid = user ? user.id : '';
+      remoteAuthEmail = user?.email || '';
+      if (!user || user.id !== prevUid) adminUserEmailsCache = null; // never leak one session's email map into another
       if (user) { await ensureAuthProfile(user); startRemoteSync(); }
       else { stopRemoteSync(); stopBotRunner(); } // no session -> no sync, no live bot runner, ever
       cb(user ? { id: user.id } : null);
@@ -4054,6 +4074,58 @@ export async function deleteBotMemory(botId, memoryId) {
     mutate((s) => { if (s.botMemories[botId]) s.botMemories[botId] = s.botMemories[botId].filter((m) => m.id !== memoryId); });
   }
   await logAdminAction('bot-memory-delete', { type: 'bot', id: botId, label: data().bots.find((b) => b.id === botId)?.name || botId });
+}
+
+// -------------------------------------------------------------------------
+// ADMIN USER EMAILS (security hardening, 2026-11-22) — companion to
+// supabase/fix-user-email-exposure.sql. Once that SQL is applied, the
+// mirrored users rows stop carrying `email` for everyone (the column
+// privilege is revoked), so the Admin → Users table sources addresses
+// from the admin-only admin_user_emails() RPC instead and main.js
+// merges the map over the mirror rows (RPC wins; the mirrored value is
+// the fallback). Until the SQL is applied the RPC does not exist —
+// the fetch then resolves to {} and the table keeps its current
+// mirrored-email behaviour, so this patch is safe to ship first.
+// Cached per session (the roster changes rarely); the cache is
+// dropped on sign-out in onAuthReady.
+// -------------------------------------------------------------------------
+let adminUserEmailsCache = null; // { [userId]: email } once the RPC answers
+let adminUserEmailsInFlight = null;
+
+export async function fetchAdminUserEmails() {
+  if (!live) {
+    // Demo mode already holds every email in the local store.
+    const map = {};
+    for (const u of data().users) if (u.email) map[u.id] = u.email;
+    return map;
+  }
+  const user = me();
+  if (!user || !isAdminRole(user)) return {}; // the RPC is admin-gated server-side too
+  if (adminUserEmailsCache) return adminUserEmailsCache;
+  if (adminUserEmailsInFlight) return adminUserEmailsInFlight;
+  adminUserEmailsInFlight = (async () => {
+    try {
+      const rows = await sbRpc('admin_user_emails');
+      const map = {};
+      for (const r of rows || []) if (r && r.id && r.email) map[r.id] = r.email;
+      adminUserEmailsCache = map;
+      emitData(); // an open Admin → Users table re-renders with emails filled in
+      return map;
+    } catch {
+      // Pre-SQL world (RPC not created yet) or a transient failure:
+      // fall back to the mirrored emails — nothing breaks.
+      return {};
+    } finally {
+      adminUserEmailsInFlight = null;
+    }
+  })();
+  return adminUserEmailsInFlight;
+}
+
+// The last successfully fetched RPC map ({} until one lands). Sync
+// getter for renderers; fetchAdminUserEmails() is the async loader.
+export function adminUserEmails() {
+  return adminUserEmailsCache || {};
 }
 
 // -------------------------------------------------------------------------

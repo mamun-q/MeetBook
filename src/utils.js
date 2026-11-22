@@ -1246,6 +1246,27 @@ export function mapsUrl(location) {
   return `https://www.google.com/maps?q=${location.lat},${location.lng}`;
 }
 
+// Media URL scheme allowlist for anything rendered into a src/href:
+// only http(s) and data: URLs may pass; anything else (a crafted
+// javascript: URL in a synced doc) collapses to '#'. escapeHtml alone
+// does not stop scheme injection — it only escapes quotes.
+export function safeMediaUrl(u) {
+  const s = String(u || '');
+  return /^(https?:|data:)/i.test(s) ? s : '#';
+}
+
+// CSS url('...') context (profile/group/page/event covers): the value
+// sits inside single quotes in a style attribute, and HTML entity
+// decoding runs BEFORE CSS parsing, so a quote stored in the value
+// would reach the CSS parser raw even after escapeHtml. Reject any
+// URL carrying quotes, parens, backslashes, angle brackets or
+// whitespace/control characters outright.
+export function safeCssImageUrl(u) {
+  const s = safeMediaUrl(u);
+  if (s === '#') return s;
+  return /[\s'"()\\<>]/.test(s) ? '#' : s;
+}
+
 // ------------------------------------------------------- Useful Pack
 // Vanish mode: messages sent while a conversation's vanish flag is on
 // carry an expiresAt; once past it, every client simply stops showing

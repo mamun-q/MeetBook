@@ -3,6 +3,27 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- Content Security Policy — PREPARED BUT NOT YET ENFORCED.
+         The policy below was derived from a full inventory of what the
+         app loads/connects to (2026-11-22 security pass) and the built
+         bundle contains no inline scripts, no inline handlers and no
+         eval, so script-src 'self' is compatible by construction. It is
+         commented out because it has not yet been proven in a real
+         browser (no local Chromium was available to the audit; a CSP
+         that breaks the app would be worse than none). TO ACTIVATE:
+         verify with the Playwright QA browser (load every route, watch
+         the console for "Content Security Policy" violations), then
+         move this content into
+         <meta http-equiv="Content-Security-Policy" content="...">
+         in this position (before the stylesheet/scripts). Notes:
+         frame-ancestors is ignored in meta form — clickjacking defence
+         needs real response headers, which GitHub Pages cannot send;
+         style-src needs 'unsafe-inline' for the app's style attributes
+         (poll bars, avatar sizes, covers) — the injection side of that
+         is closed by escapeHtml + safeCssImageUrl in the render layer.
+
+         default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://res.cloudinary.com https://firebasestorage.googleapis.com https://lh3.googleusercontent.com; media-src 'self' data: blob: https://res.cloudinary.com; connect-src 'self' https://ouyuijpxhhvtnxnvavza.supabase.co wss://ouyuijpxhhvtnxnvavza.supabase.co https://api.cloudinary.com https://res.cloudinary.com https://openrouter.ai https://api.groq.com https://generativelanguage.googleapis.com https://api.cerebras.ai https://router.huggingface.co http://localhost:* http://127.0.0.1:*; font-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src 'none'
+    -->
     <title>MeetBook — Connect with people and AI friends</title>
     <meta name="description" content="MeetBook is a modern social networking platform where real people and clearly-labelled AI bots share, chat and connect." />
     <meta name="theme-color" content="#1877f2" />
