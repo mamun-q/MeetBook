@@ -578,16 +578,58 @@ function sameRowsById(a, b) {
   return key(a) === key(b);
 }
 
+// ---------------------------------------------------------------------------
+// Realtime refetch coalescing (Speed Pack). A postgres_changes burst on
+// one table (a bot cycle writing a dozen rows, a like-storm) used to
+// fire one FULL refetch per event, and the herd contended for the
+// free-tier PostgREST pool until every slice crawled. Refetches for a
+// table are now SERIALISED: while one is in flight, further events
+// collapse into a single trailing refetch that runs when it settles —
+// a burst costs at most one extra refetch instead of one per event,
+// and on the Nano pool (where a refetch takes hundreds of ms) that
+// window is exactly when the pile-up happened. An event that arrives
+// while no refetch is in flight still refetches immediately, so an
+// isolated change is as instant as it always was. The fetchers
+// themselves are unchanged: presence-only users snapshots still apply
+// silently and every merge still compare-and-suppresses, so
+// coalescing never changes what renders, only how often the pool is
+// hit. (A timer-based trailing debounce was tried first and broke the
+// pinned immediacy of sequential changes; in-flight coalescing gets
+// the same burst collapse from the refetch's own duration.)
+// ---------------------------------------------------------------------------
+const REFETCH_STUCK_MS = 15000; // a hung fetch must not wedge a table forever
+const refetchState = new Map(); // table -> { inFlight, pending, since }
+
+function runTableRefetchers(table, st) {
+  st.inFlight = true;
+  st.since = Date.now();
+  const runs = [];
+  for (const fn of tableRefetchers.get(table) || []) {
+    try { runs.push(fn()); } catch { /* a failed refetch leaves the mirror untouched */ }
+  }
+  Promise.allSettled(runs).then(() => {
+    st.inFlight = false;
+    if (st.pending) { st.pending = false; runTableRefetchers(table, st); }
+  });
+}
+
+function scheduleTableRefetch(table) {
+  let st = refetchState.get(table);
+  if (!st) { st = { inFlight: false, pending: false, since: 0 }; refetchState.set(table, st); }
+  if (st.inFlight && Date.now() - st.since < REFETCH_STUCK_MS) { st.pending = true; return; }
+  runTableRefetchers(table, st);
+}
+
+function clearRefetchWindows() {
+  refetchState.clear();
+}
+
 function watchTable(table, refetch) {
   if (!tableRefetchers.has(table)) tableRefetchers.set(table, new Set());
   tableRefetchers.get(table).add(refetch);
   if (channelByTable.has(table)) return;
   const ch = supabase.channel(`mb-sync-${table}`)
-    .on('postgres_changes', { event: '*', schema: 'public', table }, () => {
-      for (const fn of tableRefetchers.get(table) || []) {
-        try { void fn(); } catch { /* a failed refetch leaves the mirror untouched */ }
-      }
-    })
+    .on('postgres_changes', { event: '*', schema: 'public', table }, () => scheduleTableRefetch(table))
     .subscribe();
   channelByTable.set(table, ch);
   syncChannels.push(ch);
@@ -600,6 +642,7 @@ function stopRemoteSync() {
   syncChannels = [];
   channelByTable.clear();
   tableRefetchers.clear();
+  clearRefetchWindows();
   typingChannel = null;
   presenceChannel = null;
   typingState.clear();
@@ -707,6 +750,28 @@ function startRemoteSync() {
   // unsubscribing; an in-flight PostgREST read cannot be cancelled).
   const stale = () => !syncStarted || syncUid !== uid;
 
+  // SPEED PACK — tiered boot. This function used to fire ~32 PostgREST
+  // queries in the same tick, and the boot gate in main.js (which
+  // needs only MY user row to lift the splash) raced the whole herd
+  // for the free-tier connection pool — the 30–50s "Loading
+  // MeetBook…" stall. Now the initial fetches below are collected
+  // into tiers and run by the boot sequence at the bottom: (0) my own
+  // profile row alone (fetchOwnProfile), so me() resolves after ONE
+  // single-row request; (1) the feed-critical slices; (2) everything
+  // else, fired once tier 1 settles. The watchTable registrations
+  // still happen immediately — only the INITIAL fetches are tiered —
+  // so a realtime event can pull any slice forward at any time, and
+  // no view can be left permanently empty, just loaded seconds later.
+  const tier1 = [];
+  const tier2 = [];
+  // Staff-only slices (Reports Center, admin log, bot activity/log):
+  // RLS returns zero rows for everyone else, so a non-staff boot
+  // skips the initial fetch entirely — the mirror holds [] either
+  // way. The role is read at fire time (tier 2 runs after the users
+  // fetch lands), and the watchers stay registered for everyone, so
+  // a mid-session promotion self-heals on the next realtime event.
+  const staffTier2 = (fn) => () => (isStaff(me()) ? fn() : undefined);
+
   // TIME NORMALISATION: PostgREST returns bigint epoch-ms as numbers,
   // so times arrive already normalised; the normaliseTimeFields pass
   // stays as a belt-and-braces guard so a Timestamp-shaped value can
@@ -750,7 +815,26 @@ function startRemoteSync() {
     void loadAdminStats();
     syncLiveBotRunner();
   };
-  void fetchUsers();
+  // FAST GATE (Speed Pack): my own row, fetched alone before the
+  // herd. Seeding it into the still-empty users mirror resolves me()
+  // — and with it main.js's boot gate — after a single-row request
+  // instead of after the 300-row users select has fought ~31 other
+  // boot queries for the pool. The full fetchUsers (tier 1) then
+  // replaces the seed with the whole list; if this get fails or the
+  // row is missing, the gate simply falls back to waiting for it.
+  const fetchOwnProfile = async () => {
+    if (stale() || !uid) return;
+    try {
+      const row = await sbGet('users', uid);
+      if (stale() || !row || !remote) return;
+      // Never clobber a list that already landed (a realtime refetch
+      // could in theory beat us here); the seed only fills the void.
+      if ((remote.users || []).length === 0) {
+        patchMirror((r) => { if (r.users.length === 0) r.users = [mapUser(row)]; });
+      }
+    } catch { /* the full users fetch remains the fallback */ }
+  };
+  tier1.push(fetchUsers);
   watchTable('users', fetchUsers);
 
   // ---- post slices ---------------------------------------------------
@@ -791,9 +875,9 @@ function startRemoteSync() {
   const fetchPublicPosts = async () => { if (stale()) return; try { publicPosts = (await sbSelect('posts', (q) => q.eq('visibility', 'public').order('createdAt', { ascending: false }).limit(100))).map(mapPost); mergePosts(); } catch { /* leave the mirrored set untouched */ } };
   const fetchOwnPosts = async () => { if (stale()) return; try { ownPosts = (await sbSelect('posts', (q) => q.eq('authorId', uid))).map(mapPost); mergePosts(); } catch { /* leave untouched */ } };
   const fetchAudiencePosts = async () => { if (stale()) return; try { audiencePosts = (await sbSelect('posts', (q) => q.contains('audienceIds', [uid]))).map(mapPost); mergePosts(); } catch { /* leave untouched */ } };
-  void fetchPublicPosts();
+  tier1.push(fetchPublicPosts);
   watchTable('posts', fetchPublicPosts);
-  if (uid) { void fetchOwnPosts(); void fetchAudiencePosts(); watchTable('posts', fetchOwnPosts); watchTable('posts', fetchAudiencePosts); }
+  if (uid) { tier1.push(fetchOwnPosts); tier1.push(fetchAudiencePosts); watchTable('posts', fetchOwnPosts); watchTable('posts', fetchAudiencePosts); }
 
   // ---- story slices --------------------------------------------------
   const mapStory = (row) => ({ image: '', text: '', bg: 'sunset', audienceIds: [], views: [], ...row, createdAt: tsToMs(row.createdAt) || Date.now() });
@@ -818,9 +902,9 @@ function startRemoteSync() {
   const fetchPublicStories = async () => { if (stale()) return; try { publicStories = (await sbSelect('stories', (q) => q.eq('visibility', 'public').order('createdAt', { ascending: false }).limit(100))).map(mapStory); mergeStories(); } catch { /* leave untouched */ } };
   const fetchOwnStories = async () => { if (stale()) return; try { ownStories = (await sbSelect('stories', (q) => q.eq('authorId', uid))).map(mapStory); mergeStories(); } catch { /* leave untouched */ } };
   const fetchAudienceStories = async () => { if (stale()) return; try { audienceStories = (await sbSelect('stories', (q) => q.contains('audienceIds', [uid]))).map(mapStory); mergeStories(); } catch { /* leave untouched */ } };
-  void fetchPublicStories();
+  tier1.push(fetchPublicStories);
   watchTable('stories', fetchPublicStories);
-  if (uid) { void fetchOwnStories(); void fetchAudienceStories(); watchTable('stories', fetchOwnStories); watchTable('stories', fetchAudienceStories); }
+  if (uid) { tier1.push(fetchOwnStories); tier1.push(fetchAudienceStories); watchTable('stories', fetchOwnStories); watchTable('stories', fetchAudienceStories); }
 
   // ---- event slices --------------------------------------------------
   const mapEvent = (row) => {
@@ -847,20 +931,20 @@ function startRemoteSync() {
   const fetchPublicEvents = async () => { if (stale()) return; try { publicEvents = (await sbSelect('events', (q) => q.eq('visibility', 'public').order('dateTime', { ascending: true }).limit(100))).map(mapEvent); mergeEvents(); } catch { /* leave untouched */ } };
   const fetchOwnEvents = async () => { if (stale()) return; try { ownEvents = (await sbSelect('events', (q) => q.eq('createdBy', uid))).map(mapEvent); mergeEvents(); } catch { /* leave untouched */ } };
   const fetchAudienceEvents = async () => { if (stale()) return; try { audienceEvents = (await sbSelect('events', (q) => q.contains('audienceIds', [uid]))).map(mapEvent); mergeEvents(); } catch { /* leave untouched */ } };
-  void fetchPublicEvents();
+  tier2.push(fetchPublicEvents);
   watchTable('events', fetchPublicEvents);
-  if (uid) { void fetchOwnEvents(); void fetchAudienceEvents(); watchTable('events', fetchOwnEvents); watchTable('events', fetchAudienceEvents); }
+  if (uid) { tier2.push(fetchOwnEvents); tier2.push(fetchAudienceEvents); watchTable('events', fetchOwnEvents); watchTable('events', fetchAudienceEvents); }
 
   // ---- single-slice tables -------------------------------------------
   const fetchReviews = async () => { if (stale()) return; try { setSlice('reviews', (await sbSelect('reviews', (q) => q.order('createdAt', { ascending: false }).limit(500))).map((row) => normaliseTimeFields(row, ['createdAt']))); } catch { /* leave untouched */ } };
-  void fetchReviews();
+  tier2.push(fetchReviews);
   watchTable('reviews', fetchReviews);
 
   const fetchPages = async () => { if (stale()) return; try { setSlice('pages', (await sbSelect('pages', (q) => q.order('id', { ascending: true }).limit(200))).map((row) => normaliseTimeFields(row, ['createdAt']))); } catch { /* leave untouched */ } };
-  void fetchPages();
+  tier2.push(fetchPages);
   watchTable('pages', fetchPages);
 
-  const mapGroup = (row) => normaliseGroup(normaliseTimeFields(row, ['createdAt']));
+  const mapGroup = (row) => ({ id: row.id, ...normaliseGroup(normaliseTimeFields(row, ['createdAt'])) });
   let publicGroups = [];
   let memberGroups = [];
   const mergeGroups = () => {
@@ -879,21 +963,22 @@ function startRemoteSync() {
   remergeGroups = mergeGroups;
   const fetchPublicGroups = async () => { if (stale()) return; try { publicGroups = (await sbSelect('groups', (q) => q.eq('privacy', 'public').limit(200))).map(mapGroup); mergeGroups(); } catch { /* leave untouched */ } };
   const fetchMemberGroups = async () => { if (stale()) return; try { memberGroups = (await sbSelect('groups', (q) => q.contains('members', [uid]))).map(mapGroup); mergeGroups(); } catch { /* leave untouched */ } };
-  void fetchPublicGroups();
+  tier2.push(fetchPublicGroups);
   watchTable('groups', fetchPublicGroups);
-  if (uid) { void fetchMemberGroups(); watchTable('groups', fetchMemberGroups); }
+  if (uid) { tier2.push(fetchMemberGroups); watchTable('groups', fetchMemberGroups); }
 
   const fetchBots = async () => { if (stale()) return; try { setSlice('bots', (await sbSelect('bots', (q) => q.order('id', { ascending: true }).limit(100))).map((row) => normaliseBot(normaliseTimeFields(row, ['createdAt'])))); } catch { /* leave untouched */ } };
-  void fetchBots();
+  tier2.push(fetchBots);
   watchTable('bots', fetchBots);
 
-  // Admin-only in RLS (non-admins simply read zero rows).
+  // Admin-only in RLS (non-admins simply read zero rows) — the boot
+  // fetch is staff-gated (see staffTier2); the watcher stays live.
   const fetchBotActivities = async () => { if (stale()) return; try { setSlice('botActivities', (await sbSelect('botActivities', (q) => q.order('createdAt', { ascending: false }).limit(100))).map((row) => normaliseTimeFields(row, ['createdAt']))); } catch { /* leave untouched */ } };
-  void fetchBotActivities();
+  tier2.push(staffTier2(fetchBotActivities));
   watchTable('botActivities', fetchBotActivities);
 
   const fetchBotLogs = async () => { if (stale()) return; try { setSlice('botLogs', (await sbSelect('botLogs', (q) => q.order('createdAt', { ascending: false }).limit(100))).map((row) => normaliseTimeFields(row, ['createdAt']))); } catch { /* leave untouched */ } };
-  void fetchBotLogs();
+  tier2.push(staffTier2(fetchBotLogs));
   watchTable('botLogs', fetchBotLogs);
 
   const fetchBotSettings = async () => {
@@ -905,7 +990,7 @@ function startRemoteSync() {
       }
     } catch { /* leave untouched */ }
   };
-  void fetchBotSettings();
+  tier2.push(fetchBotSettings);
   watchTable('botSettings', fetchBotSettings);
 
   const fetchConfig = async () => {
@@ -926,11 +1011,11 @@ function startRemoteSync() {
       }
     } catch { /* leave untouched */ }
   };
-  void fetchConfig();
+  tier2.push(fetchConfig);
   watchTable('config', fetchConfig);
 
   const fetchAnnouncements = async () => { if (stale()) return; try { setSlice('announcements', (await sbSelect('announcements', (q) => q.order('createdAt', { ascending: false }).limit(50))).map((row) => normaliseTimeFields(row, ['createdAt']))); } catch { /* leave untouched */ } };
-  void fetchAnnouncements();
+  tier2.push(fetchAnnouncements);
   watchTable('announcements', fetchAnnouncements);
 
   if (uid) {
@@ -947,13 +1032,13 @@ function startRemoteSync() {
     };
     const fetchSentFriendships = async () => { if (stale()) return; try { sentFriendships = await sbSelect('friendships', (q) => q.eq('from', uid)); mergeFriendships(); } catch { /* leave untouched */ } };
     const fetchReceivedFriendships = async () => { if (stale()) return; try { receivedFriendships = await sbSelect('friendships', (q) => q.eq('to', uid)); mergeFriendships(); } catch { /* leave untouched */ } };
-    void fetchSentFriendships();
-    void fetchReceivedFriendships();
+    tier1.push(fetchSentFriendships);
+    tier1.push(fetchReceivedFriendships);
     watchTable('friendships', fetchSentFriendships);
     watchTable('friendships', fetchReceivedFriendships);
 
     const fetchNotifications = async () => { if (stale()) return; try { setSlice('notifications', (await sbSelect('notifications', (q) => q.eq('userId', uid).order('createdAt', { ascending: false }).limit(100))).map((row) => normaliseTimeFields(row, ['createdAt']))); } catch { /* leave untouched */ } };
-    void fetchNotifications();
+    tier1.push(fetchNotifications);
     watchTable('notifications', fetchNotifications);
 
     // Conversations I take part in. RLS already restricts rows to
@@ -968,7 +1053,7 @@ function startRemoteSync() {
       return c;
     };
     const fetchConversations = async () => { if (stale()) return; try { setSlice('conversations', (await sbSelect('conversations', (q) => q.contains('participants', [uid]))).map(mapConversation)); } catch { /* leave untouched */ } };
-    void fetchConversations();
+    tier1.push(fetchConversations);
     watchTable('conversations', fetchConversations);
 
     // Messages: NEWEST 500 across all my conversations (desc +
@@ -976,11 +1061,11 @@ function startRemoteSync() {
     // conversations I participate in; the participants filter is the
     // query the Firestore version used, kept for parity.
     const fetchMessages = async () => { if (stale()) return; try { setSlice('messages', (await sbSelect('messages', (q) => q.contains('participants', [uid]).order('createdAt', { ascending: false }).limit(500))).map((row) => normaliseTimeFields(row, ['createdAt']))); } catch { /* leave the mirrored set untouched */ } };
-    void fetchMessages();
+    tier1.push(fetchMessages);
     watchTable('messages', fetchMessages);
 
     const fetchBlocks = async () => { if (stale()) return; try { setSlice('blocks', await sbSelect('blocks', (q) => q.eq('blockerId', uid))); } catch { /* leave untouched */ } };
-    void fetchBlocks();
+    tier1.push(fetchBlocks);
     watchTable('blocks', fetchBlocks);
 
     // Group join requests: mine + requests to groups I admin,
@@ -996,8 +1081,8 @@ function startRemoteSync() {
     };
     const fetchMyGroupRequests = async () => { if (stale()) return; try { myGroupRequests = await sbSelect('groupRequests', (q) => q.eq('userId', uid)); mergeGroupRequests(); } catch { /* leave untouched */ } };
     const fetchAdminGroupRequests = async () => { if (stale()) return; try { adminGroupRequests = await sbSelect('groupRequests', (q) => q.eq('groupAdminId', uid)); mergeGroupRequests(); } catch { /* leave untouched */ } };
-    void fetchMyGroupRequests();
-    void fetchAdminGroupRequests();
+    tier1.push(fetchMyGroupRequests);
+    tier2.push(fetchAdminGroupRequests);
     watchTable('groupRequests', fetchMyGroupRequests);
     watchTable('groupRequests', fetchAdminGroupRequests);
 
@@ -1017,8 +1102,8 @@ function startRemoteSync() {
     };
     const fetchFiledReports = async () => { if (stale()) return; try { filedReports = (await sbSelect('reports', (q) => q.eq('reporterId', uid))).map((row) => normaliseTimeFields(row, ['createdAt'])); mergeSupportReports(); } catch { /* leave untouched */ } };
     const fetchAboutReports = async () => { if (stale()) return; try { aboutReports = (await sbSelect('reports', (q) => q.eq('targetAuthorId', uid))).map((row) => normaliseTimeFields(row, ['createdAt'])); mergeSupportReports(); } catch { /* leave untouched */ } };
-    void fetchFiledReports();
-    void fetchAboutReports();
+    tier1.push(fetchFiledReports);
+    tier1.push(fetchAboutReports);
     watchTable('reports', fetchFiledReports);
     watchTable('reports', fetchAboutReports);
   }
@@ -1027,16 +1112,29 @@ function startRemoteSync() {
   // are safe to run for everyone): the Reports Center and the admin
   // activity log.
   const fetchStaffReports = async () => { if (stale()) return; try { setSlice('reports', (await sbSelect('reports', (q) => q.order('createdAt', { ascending: false }).limit(100))).map((row) => normaliseTimeFields(row, ['createdAt']))); } catch { /* leave untouched */ } };
-  void fetchStaffReports();
+  tier2.push(staffTier2(fetchStaffReports));
   watchTable('reports', fetchStaffReports);
 
   const fetchAdminLogs = async () => { if (stale()) return; try { setSlice('adminLogs', (await sbSelect('adminLogs', (q) => q.order('createdAt', { ascending: false }).limit(200))).map((row) => normaliseTimeFields(row, ['createdAt']))); } catch { /* leave untouched */ } };
-  void fetchAdminLogs();
+  tier2.push(staffTier2(fetchAdminLogs));
   watchTable('adminLogs', fetchAdminLogs);
 
   // Phase 3 channels: presence + typing (see their sections above).
   startPresenceChannel();
   startTypingChannel();
+
+  // SPEED PACK — run the boot tiers (see the tier note at the top of
+  // this function): the gate fetch first and ALONE, then tier 1, then
+  // tier 2 once tier 1 settles. Every fetcher catches its own errors,
+  // so allSettled is purely a sequencing device; the stale() checks
+  // keep a superseded session's boot from firing its later tiers.
+  void (async () => {
+    await fetchOwnProfile();
+    if (stale()) return;
+    await Promise.allSettled(tier1.map((fn) => { try { return fn(); } catch { return undefined; } }));
+    if (stale()) return;
+    for (const fn of tier2) { try { void fn(); } catch { /* a failed fetch leaves the mirror untouched */ } }
+  })();
 }
 
 // -------------------------------------------------------------------------
