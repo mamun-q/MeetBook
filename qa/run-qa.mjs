@@ -54,7 +54,7 @@ async function probeRoute(page, route, viewportName, bag) {
   const where = `#/${route} [${viewportName}]`;
   bag.length = 0;
   await page.goto(BASE + '#/' + route, { waitUntil: 'domcontentloaded' });
-  await page.waitForTimeout(2600); // let Firestore data + render settle
+  await page.waitForTimeout(2600); // let Supabase data + render settle
   const found = bag.map((e) => ({ kind: e.kind, where, detail: String(e.detail).slice(0, 300) }));
   // Blank check measures the ROUTE CONTENT (.shell), not #app: the
   // app chrome (topbar/nav/footer) alone exceeds the old threshold,
@@ -83,7 +83,7 @@ async function checkRoute(page, route, viewportName, bag) {
   if (isBurst429(found)) {
     await page.waitForTimeout(20000);
     const retry = await probeRoute(page, route, viewportName, bag);
-    if (!retry.length) notes.push(`qa: #/${route} [${viewportName}] — Firestore 429s on the first visit only (sweep burst load); clean on recheck`);
+    if (!retry.length) notes.push(`qa: #/${route} [${viewportName}] — 429s on the first visit only (sweep burst load); clean on recheck`);
     found = retry;
   }
   for (const p of found) report(p.kind, p.where, p.detail);
@@ -97,11 +97,16 @@ async function sweep(browser, email, password, routes, label) {
     page.on('console', (msg) => { if (msg.type() === 'error' && !noisy(msg.text())) bag.push({ kind: 'console-error', detail: msg.text() }); });
     page.on('pageerror', (err) => bag.push({ kind: 'page-error', detail: err.message }));
     page.on('response', (res) => { if (res.status() >= 400 && !noisy(res.url())) bag.push({ kind: 'http-' + res.status(), detail: res.url() }); });
+    let abortedCount = 0;
     page.on('requestfailed', (req) => {
       const url = req.url();
-      // Firestore listen channels abort on navigation by design.
-      if (url.includes('firestore.googleapis.com')) return;
-      bag.push({ kind: 'request-failed', detail: `${url} (${req.failure()?.errorText || 'failed'})` });
+      const errText = req.failure()?.errorText || 'failed';
+      // The app cancels in-flight REST fetches when the route changes;
+      // the browser reports those as net::ERR_ABORTED. That is the app
+      // tidying up, not a failed request — count them as a note, never
+      // a problem (runs #7 and #8 both failed on exactly this noise).
+      if (errText.includes('ERR_ABORTED')) { abortedCount += 1; return; }
+      bag.push({ kind: 'request-failed', detail: `${url} (${errText})` });
     });
     try {
       await login(page, email, password);
@@ -114,6 +119,7 @@ async function sweep(browser, email, password, routes, label) {
       try { await checkRoute(page, route, vp.name, bag); }
       catch (e) { report('route-crash', `#/${route} [${vp.name}]`, e.message); }
     }
+    if (abortedCount) notes.push(`qa: ${label} [${vp.name}] — ${abortedCount} in-flight request(s) aborted by in-app navigation (expected, not failures)`);
     await context.close();
   }
 }
@@ -141,14 +147,17 @@ async function smokeTests(browser) {
     // body text was satisfied by the composer textarea itself (its
     // current value is part of innerText), a false pass when the
     // publish actually failed.
-    await page.waitForFunction((m) => [...document.querySelectorAll('.post-card')].some((el) => el.innerText.includes(m)), marker, { timeout: 20000 });
+    // Locator waits, NOT waitForFunction: the site's CSP (script-src
+    // 'self', no unsafe-eval) refuses waitForFunction's in-page string
+    // evaluation — run #8 failed on the CSP doing its job, not the app.
+    await page.locator('.post-card', { hasText: marker }).first().waitFor({ state: 'visible', timeout: 20000 });
     notes.push('smoke: post published and visible');
     const card = page.locator('.post-card', { hasText: marker }).first();
     await card.locator('.post-menu-wrap button').first().click();
     await card.locator('[data-act="delete-post"]').click();
     await page.waitForSelector('.modal', { timeout: 8000 });
     await page.click('.modal .btn-danger, .modal .btn-primary');
-    await page.waitForFunction((m) => !document.body.innerText.includes(m), marker, { timeout: 15000 });
+    await page.locator('.post-card', { hasText: marker }).first().waitFor({ state: 'hidden', timeout: 15000 });
     notes.push('smoke: post deleted again (cleaned up)');
   } catch (e) {
     report('smoke-post-flow', 'smoke [mobile-390]', e.message);
@@ -164,10 +173,19 @@ async function smokeTests(browser) {
       // The header alone is not proof: the 2026-11-20 DM bug rendered
       // the thread with a silently EMPTY message list. Require actual
       // message rows or the thread's own empty-state text.
-      await page.waitForFunction(() => {
-        const b = document.querySelector('#thread-body');
-        return Boolean(b && (b.querySelector('.msg-row') || b.innerText.trim().length > 0));
-      }, { timeout: 10000 });
+      // Node-side poll via page.evaluate (DevTools protocol — not
+      // subject to the page CSP, unlike waitForFunction predicates).
+      let threadOk = false;
+      const threadDeadline = Date.now() + 10000;
+      while (Date.now() < threadDeadline) {
+        threadOk = await page.evaluate(() => {
+          const b = document.querySelector('#thread-body');
+          return Boolean(b && (b.querySelector('.msg-row') || b.innerText.trim().length > 0));
+        });
+        if (threadOk) break;
+        await page.waitForTimeout(400);
+      }
+      if (!threadOk) throw new Error('thread body never rendered messages or empty-state text');
       notes.push('smoke: message thread opened, messages region rendered');
     } else {
       notes.push('smoke: no conversations exist for the Test account — thread open skipped');
