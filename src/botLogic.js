@@ -697,6 +697,38 @@ export function botCountersForDay(stored, dayKey) {
   return out;
 }
 
+// --- Post pacing (owner rule, 2026-11-23) ------------------------------
+// "একটা বট পোস্ট করার পরে আর একটা বট তার ৩০ মিনিট পরে পোস্ট করবে,
+// এভাবে চক্র চলবে" — bot posts must not arrive in bursts: after ANY
+// bot posts, the next bot post waits at least 30 minutes, and the
+// next poster must be a DIFFERENT bot (rotation). Comments, likes and
+// messages are NOT paced — only feed posts. Pure helper so every
+// engine (browser cycle, GitHub/local runner) paces identically;
+// callers pass the recent-posts view they already have.
+export const BOT_POST_GAP_MS = 30 * 60_000;
+
+export function botPostPacing(posts = [], botId = '', now = Date.now(), botIds = null) {
+  let last = null;
+  for (const p of posts || []) {
+    if (!p || typeof p.createdAt !== 'number') continue;
+    if (botIds ? !botIds.has(p.authorId) : !(typeof p.authorId === 'string' && p.authorId.startsWith('bot_'))) continue;
+    if (!last || p.createdAt > last.createdAt) last = p;
+  }
+  if (!last) return { allowed: true, reason: '', lastPostAt: 0, lastAuthorId: '' };
+  const age = now - last.createdAt;
+  if (age < BOT_POST_GAP_MS) {
+    return { allowed: false, reason: `post pacing: last bot post was ${Math.max(1, Math.round(age / 60000))} min ago (gap is 30)`, lastPostAt: last.createdAt, lastAuthorId: last.authorId };
+  }
+  // Rotation: the last poster sits out the next slot so another bot
+  // posts next — but only for one extra gap. If a full hour passes
+  // with nobody else posting (others capped or quiet), the floor
+  // opens to everyone again rather than silencing the feed forever.
+  if (last.authorId === botId && age < 2 * BOT_POST_GAP_MS) {
+    return { allowed: false, reason: 'post pacing: this bot posted last — another bot takes the next slot', lastPostAt: last.createdAt, lastAuthorId: last.authorId };
+  }
+  return { allowed: true, reason: '', lastPostAt: last.createdAt, lastAuthorId: last.authorId };
+}
+
 // Merge two same-day counters maps without ever LOSING a count. The
 // counters doc has several independent writers (browser autocycle,
 // GitHub runner, instant responder); each loads the map, bumps its own

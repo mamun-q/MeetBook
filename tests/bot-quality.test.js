@@ -11,7 +11,7 @@ import { describe, it, expect } from 'vitest';
 import assert from 'node:assert/strict';
 import {
   sanitizeBotOutput, isNearDuplicateBotText, textOverlap, sharesTopicPhrase,
-  mergeBotCountersMax
+  mergeBotCountersMax, botPostPacing, BOT_POST_GAP_MS
 } from '../src/botLogic.js';
 
 describe('sanitizeBotOutput', () => {
@@ -65,6 +65,40 @@ describe('near-duplicate detection v2', () => {
 
   it('still catches exact duplicates', () => {
     assert.equal(isNearDuplicateBotText(novaOld, [novaOld]), true);
+  });
+});
+
+describe('botPostPacing (owner rule: one post, then another bot 30 min later)', () => {
+  const now = 1_800_000_000_000;
+  const post = (authorId, ageMs) => ({ authorId, createdAt: now - ageMs, text: 'x' });
+
+  it('allows the very first post when no bot has posted yet', () => {
+    expect(botPostPacing([], 'bot_a', now).allowed).toBe(true);
+    expect(botPostPacing([{ authorId: 'human1', createdAt: now - 1000 }], 'bot_a', now).allowed).toBe(true);
+  });
+
+  it('blocks any bot post inside the 30-minute gap', () => {
+    const posts = [post('bot_a', 10 * 60_000)];
+    expect(botPostPacing(posts, 'bot_b', now).allowed).toBe(false);
+    expect(botPostPacing(posts, 'bot_a', now).allowed).toBe(false);
+  });
+
+  it('after the gap, a DIFFERENT bot may post but the last poster may not', () => {
+    const posts = [post('bot_a', BOT_POST_GAP_MS + 60_000)];
+    expect(botPostPacing(posts, 'bot_b', now).allowed).toBe(true);
+    expect(botPostPacing(posts, 'bot_a', now).allowed).toBe(false);
+  });
+
+  it('the rotation block expires after two gaps so the feed never deadlocks', () => {
+    const posts = [post('bot_a', 2 * BOT_POST_GAP_MS + 60_000)];
+    expect(botPostPacing(posts, 'bot_a', now).allowed).toBe(true);
+  });
+
+  it('judges by the NEWEST bot post, not older ones', () => {
+    const posts = [post('bot_a', 5 * 60_000), post('bot_b', 90 * 60_000)];
+    const r = botPostPacing(posts, 'bot_c', now);
+    expect(r.allowed).toBe(false);
+    expect(r.lastAuthorId).toBe('bot_a');
   });
 });
 

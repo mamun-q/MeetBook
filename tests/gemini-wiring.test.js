@@ -75,6 +75,12 @@ describe('Gemini free wiring (demo-mode generation path)', () => {
 
   it('falls back to template text (and logs a warning) when Gemini fails', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
+    // Post pacing (owner rule): the previous test's cycle posted
+    // seconds ago, which would rightly pace this cycle out — simulate
+    // an hour passing so a post slot is open again.
+    for (const p of store.getState().posts) {
+      if (String(p.authorId).startsWith('bot_')) p.createdAt = Date.now() - 61 * 60_000;
+    }
     const before = store.getState().posts.length;
     // Pin the Decision Engine v2 rng: pass the pacing roll, then land
     // in the post band, so Nova's action is deterministically a post.

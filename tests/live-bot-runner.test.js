@@ -69,7 +69,10 @@ beforeAll(async () => {
   });
   fake.seed('posts', 'post_reply1', {
     authorId: 'bot_nova', text: 'AI Bot post · Space facts for everyone', image: '', visibility: 'public', audienceIds: [],
-    createdAt: Date.now() - 30_000, editedAt: 0, likes: [], reactions: {},
+    // 61 min old: outside the 30-min post-pacing gap AND past the
+    // rotation window, so this cycle may post again (pacing would
+    // rightly block a post seconds after this one).
+    createdAt: Date.now() - 61 * 60_000, editedAt: 0, likes: [], reactions: {},
     comments: [{ id: 'cm1', authorId: 'human1', text: 'Great post, Nova!', createdAt: Date.now() - 20_000, replies: [] }],
     shares: 0, sharedFrom: '', savedBy: [], groupId: '', pageId: '', pageName: '', pageAvatar: '', poll: null, location: '', feeling: '', pinned: false, generatedBy: 'gemini'
   });
@@ -167,6 +170,13 @@ describe('live bot runner (Spark)', () => {
 
   it('Gemini failure -> the post is skipped, not replaced by a template post', async () => {
     fake.remove('botSettings', 'counters'); // fresh counters: interval + limits reset
+    // Post pacing (owner rule): the previous test's cycle posted
+    // seconds ago, which would pace this cycle out BEFORE generation
+    // is even attempted — simulate an hour passing so the generation
+    // failure below is what the cycle actually hits.
+    for (const p of fake.all('posts')) {
+      if (String(p.authorId).startsWith('bot_')) fake.seed('posts', p.id, { ...p, createdAt: Date.now() - 61 * 60_000 });
+    }
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
     // Pin the Decision Engine v2 rng so the cycle picks the post action.
     const rngSpy = vi.spyOn(Math, 'random').mockReturnValue(0.05);

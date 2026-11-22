@@ -23,7 +23,7 @@ import {
   emptyBotCounters, counterDayKey, botCountersForDay, memoryFromConversation,
   pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost,
   globalBotTotals, isOwnerUserId, wantsPhotoRequest, countAlbumPhotosSent, nextAlbumPhoto, pickPhotoCaption,
-  sanitizeBotOutput, mergeBotCountersMax
+  sanitizeBotOutput, mergeBotCountersMax, botPostPacing
 } from '../src/botLogic.js';
 import {
   resolveAiConfig, generateRouted, normaliseUsageMap, usageTotals,
@@ -395,7 +395,17 @@ async function main() {
         const crossTexts = recentRows.filter((p) => p.authorId !== bot.id && botIds.has(p.authorId)).slice(0, 10).map((p) => p.text);
         const ownTexts = ownRows.map((p) => p.text);
         const recentTexts = [...ownTexts, ...crossTexts];
-        let gen = await generateBotText(bot, memories, { kind: 'post' }, generateTemplatePost(bot), secretsDoc, platformConfig);
+        // Post pacing (owner rule): one bot post at a time, 30 min
+        // apart, rotating bots. Checked BEFORE generation so a paced
+        // slot costs no AI call.
+        const pacing = botPostPacing([...ownRows, ...recentRows], bot.id, Date.now(), botIds);
+        let gen = null;
+        if (!pacing.allowed) {
+          results.push(`${bot.name} → skipped post (${pacing.reason})`);
+          note(bot, 'none', pacing.reason);
+        } else {
+          gen = await generateBotText(bot, memories, { kind: 'post' }, generateTemplatePost(bot), secretsDoc, platformConfig);
+        }
         if (gen && String(gen.provider || '').startsWith('template')) {
           // AI generation failed (or its output was rejected by the
           // quality gate): a bland template post is worse than no

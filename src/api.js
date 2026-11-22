@@ -9,7 +9,7 @@ import {
 } from './store.js';
 import { supabase, supabaseReady } from './supabase.js';
 import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme, canEditMessage, chatPollVote, VANISH_TTL_MS, TYPING_FRESH_MS, isGroupMember } from './utils.js';
-import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, pickFriendRequestsToAccept, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost, globalBotTotals, isOwnerUserId, wantsPhotoRequest, countAlbumPhotosSent, nextAlbumPhoto, pickPhotoCaption, sanitizeBotOutput, mergeBotCountersMax } from './botLogic.js';
+import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, pickFriendRequestsToAccept, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost, globalBotTotals, isOwnerUserId, wantsPhotoRequest, countAlbumPhotosSent, nextAlbumPhoto, pickPhotoCaption, sanitizeBotOutput, mergeBotCountersMax, botPostPacing } from './botLogic.js';
 import { canAccessBotSecrets, botModel } from './gemini.js';
 import { providerById, resolveAiConfig, generateRouted, testProvider as testAiProvider, getLastRoutedFailure, resetLastRoutedFailure, anyProviderConfigured, dhakaDayKey, normaliseUsageMap, usageTotals } from './aiProviders.js';
 import { isCloudinaryConfigured, uploadToCloudinary, uploadFileToCloudinary } from './cloudinary.js';
@@ -4686,13 +4686,13 @@ export async function runDemoBotCycle() {
   // when one is configured, template otherwise — because generation is
   // async while the state mutation below must stay atomic.
   const plan = [];
+  let plannedLastBotPost = null; // pacing state across this plan (see botPostPacing)
   for (const bot of s.bots) {
     const counters = { ...(s.botSettings.counters?.[bot.id] || { postsToday: 0, commentsToday: 0, likesToday: 0, messagesToday: 0, lastActionAt: 0 }) };
     const decision = decideBotAction(bot, { ...counters, lastActionAt: 0 }, true);
     if (decision.action === 'none') { results.push({ bot: bot.name, action: 'none', reason: decision.reason }); continue; }
     const entry = { bot, counters, action: decision.action, gen: null, targetId: '' };
     if (decision.action === 'post') {
-      entry.gen = await generateBotText(bot, s.botMemories[bot.id] || [], { kind: 'post' }, generateTemplatePost(bot));
       // Anti-duplicate set: this bot's recent posts AND other bots'
       // recent posts (Master Vision: compare across the ecosystem).
       const botIds = new Set(s.bots.map((b) => b.id));
@@ -4701,9 +4701,20 @@ export async function runDemoBotCycle() {
         ...ownTexts,
         ...s.posts.filter((p) => p.authorId !== bot.id && botIds.has(p.authorId)).slice(0, 10).map((p) => p.text)
       ];
-      if (entry.gen && isNearDuplicateBotText(entry.gen.text, recentTexts, 0.55, ownTexts)) {
-        const fresh = freshTemplatePost(bot, recentTexts);
-        entry.gen = fresh ? { ...entry.gen, text: fresh, provider: 'template' } : null;
+      // Post pacing (owner rule): 30-min gap between bot posts and
+      // rotation — the demo cycle paces exactly like the live ones.
+      const pacingView = [...s.posts];
+      if (plannedLastBotPost) pacingView.push(plannedLastBotPost);
+      const pacing = botPostPacing(pacingView, bot.id, Date.now(), botIds);
+      if (!pacing.allowed) {
+        entry.gen = null;
+      } else {
+        entry.gen = await generateBotText(bot, s.botMemories[bot.id] || [], { kind: 'post' }, generateTemplatePost(bot));
+        if (entry.gen && isNearDuplicateBotText(entry.gen.text, recentTexts, 0.55, ownTexts)) {
+          const fresh = freshTemplatePost(bot, recentTexts);
+          entry.gen = fresh ? { ...entry.gen, text: fresh, provider: 'template' } : null;
+        }
+        if (entry.gen) plannedLastBotPost = { authorId: bot.id, createdAt: Date.now() };
       }
     } else if (decision.action === 'comment') {
       // Phase 2: reply before a new top-level comment (thread budgets).
@@ -5001,6 +5012,10 @@ export async function runLiveBotCycle() {
     const { day, counters } = await loadLiveBotCounters();
     let actions = 0;
     const details = [];
+    // Post pacing state for THIS cycle: the mirror can lag a post this
+    // cycle just inserted (realtime refetch is async), so the newest
+    // in-cycle post is tracked locally and fed to botPostPacing too.
+    let cycleLastBotPost = null;
     for (const bot of data().bots) {
       const c = { ...emptyBotCounters(), ...(counters[bot.id] || {}) };
       const rBefore = results.length;
@@ -5151,7 +5166,18 @@ export async function runLiveBotCycle() {
             ...ownTexts,
             ...(data().posts || []).filter((p) => p.authorId !== bot.id && botIds.has(p.authorId)).slice(0, 10).map((p) => p.text)
           ];
-          let gen = await generateBotText(bot, memories, { kind: 'post' }, generateTemplatePost(bot));
+          // Post pacing (owner rule): one bot post at a time, 30 min
+          // apart, rotating bots — checked before generation so a
+          // paced slot costs no AI call.
+          const pacingView = [...(data().posts || [])];
+          if (cycleLastBotPost) pacingView.push(cycleLastBotPost);
+          const pacing = botPostPacing(pacingView, bot.id, Date.now(), botIds);
+          let gen = null;
+          if (!pacing.allowed) {
+            results.push({ bot: bot.name, action: 'none', reason: pacing.reason });
+          } else {
+            gen = await generateBotText(bot, memories, { kind: 'post' }, generateTemplatePost(bot));
+          }
           if (gen && String(gen.provider || '').startsWith('template')) {
             // AI generation failed (or its output was rejected): a
             // bland template post is worse than no post — doing
@@ -5182,6 +5208,7 @@ export async function runLiveBotCycle() {
           });
           c.postsToday += 1;
           c.lastActionAt = Date.now();
+          cycleLastBotPost = { authorId: bot.id, createdAt: Date.now() };
           const actMem = memoryFromActivity(memories, bot, { kind: 'post', text: gen.text });
           if (actMem !== memories) { try { await sbUpsert('botMemories', { id: bot.id, botId: bot.id, items: actMem }); memories = actMem; } catch { /* best-effort */ } }
           actions += 1;
