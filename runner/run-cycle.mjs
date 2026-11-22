@@ -23,11 +23,11 @@ import {
   emptyBotCounters, counterDayKey, botCountersForDay, memoryFromConversation,
   pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost,
   globalBotTotals, isOwnerUserId, wantsPhotoRequest, countAlbumPhotosSent, nextAlbumPhoto, pickPhotoCaption,
-  sanitizeBotOutput, mergeBotCountersMax, botPostPacing
+  sanitizeBotOutput, mergeBotCountersMax, botPostPacing, freshTemplateComment, ownCommentTexts
 } from '../src/botLogic.js';
 import {
   resolveAiConfig, generateRouted, normaliseUsageMap, usageTotals,
-  dhakaDayKey, getLastRoutedFailure, resetLastRoutedFailure
+  dhakaDayKey, getLastRoutedFailure, resetLastRoutedFailure, mergeUsageMapsMax
 } from '../src/aiProviders.js';
 
 const email = process.env.RUNNER_EMAIL;
@@ -455,11 +455,19 @@ async function main() {
           const hostComment = replyTarget.comment;
           const blockRow = await sbGet('blocks', `${hostComment.authorId}_${bot.id}`);
           if (!blockRow) {
-            const gen = await generateBotText(bot, memories, { kind: 'comment', text: hostComment.text }, generateTemplateComment(bot), secretsDoc, platformConfig);
+            let gen = await generateBotText(bot, memories, { kind: 'comment', text: hostComment.text }, generateTemplateComment(bot), secretsDoc, platformConfig);
+            // Template freshness (audit fix): during an AI outage the
+            // 4 template comments must not repeat verbatim across the
+            // feed — swap in an unused one, or skip the comment.
+            if (gen && String(gen.provider || '').startsWith('template')) {
+              const fresh = freshTemplateComment(bot, ownCommentTexts(allPosts, bot.id));
+              if (!fresh) { results.push(`${bot.name} → skipped comment (template would repeat)`); note(bot, 'none', 'skipped comment (template would repeat)'); gen = null; }
+              else gen = { ...gen, text: fresh };
+            }
             const freshRow = await sbGet('posts', hostPost.id);
             const freshComments = freshRow ? (freshRow.comments || []) : (hostPost.comments || []);
             const host = freshComments.find((cm) => cm.id === hostComment.id);
-            if (host) {
+            if (gen && host) {
               host.replies = [...(host.replies || []), { id: genId('c'), authorId: bot.id, text: gen.text, createdAt: Date.now() }];
               await sbUpdate('posts', hostPost.id, { comments: freshComments });
               c.commentsToday += 1;
@@ -490,7 +498,14 @@ async function main() {
         if (target) {
           const blockRow = await sbGet('blocks', `${target.authorId}_${bot.id}`);
           if (!blockRow) {
-            const gen = await generateBotText(bot, memories, { kind: 'comment', text: target.text }, generateTemplateComment(bot), secretsDoc, platformConfig);
+            let gen = await generateBotText(bot, memories, { kind: 'comment', text: target.text }, generateTemplateComment(bot), secretsDoc, platformConfig);
+            // Template freshness (audit fix): see the reply branch.
+            if (gen && String(gen.provider || '').startsWith('template')) {
+              const fresh = freshTemplateComment(bot, ownCommentTexts(allPosts, bot.id));
+              if (!fresh) { results.push(`${bot.name} → skipped comment (template would repeat)`); note(bot, 'none', 'skipped comment (template would repeat)'); gen = null; }
+              else gen = { ...gen, text: fresh };
+            }
+            if (gen) {
             const comment = { id: genId('c'), authorId: bot.id, text: gen.text, createdAt: Date.now(), replies: [] };
             // Re-read the post AFTER generating (the browser cycle
             // does this too): appending to the pre-generation snapshot
@@ -515,6 +530,7 @@ async function main() {
             acted = true;
             results.push(`${bot.name} → comment (via ${gen.provider})`);
             note(bot, 'comment', `via ${gen.provider}`);
+            }
           }
         }
         }
@@ -527,15 +543,21 @@ async function main() {
           // in the audience for.
           .find((p) => p.visibility === 'public' && !p.groupId && !p.pageId && p.authorId !== bot.id && !(p.likes || []).includes(bot.id));
         if (target) {
-          // No arrayUnion in PostgREST: append to the row's current
-          // likes and write the whole array back (the browser cycle
-          // writes likes the same way).
-          await sbUpdate('posts', target.id, { likes: [...(target.likes || []), bot.id] });
-          c.likesToday += 1;
-          c.lastActionAt = Date.now();
-          acted = true;
-          results.push(`${bot.name} → like`);
-          note(bot, 'like');
+          // Re-read the row right before writing (audit fix,
+          // 2026-11-23): the list snapshot can be seconds old, and
+          // writing its likes array back would erase any like that
+          // landed meanwhile — the comment branches already re-read
+          // for exactly this reason; the like branch never did.
+          const freshRow = await sbGet('posts', target.id);
+          const freshLikes = freshRow ? (freshRow.likes || []) : (target.likes || []);
+          if (!freshLikes.includes(bot.id)) {
+            await sbUpdate('posts', target.id, { likes: [...freshLikes, bot.id] });
+            c.likesToday += 1;
+            c.lastActionAt = Date.now();
+            acted = true;
+            results.push(`${bot.name} → like`);
+            note(bot, 'like');
+          }
         }
       }
       if (!acted && !targets.length) { results.push(`${bot.name} → none (${decision.reason})`); note(bot, 'none', decision.reason); }
@@ -575,9 +597,19 @@ async function main() {
     }
   }
   if (aiUsage) {
+    // Merge-on-write (audit fix, 2026-11-23): re-read the stored usage
+    // and take per-field MAX, so this cycle's write cannot erase
+    // counts the instant responder or the browser cycle added while
+    // this cycle was running (the whole-map overwrite lost them,
+    // including exhaustedUntil stamps).
+    let providers = aiUsage.providers;
+    try {
+      const stored = await sbGet('botSecrets', 'config');
+      if (stored?.aiUsage && stored.aiUsage.day === aiUsage.day) providers = mergeUsageMapsMax(stored.aiUsage.providers, aiUsage.providers);
+    } catch { /* merge is best-effort; the raw write still lands */ }
     await sbUpsert('botSecrets', {
       id: 'config',
-      aiUsage: { day: aiUsage.day, providers: aiUsage.providers }, updatedAt: Date.now()
+      aiUsage: { day: aiUsage.day, providers }, updatedAt: Date.now()
     });
   }
   const failure = getLastRoutedFailure();

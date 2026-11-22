@@ -9,9 +9,9 @@ import {
 } from './store.js';
 import { supabase, supabaseReady } from './supabase.js';
 import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme, canEditMessage, chatPollVote, VANISH_TTL_MS, TYPING_FRESH_MS, isGroupMember } from './utils.js';
-import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, pickFriendRequestsToAccept, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost, globalBotTotals, isOwnerUserId, wantsPhotoRequest, countAlbumPhotosSent, nextAlbumPhoto, pickPhotoCaption, sanitizeBotOutput, mergeBotCountersMax, botPostPacing } from './botLogic.js';
+import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, pickFriendRequestsToAccept, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost, freshTemplateComment, ownCommentTexts, globalBotTotals, isOwnerUserId, wantsPhotoRequest, countAlbumPhotosSent, nextAlbumPhoto, pickPhotoCaption, sanitizeBotOutput, mergeBotCountersMax, botPostPacing } from './botLogic.js';
 import { canAccessBotSecrets, botModel } from './gemini.js';
-import { providerById, resolveAiConfig, generateRouted, testProvider as testAiProvider, getLastRoutedFailure, resetLastRoutedFailure, anyProviderConfigured, dhakaDayKey, normaliseUsageMap, usageTotals } from './aiProviders.js';
+import { providerById, resolveAiConfig, generateRouted, testProvider as testAiProvider, getLastRoutedFailure, resetLastRoutedFailure, anyProviderConfigured, dhakaDayKey, normaliseUsageMap, usageTotals, mergeUsageMapsMax } from './aiProviders.js';
 import { isCloudinaryConfigured, uploadToCloudinary, uploadFileToCloudinary } from './cloudinary.js';
 
 // Live-mode switch: every `if (live)` branch below is the Supabase path,
@@ -4591,10 +4591,21 @@ function recordAiUsage(providerId, attempt) {
     if (!remote) return;
     remote.aiUsage = bumpAiUsage(remote.aiUsage, providerId, attempt);
     document.dispatchEvent(new CustomEvent('meetbook:data'));
-    sbUpsert('botSecrets', {
-      id: 'config',
-      aiUsage: { day: remote.aiUsage.day, providers: remote.aiUsage.providers }, updatedAt: Date.now()
-    }).catch(() => { /* counters are bookkeeping — never fail a cycle */ });
+    // Merge-on-write (audit fix, 2026-11-23): the stored map is
+    // re-read and merged per-field MAX, so this write cannot erase
+    // usage the runner or the instant responder recorded meanwhile.
+    const snapshot = { day: remote.aiUsage.day, providers: remote.aiUsage.providers };
+    (async () => {
+      let providers = snapshot.providers;
+      try {
+        const stored = await sbGet('botSecrets', 'config');
+        if (stored?.aiUsage && stored.aiUsage.day === snapshot.day) providers = mergeUsageMapsMax(stored.aiUsage.providers, snapshot.providers);
+      } catch { /* best-effort */ }
+      await sbUpsert('botSecrets', {
+        id: 'config',
+        aiUsage: { day: snapshot.day, providers }, updatedAt: Date.now()
+      });
+    })().catch(() => { /* counters are bookkeeping — never fail a cycle */ });
     return;
   }
   mutate((s) => { s.aiUsage = bumpAiUsage(s.aiUsage, providerId, attempt); });
@@ -4729,6 +4740,12 @@ export async function runDemoBotCycle() {
           entry.targetId = target.id;
           entry.gen = await generateBotText(bot, s.botMemories[bot.id] || [], { kind: 'comment', text: target.text }, generateTemplateComment(bot));
         }
+      }
+      // Template freshness (audit fix): the demo cycle follows the
+      // same no-verbatim-repeat rule as the live engines.
+      if (entry.gen && String(entry.gen.provider || '').startsWith('template')) {
+        const fresh = freshTemplateComment(bot, ownCommentTexts(s.posts, bot.id));
+        entry.gen = fresh ? { ...entry.gen, text: fresh } : null;
       }
     }
     plan.push(entry);
@@ -5232,11 +5249,19 @@ export async function runLiveBotCycle() {
             if (blockRow) {
               results.push({ bot: bot.name, action: 'none', reason: 'comment author blocked this bot' });
             } else {
-              const gen = await generateBotText(bot, memories, { kind: 'comment', text: hostComment.text }, generateTemplateComment(bot));
+              let gen = await generateBotText(bot, memories, { kind: 'comment', text: hostComment.text }, generateTemplateComment(bot));
+              // Template freshness (audit fix): during an AI outage
+              // the template comments must not repeat verbatim across
+              // the feed — swap in an unused one, or skip.
+              if (gen && String(gen.provider || '').startsWith('template')) {
+                const fresh = freshTemplateComment(bot, ownCommentTexts(allPosts, bot.id));
+                if (!fresh) { results.push({ bot: bot.name, action: 'none', reason: 'template comment would repeat' }); gen = null; }
+                else gen = { ...gen, text: fresh };
+              }
               const postRow = await sbGet('posts', hostPost.id);
               const freshComments = postRow ? (postRow.comments || []) : (hostPost.comments || []);
               const host = freshComments.find((cm) => cm.id === hostComment.id);
-              if (host) {
+              if (gen && host) {
                 host.replies = [...(host.replies || []), { id: genId('c'), authorId: bot.id, text: gen.text, createdAt: Date.now() }];
                 await sbUpdate('posts', hostPost.id, { comments: freshComments });
                 c.commentsToday += 1;
@@ -5267,7 +5292,14 @@ export async function runLiveBotCycle() {
             if (blockRow) {
               results.push({ bot: bot.name, action: 'none', reason: 'post author blocked this bot' });
             } else {
-              const gen = await generateBotText(bot, memories, { kind: 'comment', text: target.text }, generateTemplateComment(bot));
+              let gen = await generateBotText(bot, memories, { kind: 'comment', text: target.text }, generateTemplateComment(bot));
+              // Template freshness (audit fix): see the reply branch.
+              if (gen && String(gen.provider || '').startsWith('template')) {
+                const fresh = freshTemplateComment(bot, ownCommentTexts(allPosts, bot.id));
+                if (!fresh) { results.push({ bot: bot.name, action: 'none', reason: 'template comment would repeat' }); gen = null; }
+                else gen = { ...gen, text: fresh };
+              }
+              if (gen) {
               const postRow = await sbGet('posts', target.id);
               const freshComments = postRow ? (postRow.comments || []) : (target.comments || []);
               const comment = { id: genId('c'), authorId: bot.id, text: gen.text, createdAt: Date.now(), replies: [] };
@@ -5284,6 +5316,7 @@ export async function runLiveBotCycle() {
               actions += 1;
               acted = true;
               results.push({ bot: bot.name, action: 'comment' });
+              }
             }
           }
           }
@@ -5294,12 +5327,19 @@ export async function runLiveBotCycle() {
           // (the admin-signed runner can READ every post).
           const target = (data().posts || []).find((p) => p.visibility === 'public' && !p.groupId && !p.pageId && p.authorId !== bot.id && !(p.likes || []).includes(bot.id));
           if (target) {
-            await sbUpdate('posts', target.id, { likes: [...(target.likes || []), bot.id] });
-            c.likesToday += 1;
-            c.lastActionAt = Date.now();
-            actions += 1;
-            acted = true;
-            results.push({ bot: bot.name, action: 'like' });
+            // Re-read before writing (audit fix, 2026-11-23): the
+            // mirror snapshot can be seconds stale, and writing its
+            // likes array back would erase any like landed meanwhile.
+            const postRow = await sbGet('posts', target.id);
+            const freshLikes = postRow ? (postRow.likes || []) : (target.likes || []);
+            if (!freshLikes.includes(bot.id)) {
+              await sbUpdate('posts', target.id, { likes: [...freshLikes, bot.id] });
+              c.likesToday += 1;
+              c.lastActionAt = Date.now();
+              actions += 1;
+              acted = true;
+              results.push({ bot: bot.name, action: 'like' });
+            }
           }
         }
         if (!acted && !dmNote) results.push({ bot: bot.name, action: 'none', reason: decision.action === 'message' ? 'no unreplied conversations' : decision.reason });

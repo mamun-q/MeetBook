@@ -58,7 +58,11 @@ export function normaliseBot(raw = {}) {
 
 // Select the memories most relevant to a prompt: keyword overlap + recency.
 export function selectMemories(memories = [], prompt = '', max = 5) {
-  const words = new Set(String(prompt || '').toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2));
+  // Unicode-aware split (audit fix, 2026-11-23): the old [^a-z0-9]
+  // split silently dropped EVERY Bangla word from the keyword set, so
+  // for Bangla conversations — most of this platform's — keyword
+  // scoring never fired and selection fell back to recency alone.
+  const words = new Set(String(prompt || '').toLowerCase().split(/[^\p{L}\p{N}\p{M}]+/u).filter((w) => w.length > 2));
   const scored = memories.map((m) => {
     const text = String(m.text || '').toLowerCase();
     let score = 0;
@@ -206,7 +210,7 @@ export function sanitizeBotOutput(text) {
 // for the anti-repetition rules: it catches REWORDED repeats — a simple
 // word replacement must not make duplicate content acceptable.
 export function contentTokenSet(t = '') {
-  return new Set(normaliseBotText(t).split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 2));
+  return new Set(normaliseBotText(t).split(/[^\p{L}\p{N}\p{M}]+/u).filter((w) => w.length > 2));
 }
 
 export function textSimilarity(a = '', b = '') {
@@ -236,7 +240,7 @@ export function textOverlap(a = '', b = '') {
 // The strongest same-topic signal there is — two posts that open with
 // the same three content words are the same post wearing a new tail.
 export function sharesTopicPhrase(a = '', b = '') {
-  const seq = (t) => normaliseBotText(t).split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 2);
+  const seq = (t) => normaliseBotText(t).split(/[^\p{L}\p{N}\p{M}]+/u).filter((w) => w.length > 2);
   const A = seq(a);
   const B = new Set();
   const seqB = seq(b);
@@ -253,8 +257,31 @@ export function sharesTopicPhrase(a = '', b = '') {
 // two different bots may legitimately open with a similar phrase.
 export function isNearDuplicateBotText(text, recentTexts = [], threshold = 0.55, ownTexts = []) {
   if (isDuplicateBotText(text, recentTexts)) return true;
-  if ((recentTexts || []).some((t) => textSimilarity(text, t) >= threshold || textOverlap(text, t) >= 0.62)) return true;
+  if ((recentTexts || []).some((t) => textSimilarity(text, t) >= threshold || textOverlap(text, t) >= 0.62 || charNgramSimilarity(text, t) >= 0.45)) return true;
   return (ownTexts || []).some((t) => sharesTopicPhrase(text, t));
+}
+
+// Character n-gram similarity (Jaccard over 4-grams of the normalised
+// text). Word tokens miss two real repeat shapes: template-skeleton
+// posts that only swap one or two words, and heavily inflected
+// languages (Bangla suffixes turn বাগানে/বাগানের into different word
+// tokens while the character stream stays close). Measured on real
+// pairs (2026-11-23): template skeletons ≈ 0.72–0.76, distinct posts
+// on a shared topic ≈ 0.12, unrelated posts ≈ 0.00 — the 0.45 line in
+// isNearDuplicateBotText sits well inside the empty middle.
+export function charNgramSimilarity(a = '', b = '', n = 4) {
+  const grams = (t) => {
+    const s = normaliseBotText(t).replace(/\s+/g, ' ');
+    const out = new Set();
+    for (let i = 0; i + n <= s.length; i++) out.add(s.slice(i, i + n));
+    return out;
+  };
+  const A = grams(a);
+  const B = grams(b);
+  if (!A.size || !B.size) return 0;
+  let inter = 0;
+  for (const g of A) if (B.has(g)) inter += 1;
+  return inter / (A.size + B.size - inter);
 }
 
 // How relevant a text is to a bot: the share of its interests that the
@@ -767,15 +794,41 @@ export function memoryFromConversation(existing = [], userText, botText, now = D
   });
 }
 
+// Cap a memory list at `cap` entries WITHOUT ever evicting a pinned
+// memory (audit fix, 2026-11-23): the old plain slice(-100) dropped
+// the OLDEST entries first, so a busy bot's admin-pinned memories —
+// the ones that matter most — were silently deleted once routine
+// conversation notes filled the cap.
+function capMemories(list = [], cap = 100) {
+  const arr = Array.isArray(list) ? list : [];
+  if (arr.length <= cap) return arr;
+  const keep = new Set(arr.slice(-cap));
+  for (const m of arr) if (m && m.pinned) keep.add(m);
+  return arr.filter((m) => keep.has(m));
+}
+
 // Shared memory upsert (Master Vision: retention with dedup, not
 // indiscriminate storage): a near-identical note REFRESHES the old one
 // instead of piling up a copy. Cap 100 per bot.
 function upsertMemory(existing = [], entry) {
   const dupe = (existing || []).find((m) => m && textSimilarity(m.text, entry.text) >= 0.65);
   if (dupe) {
-    return (existing || []).map((m) => (m === dupe ? { ...m, text: entry.text, updatedAt: entry.updatedAt } : m)).slice(-100);
+    return capMemories((existing || []).map((m) => (m === dupe ? { ...m, text: entry.text, updatedAt: entry.updatedAt } : m)));
   }
-  return [...(existing || []), entry].slice(-100);
+  return capMemories([...(existing || []), entry]);
+}
+
+// Every comment/reply text this bot has left on the given posts —
+// the freshness scope for template comments (a template that already
+// appears here must not be posted again during an AI outage).
+export function ownCommentTexts(posts = [], botId = '') {
+  const out = [];
+  for (const p of posts || []) {
+    for (const e of flattenThread(p)) {
+      if (e.authorId === botId && e.text) out.push(e.text);
+    }
+  }
+  return out;
 }
 
 // The bot's interests that a text actually mentions. Interests are

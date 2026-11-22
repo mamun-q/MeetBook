@@ -216,6 +216,32 @@ export function normaliseUsageMap(raw) {
   return out;
 }
 
+// Merge two same-day usage maps without LOSING counts (audit fix,
+// 2026-11-23): aiUsage has three independent writers (browser cycle,
+// GitHub/local runner, instant responder) and each used to write its
+// whole in-memory map back, so a writer holding a stale copy erased
+// the others' fresh counts — including exhaustedUntil stamps and the
+// very numbers the daily-cap guards read. Usage only grows within a
+// day, so the merge is per-provider, per-field MAX against a fresh
+// read at persist time (the same pattern as mergeBotCountersMax).
+export function mergeUsageMapsMax(currentProviders, incomingProviders) {
+  const cur = normaliseUsageMap(currentProviders);
+  const inc = normaliseUsageMap(incomingProviders);
+  const out = {};
+  for (const entry of AI_PROVIDERS) {
+    const a = cur[entry.id];
+    const b = inc[entry.id];
+    out[entry.id] = {
+      calls: Math.max(a.calls, b.calls),
+      errors: Math.max(a.errors, b.errors),
+      promptTokens: Math.max(a.promptTokens, b.promptTokens),
+      completionTokens: Math.max(a.completionTokens, b.completionTokens),
+      exhaustedUntil: Math.max(a.exhaustedUntil, b.exhaustedUntil)
+    };
+  }
+  return out;
+}
+
 export function usageTotals(providers) {
   let calls = 0; let tokens = 0; let errors = 0;
   for (const u of Object.values(providers || {})) {
