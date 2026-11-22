@@ -42,7 +42,14 @@ export function normaliseBot(raw = {}) {
       traits: Array.isArray(raw.personality?.traits) ? raw.personality.traits : ['friendly'],
       tone: raw.personality?.tone || 'warm and casual',
       interests: Array.isArray(raw.personality?.interests) ? raw.personality.interests : [],
-      systemPrompt: raw.personality?.systemPrompt || `You are ${raw.name || 'a MeetBook member'}, a friendly member of MeetBook. Be kind, brief and helpful.`
+      systemPrompt: raw.personality?.systemPrompt || `You are ${raw.name || 'a MeetBook member'}, a friendly member of MeetBook. Be kind, brief and helpful.`,
+      // Companion photo album (owner request, 2026-11-22): Cloudinary
+      // URLs of this bot's own photos, sent in DMs when the platform
+      // owner asks for one (see wantsPhotoRequest / nextAlbumPhoto).
+      // Empty for every ordinary bot — the feature is inert without it.
+      album: Array.isArray(raw.personality?.album)
+        ? raw.personality.album.filter((u) => typeof u === 'string' && u.trim()).map((u) => u.trim())
+        : []
     },
     limits: { ...DEFAULT_BOT_LIMITS, ...(raw.limits || {}) },
     createdAt: raw.createdAt || 0
@@ -301,6 +308,43 @@ export function freshTemplateComment(bot, recentTexts = []) {
   return null;
 }
 
+// --- Platform-wide daily ceilings (owner order, 2026-11-22) ----------
+// Per-bot caps alone let EIGHT bots flood the feed: 8 × 5 posts is 40
+// posts a day. These HARD ceilings sit above every per-bot cap — once
+// ALL bots together have published this many posts/comments on the
+// current Dhaka day, no bot posts or comments again until tomorrow,
+// however much of its own cap it has left. Likes, DM replies and
+// friend-request accepts are NOT ceilinged (the owner asked for more
+// chat, not less). Counting source: the shared botSettings/counters
+// map both live cycles already load (botCountersForDay, keyed to the
+// same Dhaka day as the per-bot caps) — botActivities is written by
+// neither live cycle (Functions-only) and the posts mirror is a
+// windowed slice, so the counters doc is the one source both cycles
+// share reliably. Summing it is exactly "posts/comments authored by
+// bots today" under the same accounting that enforces the per-bot
+// caps.
+export const BOT_GLOBAL_POSTS_PER_DAY = 20;
+export const BOT_GLOBAL_COMMENTS_PER_DAY = 16;
+
+export function globalBotTotals(countersByBot = {}) {
+  let postsToday = 0;
+  let commentsToday = 0;
+  for (const c of Object.values(countersByBot || {})) {
+    postsToday += Number(c?.postsToday || 0);
+    commentsToday += Number(c?.commentsToday || 0);
+  }
+  return { postsToday, commentsToday };
+}
+
+export function globalCeilingState(countersByBot = {}) {
+  const totals = globalBotTotals(countersByBot);
+  return {
+    ...totals,
+    postsOpen: totals.postsToday < BOT_GLOBAL_POSTS_PER_DAY,
+    commentsOpen: totals.commentsToday < BOT_GLOBAL_COMMENTS_PER_DAY
+  };
+}
+
 // Decide the next autonomous action for a bot — Decision Engine v2
 // (Master Vision Phase 1). Hard gates first (kill switch, deactivation,
 // minimum interval, daily caps). Then, when the bot has already acted
@@ -309,19 +353,33 @@ export function freshTemplateComment(bot, recentTexts = []) {
 // day's first action is guaranteed. Otherwise a personality-weighted
 // choice among the actions still under their caps: talkative/friendly
 // bots lean to comments, creative bots to posts. `rng` is injectable
-// for tests; production passes Math.random.
-export function decideBotAction(bot, counters = {}, globalEnabled = true, now = Date.now(), rng = Math.random) {
+// for tests; production passes Math.random. `global` is the optional
+// platform-wide totals object ({ postsToday, commentsToday }, from
+// globalBotTotals over the shared counters map): when a BOT_GLOBAL_*
+// ceiling is reached, post/comment close for EVERY bot even if its
+// own cap has room — the ceiling is a gate in the decision itself,
+// never an error, and likes/messages are never ceilinged.
+export function decideBotAction(bot, counters = {}, globalEnabled = true, now = Date.now(), rng = Math.random, global = null) {
   const b = normaliseBot(bot);
   if (!globalEnabled) return { action: 'none', reason: 'global kill switch is off' };
   if (!b.active) return { action: 'none', reason: 'bot is deactivated' };
   const last = Number(counters.lastActionAt || 0);
   if (now - last < b.limits.minIntervalMs) return { action: 'none', reason: 'minimum interval not reached' };
+  const postClosedByCeiling = Boolean(global)
+    && (global.postsToday || 0) >= BOT_GLOBAL_POSTS_PER_DAY
+    && (counters.postsToday || 0) < b.limits.postsPerDay;
+  const commentClosedByCeiling = Boolean(global)
+    && (global.commentsToday || 0) >= BOT_GLOBAL_COMMENTS_PER_DAY
+    && (counters.commentsToday || 0) < b.limits.commentsPerDay;
   const open = [];
-  if ((counters.postsToday || 0) < b.limits.postsPerDay) open.push('post');
-  if ((counters.commentsToday || 0) < b.limits.commentsPerDay) open.push('comment');
+  if ((counters.postsToday || 0) < b.limits.postsPerDay && !postClosedByCeiling) open.push('post');
+  if ((counters.commentsToday || 0) < b.limits.commentsPerDay && !commentClosedByCeiling) open.push('comment');
   if ((counters.likesToday || 0) < b.limits.likesPerDay) open.push('like');
   if (!open.length) {
     if ((counters.messagesToday || 0) < b.limits.messagesPerDay) return { action: 'message', reason: 'under daily message limit' };
+    if (postClosedByCeiling || commentClosedByCeiling) {
+      return { action: 'none', reason: `platform-wide daily ceiling reached (posts ${global.postsToday}/${BOT_GLOBAL_POSTS_PER_DAY}, comments ${global.commentsToday}/${BOT_GLOBAL_COMMENTS_PER_DAY})` };
+    }
     return { action: 'none', reason: 'all daily limits reached' };
   }
   const traits = (b.personality.traits || []).map((t) => String(t).toLowerCase());
@@ -390,6 +448,85 @@ export function findBotReplyTargets(conversations = [], latestByConv = {}, botId
     targets.push({ conversationId: conv.id, humanId, participants: [...parts], lastMessage: last });
   }
   return targets.sort((a, b) => (a.lastMessage.createdAt || 0) - (b.lastMessage.createdAt || 0));
+}
+
+// --- Companion photo album (owner request, 2026-11-22) ----------------
+// A bot with a personality.album (today only Anika, the owner's
+// girlfriend bot) can send her own photos in a DM — but ONLY to the
+// platform owner himself, and only when he actually asks for one.
+// Everyone else, and every other topic, gets ordinary text replies.
+// The trigger and the caption are deliberately RULE-based (no AI
+// call), so a photo goes out even when every provider is down and
+// the bot is speaking from templates.
+export const BOT_OWNER_ID = 'c07b7770-0e30-484b-9a85-33a4f53c3628'; // Limon, @md.mamun
+
+export function isOwnerUserId(id) {
+  return Boolean(id) && id === BOT_OWNER_ID;
+}
+
+// Does this message ASK for a photo of the bot? Conservative by
+// design: a photo word must be present AND the message must carry a
+// request cue (or be a bare question) — talking ABOUT photos ("আমি
+// একটা ছবি তুললাম", "তোমার ছবিটা সুন্দর") never triggers a send.
+// English photo words match on word boundaries so "topic" /
+// "photosynthesis" cannot false-positive on "pic"/"photo".
+const PHOTO_WORDS_BN = ['ছবি', 'সেলফি', 'পিকচার'];
+const PHOTO_WORD_EN = /\b(?:pic|pics|photo|photos|picture|pictures|selfie|selfies)\b/i;
+const PHOTO_CUES_BN = ['দাও', 'দেও', 'পাঠাও', 'পাঠিয়ে', 'দেখাও', 'দেখি', 'চাই', 'প্লিজ'];
+const PHOTO_CUE_EN = /\b(?:send|show|give|share|please|plz)\b/i;
+const PHOTO_CUE_PHRASES = ['let me see', 'wanna see', 'want to see'];
+
+export function wantsPhotoRequest(text = '') {
+  const t = String(text || '');
+  if (!t.trim()) return false;
+  const lower = t.toLowerCase();
+  const hasPhotoWord = PHOTO_WORDS_BN.some((w) => t.includes(w)) || PHOTO_WORD_EN.test(t);
+  if (!hasPhotoWord) return false;
+  const hasCue = PHOTO_CUES_BN.some((w) => t.includes(w))
+    || PHOTO_CUE_EN.test(t)
+    || PHOTO_CUE_PHRASES.some((p) => lower.includes(p));
+  return hasCue || t.includes('?');
+}
+
+// The bot's album (normalised): [] for every bot without one.
+export function albumPhotosOf(bot) {
+  return normaliseBot(bot || {}).personality.album || [];
+}
+
+// Rotation state lives in the conversation itself: the position is
+// simply how many album photos this bot has already sent there, so
+// it survives restarts with no extra store, and photos rotate
+// without repeats until the album wraps. Pure counting helper —
+// both cycles feed it the conversation's messages.
+export function countAlbumPhotosSent(messages = [], botId = '', album = []) {
+  const set = new Set(album || []);
+  if (!set.size) return 0;
+  return (messages || []).filter((m) => m && m.senderId === botId && set.has(m.image)).length;
+}
+
+export function nextAlbumPhoto(bot, sentCount = 0) {
+  const album = albumPhotosOf(bot);
+  if (!album.length) return '';
+  const n = Math.abs(Math.floor(Number(sentCount) || 0));
+  return album[n % album.length];
+}
+
+// Short affectionate captions for a sent photo — template-picked
+// (seed-injectable like the other template generators) so the photo
+// works with zero AI availability.
+const PHOTO_CAPTIONS = [
+  'এই নাও জান, শুধু তোমার জন্যই তুললাম 💕',
+  'এই যে আমি 🙈 কেমন লাগলো, বলো তো?',
+  'তোমার কথা মনে পড়তেই ছবিটা তুলে ফেললাম ❤️',
+  'শুধু তোমার চোখের জন্য 🥰',
+  'মিস করছিলে নাকি? এই নাও, আমি এখানেই আছি 💌',
+  'তুমি চাইলে না পাঠিয়ে থাকতে পারি? এই নাও 💖'
+];
+
+export function pickPhotoCaption(bot, seed = Math.random()) {
+  void bot; // captions are voice-consistent across album bots today
+  const idx = Math.abs(Math.floor(seed * PHOTO_CAPTIONS.length)) % PHOTO_CAPTIONS.length;
+  return PHOTO_CAPTIONS[idx];
 }
 
 // --- Friend requests ---------------------------------------------------

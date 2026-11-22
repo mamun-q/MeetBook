@@ -53,17 +53,23 @@ describe('canViewPost with denormalized audienceIds', () => {
   });
 });
 
-describe('canViewGroupPost with denormalized audienceIds', () => {
+describe('canViewGroupPost follows CURRENT membership, not the stored snapshot', () => {
   const priv = normaliseGroup({ name: 'Priv', privacy: 'private', members: ['u_member'] }, 'u_creator');
   // Private-group posts are stored with visibility 'private' and the
-  // creation-time members as audienceIds.
+  // creation-time members as audienceIds — a snapshot that goes stale
+  // in both directions, so it must never decide access by itself.
   const privPost = { id: 'p', authorId: 'u_member', groupId: 'g_priv', visibility: 'private', audienceIds: ['u_creator', 'u_member', 'u_former'] };
   it('current members can view (member check unchanged)', () => {
     expect(canViewGroupPost(privPost, priv, 'u_member')).toBe(true);
     expect(canViewGroupPost(privPost, priv, 'u_creator')).toBe(true);
   });
-  it('a viewer in audienceIds can view even if no longer a group member', () => {
-    expect(canViewGroupPost(privPost, priv, 'u_former')).toBe(true);
+  it('a member who joined AFTER creation can view (not in audienceIds)', () => {
+    const grown = normaliseGroup({ name: 'Priv', privacy: 'private', members: ['u_member', 'u_joiner'] }, 'u_creator');
+    expect(privPost.audienceIds).not.toContain('u_joiner');
+    expect(canViewGroupPost(privPost, grown, 'u_joiner')).toBe(true);
+  });
+  it('a viewer in audienceIds who is no longer a member CANNOT view (former-member leak)', () => {
+    expect(canViewGroupPost(privPost, priv, 'u_former')).toBe(false);
   });
   it('a viewer in neither members nor audience cannot view', () => {
     expect(canViewGroupPost(privPost, priv, 'u_stranger')).toBe(false);

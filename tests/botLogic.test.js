@@ -7,7 +7,10 @@ import {
   freshTemplatePost, freshTemplateComment,
   textSimilarity, isNearDuplicateBotText, interestRelevance, threadContextText,
   flattenThread, pickBotReplyTarget, matchedInterests, memoryFromActivity,
-  pickFriendRequestsToAccept, BOT_FRIEND_ACCEPT_MIN_AGE_MS, BOT_FRIEND_ACCEPT_PER_CYCLE
+  pickFriendRequestsToAccept, BOT_FRIEND_ACCEPT_MIN_AGE_MS, BOT_FRIEND_ACCEPT_PER_CYCLE,
+  BOT_GLOBAL_POSTS_PER_DAY, BOT_GLOBAL_COMMENTS_PER_DAY, globalBotTotals, globalCeilingState,
+  BOT_OWNER_ID, isOwnerUserId, wantsPhotoRequest, albumPhotosOf, countAlbumPhotosSent,
+  nextAlbumPhoto, pickPhotoCaption
 } from '../src/botLogic.js';
 
 const nova = {
@@ -395,5 +398,168 @@ describe('friend-request acceptance pacing', () => {
     expect(pickFriendRequestsToAccept(rows, 'bot_nova', now).map((f) => f.id)).toEqual(['f_mine']);
     expect(pickFriendRequestsToAccept([], 'bot_nova', now)).toEqual([]);
     expect(pickFriendRequestsToAccept(undefined, 'bot_nova', now)).toEqual([]);
+  });
+});
+
+describe('platform-wide daily ceilings (owner order, 2026-11-22)', () => {
+  const rolls = (vals) => { let i = 0; return () => vals[Math.min(i++, vals.length - 1)]; };
+
+  it('globalBotTotals sums posts/comments across every bot, tolerating gaps', () => {
+    expect(globalBotTotals({})).toEqual({ postsToday: 0, commentsToday: 0 });
+    expect(globalBotTotals(null)).toEqual({ postsToday: 0, commentsToday: 0 });
+    expect(globalBotTotals({
+      bot_a: { postsToday: 3, commentsToday: 2 },
+      bot_b: { postsToday: 4 },
+      bot_c: {}
+    })).toEqual({ postsToday: 7, commentsToday: 2 });
+  });
+
+  it('globalCeilingState opens below the ceiling and closes at/above it', () => {
+    const below = globalCeilingState({ bot_a: { postsToday: BOT_GLOBAL_POSTS_PER_DAY - 1, commentsToday: BOT_GLOBAL_COMMENTS_PER_DAY - 1 } });
+    expect(below).toMatchObject({ postsOpen: true, commentsOpen: true });
+    const at = globalCeilingState({
+      bot_a: { postsToday: BOT_GLOBAL_POSTS_PER_DAY - 5, commentsToday: 0 },
+      bot_b: { postsToday: 5, commentsToday: BOT_GLOBAL_COMMENTS_PER_DAY }
+    });
+    expect(at.postsToday).toBe(BOT_GLOBAL_POSTS_PER_DAY);
+    expect(at.postsOpen).toBe(false);
+    expect(at.commentsOpen).toBe(false);
+    const above = globalCeilingState({ bot_a: { postsToday: 99, commentsToday: 99 } });
+    expect(above.postsOpen).toBe(false);
+    expect(above.commentsOpen).toBe(false);
+  });
+
+  it('the ceiling follows the same Dhaka day as the per-bot counters', () => {
+    const stored = { day: '2026-01-05', counters: { bot_a: { postsToday: 99, commentsToday: 99 } } };
+    // Same day: the totals (and the closed ceiling) carry over.
+    expect(globalCeilingState(botCountersForDay(stored, '2026-01-05')).postsOpen).toBe(false);
+    // Next Dhaka day: the stored doc resets, so the ceiling reopens.
+    const fresh = globalCeilingState(botCountersForDay(stored, '2026-01-06'));
+    expect(fresh).toMatchObject({ postsToday: 0, commentsToday: 0, postsOpen: true, commentsOpen: true });
+  });
+
+  it('decideBotAction never picks post once the POST ceiling is hit, even with per-bot room', () => {
+    const global = { postsToday: BOT_GLOBAL_POSTS_PER_DAY, commentsToday: 0 };
+    for (const roll of [0.01, 0.2, 0.5, 0.8, 0.99]) {
+      expect(decideBotAction(nova, {}, true, Date.now(), rolls([roll]), global).action).not.toBe('post');
+    }
+    // Just below the ceiling the post band is reachable again.
+    const below = { postsToday: BOT_GLOBAL_POSTS_PER_DAY - 1, commentsToday: 0 };
+    expect(decideBotAction(nova, {}, true, Date.now(), rolls([0.05]), below).action).toBe('post');
+  });
+
+  it('decideBotAction never picks comment once the COMMENT ceiling is hit', () => {
+    const global = { postsToday: 0, commentsToday: BOT_GLOBAL_COMMENTS_PER_DAY };
+    for (const roll of [0.01, 0.3, 0.6, 0.99]) {
+      expect(decideBotAction(nova, {}, true, Date.now(), rolls([roll]), global).action).not.toBe('comment');
+    }
+  });
+
+  it('likes and messages are never ceilinged', () => {
+    const global = { postsToday: BOT_GLOBAL_POSTS_PER_DAY, commentsToday: BOT_GLOBAL_COMMENTS_PER_DAY };
+    // Likes still open when both ceilings are hit.
+    expect(decideBotAction(nova, {}, true, Date.now(), rolls([0.5]), global).action).toBe('like');
+    // With likes also full, the message fallback still fires.
+    expect(decideBotAction(nova, { likesToday: 2, messagesToday: 0 }, true, Date.now(), rolls([0.5]), global).action).toBe('message');
+  });
+
+  it('reports the ceiling as the reason when it is what closed the day', () => {
+    const global = { postsToday: BOT_GLOBAL_POSTS_PER_DAY, commentsToday: BOT_GLOBAL_COMMENTS_PER_DAY };
+    const d = decideBotAction(nova, { likesToday: 2, messagesToday: 1 }, true, Date.now(), rolls([0.5]), global);
+    expect(d.action).toBe('none');
+    expect(d.reason).toContain('ceiling');
+    expect(d.reason).toContain(`${BOT_GLOBAL_POSTS_PER_DAY}/${BOT_GLOBAL_POSTS_PER_DAY}`);
+  });
+
+  it('without a global argument the decision is unchanged (old callers)', () => {
+    expect(decideBotAction(nova, {}, true, Date.now(), rolls([0.05])).action).toBe('post');
+    expect(decideBotAction(nova, {}, true, Date.now(), rolls([0.5]), null).action).toBe('comment');
+  });
+});
+
+describe('companion photo album (owner request, 2026-11-22)', () => {
+  const albumBot = {
+    id: 'bot_anika', name: 'Anika', username: 'anika.rahman', active: true,
+    personality: {
+      traits: ['loving'], tone: 'romantic', interests: ['songs'], systemPrompt: 'You are Anika.',
+      album: [' https://img.test/1.jpg ', 'https://img.test/2.jpg', '', 42, null, 'https://img.test/3.jpg']
+    }
+  };
+
+  it('normaliseBot carries personality.album through, cleaned', () => {
+    expect(normaliseBot(albumBot).personality.album).toEqual([
+      'https://img.test/1.jpg', 'https://img.test/2.jpg', 'https://img.test/3.jpg'
+    ]);
+    expect(normaliseBot(nova).personality.album).toEqual([]);
+    expect(albumPhotosOf(albumBot)).toHaveLength(3);
+    expect(albumPhotosOf(nova)).toEqual([]);
+  });
+
+  it('isOwnerUserId matches only the platform owner', () => {
+    expect(isOwnerUserId(BOT_OWNER_ID)).toBe(true);
+    expect(isOwnerUserId('c07b7770-0e30-484b-9a85-33a4f53c3628')).toBe(true);
+    expect(isOwnerUserId('bot_anika')).toBe(false);
+    expect(isOwnerUserId('')).toBe(false);
+    expect(isOwnerUserId(undefined)).toBe(false);
+  });
+
+  it('wantsPhotoRequest fires on Bangla and English photo asks', () => {
+    const yes = [
+      'তোমার একটা ছবি দাও',
+      'জান, ছবি পাঠাও প্লিজ',
+      'একটা সেলফি দাও তো',
+      'তোমার ছবি দেখি',
+      'send me a pic',
+      'show me your photo please',
+      'let me see your picture',
+      'তোমার ছবি?',
+      'selfie?',
+      'একটা pic দাও'
+    ];
+    for (const t of yes) expect(wantsPhotoRequest(t), t).toBe(true);
+  });
+
+  it('wantsPhotoRequest stays silent for talk ABOUT photos and other topics', () => {
+    const no = [
+      'আমি আজ একটা ছবি তুললাম',
+      'তোমার ছবিটা খুব সুন্দর হয়েছে',
+      'আমি ছবি আঁকতে ভালোবাসি',
+      'I sent you a photo yesterday',
+      'the topic for today is photosynthesis',
+      'কি করছো তুমি?',
+      'hello there',
+      ''
+    ];
+    for (const t of no) expect(wantsPhotoRequest(t), t).toBe(false);
+  });
+
+  it('rotation counts only this bot\u2019s album photos and wraps without repeats', () => {
+    const album = ['https://img.test/1.jpg', 'https://img.test/2.jpg', 'https://img.test/3.jpg'];
+    const bot = { ...albumBot, personality: { ...albumBot.personality, album } };
+    const msgs = [
+      { senderId: 'bot_anika', image: album[0], text: 'cap' },
+      { senderId: 'bot_anika', image: '', text: 'plain reply' },
+      { senderId: BOT_OWNER_ID, image: album[1], text: 'human sent one' },
+      { senderId: 'bot_anika', image: 'https://img.test/not-album.jpg', text: 'other' },
+      { senderId: 'bot_anika', image: album[1], text: 'cap' }
+    ];
+    expect(countAlbumPhotosSent(msgs, 'bot_anika', album)).toBe(2);
+    expect(countAlbumPhotosSent(msgs, 'bot_anika', [])).toBe(0);
+    expect(nextAlbumPhoto(bot, 0)).toBe(album[0]);
+    expect(nextAlbumPhoto(bot, 2)).toBe(album[2]);
+    expect(nextAlbumPhoto(bot, 3)).toBe(album[0]); // wraps after a full pass
+    expect(nextAlbumPhoto(bot, 4)).toBe(album[1]);
+    expect(nextAlbumPhoto(nova, 0)).toBe(''); // no album -> no photo
+  });
+
+  it('pickPhotoCaption returns affectionate captions from the template set', () => {
+    const seen = new Set();
+    for (const seed of [0, 0.17, 0.34, 0.5, 0.67, 0.84, 0.99]) {
+      const cap = pickPhotoCaption(albumBot, seed);
+      expect(typeof cap).toBe('string');
+      expect(cap.length).toBeGreaterThan(3);
+      seen.add(cap);
+    }
+    expect(seen.size).toBeGreaterThan(3);
   });
 });

@@ -21,7 +21,8 @@ import {
   normaliseBot, findBotReplyTargets, pickFriendRequestsToAccept, decideBotAction,
   templateBotMessageReply, generateTemplatePost, generateTemplateComment,
   emptyBotCounters, counterDayKey, botCountersForDay, memoryFromConversation,
-  pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost
+  pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost,
+  globalBotTotals, isOwnerUserId, wantsPhotoRequest, countAlbumPhotosSent, nextAlbumPhoto, pickPhotoCaption
 } from '../src/botLogic.js';
 import {
   resolveAiConfig, generateRouted, normaliseUsageMap, usageTotals,
@@ -179,6 +180,17 @@ async function latestMessage(conversationId) {
   return rows[0] || null;
 }
 
+// Companion album rotation (see botLogic): how many of this bot's
+// album photos were already sent in this conversation — the sent
+// messages themselves are the persisted rotation position, exactly
+// as the browser runner counts them.
+async function countAlbumPhotosSentInConv(bot, conversationId) {
+  try {
+    const rows = await sbSelect('messages', (q) => q.eq('conversationId', conversationId).eq('senderId', bot.id));
+    return countAlbumPhotosSent(rows, bot.id, bot.personality.album || []);
+  } catch { return 0; }
+}
+
 async function main() {
   const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({ email, password });
   if (signInError) throw signInError;
@@ -264,15 +276,48 @@ async function main() {
           // serves it, no extra round-trips).
           const threadMsgs = await sbSelect('messages', (q) => q.eq('conversationId', target.conversationId).order('createdAt', { ascending: true }).limit(50));
           const gen = await generateBotText(bot, memories, { kind: 'message', text: fresh.text, thread: threadContextText(threadMsgs, bot.id) }, templateBotMessageReply(bot, fresh.text), secretsDoc, platformConfig);
-          await sbInsert('messages', {
-            id: genId('m'),
-            conversationId: target.conversationId, participants: [...target.participants],
-            senderId: bot.id, text: gen.text, image: '', audio: '',
-            createdAt: Date.now(), status: 'sent', readBy: [bot.id]
-          });
-          // Count NOW — a notification/memory failure after this
-          // point must not leave a delivered message uncounted.
-          c.messagesToday += 1;
+          // Companion photo album (mirrors the browser runner step
+          // for step): a bot with an album, talking to the platform
+          // owner, who just ASKED for a photo, sends the next album
+          // photo too. Trigger + caption are rule-based (botLogic),
+          // so the photo goes even in template-fallback mode. It
+          // rides alongside the text reply when the daily message
+          // cap has room for both sends; with one slot left, the
+          // photo (caption as its text) IS the reply. Each send
+          // consumes one message of the cap, like any reply.
+          const album = bot.personality.album || [];
+          let photoUrl = '';
+          let photoCaption = '';
+          if (album.length && isOwnerUserId(target.humanId) && wantsPhotoRequest(fresh.text)) {
+            photoUrl = nextAlbumPhoto(bot, await countAlbumPhotosSentInConv(bot, target.conversationId));
+            if (photoUrl) photoCaption = pickPhotoCaption(bot);
+          }
+          const sendText = !photoUrl || c.messagesToday + 1 < bot.limits.messagesPerDay;
+          let repliedText = '';
+          if (sendText) {
+            await sbInsert('messages', {
+              id: genId('m'),
+              conversationId: target.conversationId, participants: [...target.participants],
+              senderId: bot.id, text: gen.text, image: '', audio: '',
+              createdAt: Date.now(), status: 'sent', readBy: [bot.id]
+            });
+            // Count NOW — a notification/memory failure after this
+            // point must not leave a delivered message uncounted.
+            c.messagesToday += 1;
+            repliedText = gen.text;
+          }
+          if (photoUrl) {
+            await sbInsert('messages', {
+              id: genId('m'),
+              conversationId: target.conversationId, participants: [...target.participants],
+              senderId: bot.id, text: photoCaption, image: photoUrl, audio: '',
+              createdAt: Date.now(), status: 'sent', readBy: [bot.id]
+            });
+            c.messagesToday += 1;
+            repliedText = repliedText || photoCaption;
+            results.push(`${bot.name} → photo`);
+            note(bot, 'photo');
+          }
           if (target.humanId !== bot.id) {
             await sbInsert('notifications', {
               id: genId('n'),
@@ -281,7 +326,7 @@ async function main() {
               read: false, createdAt: Date.now()
             });
           }
-          const updatedMemories = memoryFromConversation(memories, fresh.text, gen.text);
+          const updatedMemories = memoryFromConversation(memories, fresh.text, repliedText);
           try { await sbUpsert('botMemories', { id: bot.id, botId: bot.id, items: updatedMemories }); memories = updatedMemories; } catch { /* best-effort */ }
           await recordBotBrain(bot, gen.provider, gen.model);
           acted = true;
@@ -319,7 +364,11 @@ async function main() {
       }
 
       // --- autonomous action (post / comment / like) ---
-      const decision = decideBotAction(bot, c, true);
+      // The platform-wide ceilings ride along: totals are summed
+      // from the SHARED counters map at this bot's turn, so posts
+      // and comments by earlier bots in this same cycle already
+      // count toward today's ceiling.
+      const decision = decideBotAction(bot, c, true, Date.now(), Math.random, globalBotTotals(counters));
       if (decision.action === 'post') {
         const ownRows = await sbSelect('posts', (q) => q.eq('authorId', bot.id).limit(10));
         // Cross-bot anti-duplicate: also compare against OTHER bots'

@@ -425,7 +425,11 @@ export function avatarColor(seed) {
 //  - close-friends posts: audienceIds = author's current close-friend ids
 //  - group posts: the GROUP's privacy governs — public group -> stored
 //    visibility 'public', audienceIds []; private group -> stored
-//    visibility 'private', audienceIds = the group's current members
+//    visibility 'private', audienceIds = the group's current members.
+//    NOTE: for group posts the stored pair is only a marker — reads
+//    follow CURRENT group membership at read time (see
+//    canViewGroupPost), never this creation-time snapshot, so later
+//    joiners see older posts and former members lose them.
 //  - page posts arrive here as plain public posts (no group) -> [].
 export function postAudience({ visibility = 'public', group = null, authorFriendIds = [], authorCloseFriendIds = [] } = {}) {
   if (group) {
@@ -624,10 +628,15 @@ export function canViewGroupPost(post, group, viewerId, blockedIds) {
   if (post.authorId === viewerId) return true;
   if (!group) return false;
   if (group.privacy !== 'private') return true;
-  // Private group: current members, plus anyone in the post's
-  // denormalized audience (members at creation time — this is also the
-  // only path by which live mode delivers these posts at all).
-  return isGroupMember(group, viewerId) || (post.audienceIds || []).includes(viewerId);
+  // Private group: CURRENT members only. The post's stored audienceIds
+  // (members at creation time) deliberately do NOT grant access here:
+  // they are a creation-time snapshot, so keying off them hid older
+  // posts from members who joined later and kept showing them to
+  // members who had left or been removed. Live delivery follows the
+  // same read-time rule (the group-posts slice in api.js fetches by
+  // current membership; the posts RLS policy checks the group's
+  // current members), so this gate and delivery agree.
+  return isGroupMember(group, viewerId);
 }
 
 // --- Stories --------------------------------------------------------------

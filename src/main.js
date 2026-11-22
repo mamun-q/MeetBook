@@ -220,7 +220,7 @@ export function render() {
     case 'events': body = V.eventsView(d, user); break;
     case 'event': body = V.eventView(d, user, seg[1] || ''); break;
     case 'groups': body = V.groupsView(d, user, query.get('q') || ''); break;
-    case 'group': body = V.groupView(d, user, seg[1] || ''); break;
+    case 'group': body = V.groupView(d, user, seg[1] || '', { loading: api.groupsSyncPending() }); break;
     case 'pages': body = V.pagesView(d, user, query.get('q') || ''); break;
     case 'page': body = V.pageView(d, user, seg[1] || ''); break;
     case 'messages': body = V.messagesView(d, user, seg[1] || ''); setTimeout(setupThread, 30); break;

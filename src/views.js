@@ -516,9 +516,14 @@ export function groupsView(d, meUser, queryText = '') {
   </div>`;
 }
 
-export function groupView(d, meUser, groupId) {
+export function groupView(d, meUser, groupId, opts = {}) {
   const group = (d.groups || []).find((g) => g.id === groupId);
-  if (!group) return emptyState('🏘️', 'This group could not be found.');
+  // While the first groups sync is still landing (opts.loading, fed
+  // from api.groupsSyncPending), an unknown id is not yet a missing
+  // group — the tier-2 slices may simply not have delivered it. Show
+  // a loading state rather than a false "could not be found" that
+  // flips away a moment later.
+  if (!group) return opts.loading ? emptyState('🏘️', 'Loading…') : emptyState('🏘️', 'This group could not be found.');
   if (!canViewGroup(group, meUser.id)) {
     // Private group, not a member: show only the public metadata and the
     // join-request action — no posts, no member list.

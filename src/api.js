@@ -8,8 +8,8 @@ import {
   getState, mutate, findUser, userByUsername, friendIdsOf, blockedIdsOf, notify, resetDemo
 } from './store.js';
 import { supabase, supabaseReady } from './supabase.js';
-import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme, canEditMessage, chatPollVote, VANISH_TTL_MS, TYPING_FRESH_MS } from './utils.js';
-import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, pickFriendRequestsToAccept, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost } from './botLogic.js';
+import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme, canEditMessage, chatPollVote, VANISH_TTL_MS, TYPING_FRESH_MS, isGroupMember } from './utils.js';
+import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, pickFriendRequestsToAccept, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost, globalBotTotals, isOwnerUserId, wantsPhotoRequest, countAlbumPhotosSent, nextAlbumPhoto, pickPhotoCaption } from './botLogic.js';
 import { canAccessBotSecrets, botModel } from './gemini.js';
 import { providerById, resolveAiConfig, generateRouted, testProvider as testAiProvider, getLastRoutedFailure, resetLastRoutedFailure, anyProviderConfigured, dhakaDayKey, normaliseUsageMap, usageTotals } from './aiProviders.js';
 import { isCloudinaryConfigured, uploadToCloudinary, uploadFileToCloudinary } from './cloudinary.js';
@@ -604,6 +604,21 @@ function sameRowsById(a, b) {
 const REFETCH_STUCK_MS = 15000; // a hung fetch must not wedge a table forever
 const refetchState = new Map(); // table -> { inFlight, pending, since }
 
+// ---------------------------------------------------------------------------
+// Groups boot-sync tracking. The groups slices are tier 2, so on a cold
+// load (or a reload straight onto a group URL) the mirror can briefly
+// hold NO groups at all — a group page rendered in that window used to
+// flash "This group could not be found." for a group that exists. The
+// counter below tracks the initial group fetches (public + member +
+// discovery); while any is still outstanding in live mode, views can
+// show a loading state instead of a false not-found. Realtime refetches
+// settle it further (it is already 0 by then — the decrement is
+// floor-guarded), and stopRemoteSync resets it.
+// ---------------------------------------------------------------------------
+let groupSlicesOutstanding = 0;
+function noteGroupSliceSettled() { if (groupSlicesOutstanding > 0) groupSlicesOutstanding--; }
+export function groupsSyncPending() { return live && groupSlicesOutstanding > 0; }
+
 function runTableRefetchers(table, st) {
   st.inFlight = true;
   st.since = Date.now();
@@ -647,6 +662,7 @@ function stopRemoteSync() {
   channelByTable.clear();
   tableRefetchers.clear();
   clearRefetchWindows();
+  groupSlicesOutstanding = 0;
   typingChannel = null;
   presenceChannel = null;
   typingState.clear();
@@ -749,6 +765,10 @@ function startRemoteSync() {
   syncUid = remoteUid;
   remote = blankRemote();
   const uid = remoteUid;
+  // Groups boot-sync tracking (see groupsSyncPending): the three
+  // group slices settle independently; the member slice only exists
+  // for a signed-in user.
+  groupSlicesOutstanding = uid ? 3 : 2;
   // A fetch started under a previous session must never land in the
   // new session's mirror (the Firestore version got this for free by
   // unsubscribing; an in-flight PostgREST read cannot be cancelled).
@@ -854,11 +874,16 @@ function startRemoteSync() {
   let publicPosts = [];
   let ownPosts = [];
   let audiencePosts = [];
-  // THREE post slices (public / mine / audience) must merge by id: any
-  // one alone is incomplete, and a naive "latest wins" loses posts
-  // whenever an out-of-scope event fires.
+  let groupPosts = [];
+  // FOUR post slices (public / mine / audience / my-groups) must merge
+  // by id: any one alone is incomplete, and a naive "latest wins"
+  // loses posts whenever an out-of-scope event fires. The group slice
+  // (fetcher defined with the group slices below) delivers posts by
+  // CURRENT group membership — the read-time rule for group posts —
+  // where the audience slice only ever sees the creation-time
+  // audienceIds snapshot.
   const mergePosts = () => {
-    const serverPosts = mergePostLists(publicPosts, ownPosts, audiencePosts);
+    const serverPosts = mergePostLists(publicPosts, ownPosts, audiencePosts, groupPosts);
     const serverIds = new Set(serverPosts.map((p) => p.id));
     // Prune echoes the server has confirmed (the merge is by id, so a
     // confirmed echo and its server copy could never duplicate — the
@@ -967,6 +992,30 @@ function startRemoteSync() {
   let publicGroups = [];
   let memberGroups = [];
   let discoveryGroups = [];
+  // GROUP POSTS BY CURRENT MEMBERSHIP. Group posts are read by a
+  // read-time rule — a post belongs to whoever belongs to its group
+  // NOW — not by the post's stored audienceIds, which snapshot the
+  // member list at creation time (keying reads off the snapshot hid
+  // older posts from later joiners and kept showing them to former
+  // members; the posts RLS policy now checks current membership the
+  // same way). This slice fetches the newest posts of every group the
+  // signed-in user currently belongs to; mergeGroups re-fires it
+  // whenever that membership set changes, and the posts watcher keeps
+  // it fresh as new group posts land.
+  let groupPostIdsKey = '';
+  const fetchGroupPosts = async () => {
+    if (stale() || !uid) return;
+    const ids = (remote.groups || []).filter((g) => isGroupMember(g, uid)).map((g) => g.id);
+    groupPostIdsKey = ids.slice().sort().join(',');
+    if (!ids.length) {
+      if (groupPosts.length) { groupPosts = []; mergePosts(); }
+      return;
+    }
+    try {
+      groupPosts = (await sbSelect('posts', (q) => q.in('groupId', ids).order('createdAt', { ascending: false }).limit(200))).map(mapPost);
+      mergePosts();
+    } catch { /* leave untouched */ }
+  };
   const mergeGroups = () => {
     const byIdMap = new Map();
     // Discovery FIRST: a full row from the public/member slices
@@ -980,20 +1029,35 @@ function startRemoteSync() {
     const cutoff = Date.now() - 60000;
     localEchoGroups = localEchoGroups.filter((g) => !serverIds.has(g.id) && g.createdAt > cutoff);
     const next = [...serverGroups, ...localEchoGroups];
-    if (sameRowsById(remote.groups || [], next)) { remote.groups = next; return; } // silent rebind — see setSlice's note
-    patchMirror((r) => { r.groups = next; });
+    if (sameRowsById(remote.groups || [], next)) { remote.groups = next; } // silent rebind — see setSlice's note
+    else patchMirror((r) => { r.groups = next; });
+    // Membership is the group-posts audience: whenever the set of
+    // groups I belong to changes (join approved, direct join/leave,
+    // removal — written locally or arriving by realtime), the group
+    // posts slice must refetch under the new set, or a new member
+    // would never receive the group's older posts and a removed
+    // member would keep the ones already mirrored.
+    if (uid) {
+      const key = next.filter((g) => isGroupMember(g, uid)).map((g) => g.id).sort().join(',');
+      if (key !== groupPostIdsKey) { groupPostIdsKey = key; void fetchGroupPosts(); }
+    }
   };
   remergeGroups = mergeGroups;
-  const fetchPublicGroups = async () => { if (stale()) return; try { publicGroups = (await sbSelect('groups', (q) => q.eq('privacy', 'public').limit(200))).map(mapGroup); mergeGroups(); } catch { /* leave untouched */ } };
-  const fetchMemberGroups = async () => { if (stale()) return; try { memberGroups = (await sbSelect('groups', (q) => q.contains('members', [uid]))).map(mapGroup); mergeGroups(); } catch { /* leave untouched */ } };
+  const fetchPublicGroups = async () => { if (stale()) return; try { publicGroups = (await sbSelect('groups', (q) => q.eq('privacy', 'public').limit(200))).map(mapGroup); mergeGroups(); } catch { /* leave untouched */ } noteGroupSliceSettled(); };
+  const fetchMemberGroups = async () => { if (stale()) return; try { memberGroups = (await sbSelect('groups', (q) => q.contains('members', [uid]))).map(mapGroup); mergeGroups(); } catch { /* leave untouched */ } noteGroupSliceSettled(); };
   // Fails soft until supabase/group-discovery.sql is applied: the
   // mirror then simply holds what the two slices above deliver.
-  const fetchDiscoveryGroups = async () => { if (stale()) return; try { discoveryGroups = (await sbRpc('group_discovery')).map(mapDiscoveryGroup); mergeGroups(); } catch { /* leave untouched */ } };
+  const fetchDiscoveryGroups = async () => { if (stale()) return; try { discoveryGroups = (await sbRpc('group_discovery')).map(mapDiscoveryGroup); mergeGroups(); } catch { /* leave untouched */ } noteGroupSliceSettled(); };
   tier2.push(fetchPublicGroups);
   watchTable('groups', fetchPublicGroups);
   if (uid) { tier2.push(fetchMemberGroups); watchTable('groups', fetchMemberGroups); }
   tier2.push(fetchDiscoveryGroups);
   watchTable('groups', fetchDiscoveryGroups);
+  // Group posts by current membership (see fetchGroupPosts above):
+  // an initial attempt once the group slices are under way, refired
+  // by mergeGroups on every membership-set change, and kept fresh by
+  // the posts watcher as new group posts land.
+  if (uid) { tier2.push(fetchGroupPosts); watchTable('posts', fetchGroupPosts); }
 
   const fetchBots = async () => { if (stale()) return; try { setSlice('bots', (await sbSelect('bots', (q) => q.order('id', { ascending: true }).limit(100))).map((row) => normaliseBot(normaliseTimeFields(row, ['createdAt'])))); } catch { /* leave untouched */ } };
   tier2.push(fetchBots);
@@ -4564,6 +4628,17 @@ async function latestLiveMessage(conversationId) {
   return d ? normaliseTimeFields(d, ['createdAt']) : null;
 }
 
+// Companion album rotation (see botLogic): how many of this bot's
+// album photos were already sent in this conversation — the
+// persisted rotation position (the sent messages ARE the store, so
+// no extra doc is needed and both runners agree).
+async function countLiveAlbumPhotosSent(bot, conversationId) {
+  try {
+    const rows = await sbSelect('messages', (q) => q.eq('conversationId', conversationId).eq('senderId', bot.id));
+    return countAlbumPhotosSent(rows, bot.id, bot.personality.album || []);
+  } catch { return 0; }
+}
+
 // One live bot cycle: for every active bot, first answer at most one
 // unreplied 1-1 conversation (messages/day counter), then take the
 // decideBotAction-driven autonomous action (post/comment/like) under
@@ -4636,22 +4711,54 @@ export async function runLiveBotCycle() {
             // one message in a vacuum.
             const threadMsgs = (data().messages || []).filter((m) => m.conversationId === target.conversationId).slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
             const gen = await generateBotText(bot, memories, { kind: 'message', text: fresh.text, thread: threadContextText(threadMsgs, bot.id) }, templateBotMessageReply(bot, fresh.text));
-            await sbInsert('messages', {
-              id: genId('m'),
-              conversationId: target.conversationId, participants: [...target.participants],
-              senderId: bot.id, text: gen.text, image: '', audio: '',
-              createdAt: Date.now(), status: 'sent', readBy: [bot.id]
-            });
-            // Count the reply NOW, before the notification/memory
-            // writes: if one of those throws, the delivered message
-            // used to go uncounted and the daily cap leaked.
-            c.messagesToday += 1;
+            // Companion photo album: a bot with an album, talking to
+            // the platform owner, who just ASKED for a photo, sends
+            // the next album photo too. The trigger + caption are
+            // rule-based (botLogic), so the photo goes even when the
+            // text above came from the template fallback. The photo
+            // rides alongside the text reply when the daily message
+            // cap has room for both sends; with only one slot left,
+            // the photo (caption as its text) IS the reply. Each send
+            // consumes one message of the cap, like any reply.
+            const album = bot.personality.album || [];
+            let photoUrl = '';
+            let photoCaption = '';
+            if (album.length && isOwnerUserId(target.humanId) && wantsPhotoRequest(fresh.text)) {
+              photoUrl = nextAlbumPhoto(bot, await countLiveAlbumPhotosSent(bot, target.conversationId));
+              if (photoUrl) photoCaption = pickPhotoCaption(bot);
+            }
+            const sendText = !photoUrl || c.messagesToday + 1 < bot.limits.messagesPerDay;
+            let repliedText = '';
+            if (sendText) {
+              await sbInsert('messages', {
+                id: genId('m'),
+                conversationId: target.conversationId, participants: [...target.participants],
+                senderId: bot.id, text: gen.text, image: '', audio: '',
+                createdAt: Date.now(), status: 'sent', readBy: [bot.id]
+              });
+              // Count the reply NOW, before the notification/memory
+              // writes: if one of those throws, the delivered message
+              // used to go uncounted and the daily cap leaked.
+              c.messagesToday += 1;
+              repliedText = gen.text;
+            }
+            if (photoUrl) {
+              await sbInsert('messages', {
+                id: genId('m'),
+                conversationId: target.conversationId, participants: [...target.participants],
+                senderId: bot.id, text: photoCaption, image: photoUrl, audio: '',
+                createdAt: Date.now(), status: 'sent', readBy: [bot.id]
+              });
+              c.messagesToday += 1;
+              repliedText = repliedText || photoCaption;
+              results.push({ bot: bot.name, action: 'photo' });
+            }
             await createNotification({
               userId: target.humanId, type: 'message', actorId: bot.id,
               text: `${bot.name} sent you a message.`, postId: '', conversationId: target.conversationId,
               read: false, createdAt: Date.now()
             });
-            const updatedMemories = memoryFromConversation(memories, fresh.text, gen.text);
+            const updatedMemories = memoryFromConversation(memories, fresh.text, repliedText);
             try { await sbUpsert('botMemories', { id: bot.id, botId: bot.id, items: updatedMemories }); memories = updatedMemories; } catch { /* memory is best-effort */ }
             actions += 1;
             acted = true;
@@ -4687,7 +4794,11 @@ export async function runLiveBotCycle() {
         }
 
         // --- autonomous action (post / comment / like) ---
-        const decision = decideBotAction(bot, c, true);
+        // The platform-wide ceilings ride along: totals are summed
+        // from the SHARED counters map at this bot's turn, so posts
+        // and comments by earlier bots in this same cycle already
+        // count toward today's ceiling.
+        const decision = decideBotAction(bot, c, true, Date.now(), Math.random, globalBotTotals(counters));
         if (decision.action === 'post') {
           // Anti-duplicate set: this bot's recent posts AND other
           // bots' recent posts (Master Vision cross-bot comparison).

@@ -303,12 +303,18 @@ create policy users_delete_self_admin on public.users
 -- =====================================================================
 -- posts
 -- Guarantee: read by author, admins, anyone if visibility='public',
--- or uid ∈ audienceIds; create by an active writer with likes empty,
--- as self (group posts only if a member of that group), or by an
--- admin as a bot (plain feed only — no group/page posts); update by
--- admin, by author, or by any signed-in user with authorship/text/
--- image/visibility/group/page/audience all pinned (engagement only);
--- delete by author or admin.
+-- uid ∈ audienceIds for NON-group posts, or — for group posts — by
+-- the group's CURRENT membership evaluated at read time (non-private
+-- group: any signed-in user; private group: current members or the
+-- creator). A group post's stored audienceIds (the member list at
+-- creation time) never grants reads: the snapshot goes stale in both
+-- directions — it hid older posts from later joiners and kept
+-- showing them to former members. Create by an active writer with
+-- likes empty, as self (group posts only if a member of that group),
+-- or by an admin as a bot (plain feed only — no group/page posts);
+-- update by admin, by author, or by any signed-in user with
+-- authorship/text/image/visibility/group/page/audience all pinned
+-- (engagement only); delete by author or admin.
 -- =====================================================================
 create policy posts_select on public.posts
   for select to authenticated
@@ -316,7 +322,22 @@ create policy posts_select on public.posts
     "authorId" = (select auth.uid())::text
     or public.is_admin()
     or visibility = 'public'
-    or (select auth.uid())::text = any ("audienceIds")
+    or (
+      "groupId" = ''
+      and (select auth.uid())::text = any ("audienceIds")
+    )
+    or (
+      "groupId" <> ''
+      and exists (
+        select 1 from public.groups g
+        where g.id = posts."groupId"
+          and (
+            g.privacy <> 'private'
+            or (select auth.uid())::text = any (g.members)
+            or g."createdBy" = (select auth.uid())::text
+          )
+      )
+    )
   );
 
 create policy posts_insert on public.posts
