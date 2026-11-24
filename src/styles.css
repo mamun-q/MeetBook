@@ -7,7 +7,14 @@
    scale (--radius-sm/--radius/--radius-lg), one spacing scale
    (--space-1..4), one glass strength (--glass-blur/--glass-sat,
    deliberately light: heavy backdrop-blur janks on phones, esp.
-   Firefox Android). Motion is transform/opacity only, 120–200ms. */
+   Firefox Android). Motion is transform/opacity only, 120–200ms.
+   PREMIUM BUTTON PACK (2026-11-24): every button family resolves
+   through the button tokens below (--btn-tint*, --btn-shadow*,
+   --radius-pill) — filled = gradient + lit edge + coloured shadow,
+   default = brand tint, ghost/google = bordered surface + soft
+   shadow, tabs = segmented pill track, icon buttons = surface
+   circles. No flat dull-grey buttons anywhere; dark mode re-declares
+   the same token names only. */
 :root {
   --bg: #edf0f5; --surface: #ffffff; --surface-2: #f0f2f5; --surface-3: #e4e8ee;
   --text: #0b0d12; --muted: #5b6068; --border: #e3e6ec;
@@ -31,6 +38,20 @@
   --btn-shadow-danger: inset 0 1px 0 rgba(255,255,255,.22), 0 1px 2px rgba(16,24,40,.10), 0 4px 12px rgba(229,72,77,.28);
   --btn-shadow-danger-hover: inset 0 1px 0 rgba(255,255,255,.22), 0 2px 4px rgba(16,24,40,.10), 0 8px 20px rgba(229,72,77,.38);
   --btn-shadow-flat: 0 1px 2px rgba(16,24,40,.05);
+  /* Premium Button Pack tokens: pill shape for every button, a light
+     brand tint for default buttons (replacing flat surface-2 grey),
+     soft neutral shadows for bordered buttons, collapsed press
+     shadows for filled buttons, and the segmented tab track. */
+  --radius-pill: 999px;
+  --btn-tint: rgba(var(--brand-rgb),.08);
+  --btn-tint-hover: rgba(var(--brand-rgb),.14);
+  --btn-tint-border: rgba(var(--brand-rgb),.22);
+  --btn-shadow: 0 1px 2px rgba(16,24,40,.06), 0 4px 12px rgba(16,24,40,.07);
+  --btn-shadow-hover: 0 2px 4px rgba(16,24,40,.07), 0 8px 20px rgba(16,24,40,.10);
+  --btn-shadow-primary-press: inset 0 1px 0 rgba(255,255,255,.16), 0 1px 3px rgba(var(--brand-rgb),.30);
+  --btn-shadow-danger-press: inset 0 1px 0 rgba(255,255,255,.14), 0 1px 3px rgba(229,72,77,.28);
+  --icon-btn-shadow: 0 1px 3px rgba(16,24,40,.08);
+  --tab-track: var(--surface-2);
 }
 html[data-theme="dark"] {
   --bg: #0e1013; --surface: #1a1d23; --surface-2: #23262e; --surface-3: #2c303a;
@@ -45,6 +66,14 @@ html[data-theme="dark"] {
   --btn-shadow-danger: inset 0 1px 0 rgba(255,255,255,.15), 0 1px 2px rgba(0,0,0,.45), 0 4px 12px rgba(229,72,77,.30);
   --btn-shadow-danger-hover: inset 0 1px 0 rgba(255,255,255,.15), 0 2px 4px rgba(0,0,0,.45), 0 8px 20px rgba(229,72,77,.40);
   --btn-shadow-flat: 0 1px 2px rgba(0,0,0,.35);
+  --btn-tint: rgba(var(--brand-rgb),.16);
+  --btn-tint-hover: rgba(var(--brand-rgb),.24);
+  --btn-tint-border: rgba(var(--brand-rgb),.35);
+  --btn-shadow: 0 1px 2px rgba(0,0,0,.4), 0 4px 12px rgba(0,0,0,.35);
+  --btn-shadow-hover: 0 2px 4px rgba(0,0,0,.4), 0 8px 20px rgba(0,0,0,.45);
+  --btn-shadow-primary-press: inset 0 1px 0 rgba(255,255,255,.12), 0 1px 3px rgba(var(--brand-rgb),.32);
+  --btn-shadow-danger-press: inset 0 1px 0 rgba(255,255,255,.10), 0 1px 3px rgba(229,72,77,.30);
+  --icon-btn-shadow: 0 1px 3px rgba(0,0,0,.4);
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
@@ -150,41 +179,44 @@ h2 .verified-badge .ic { width: 19px; height: 19px; }
 .icon-btn .ic { width: 20px; height: 20px; }
 .menu button .ic, .menu a .ic { vertical-align: -0.2em; }
 
-/* buttons — Premium + Professional pack: ONE system for every button
-   family. 44px standard height (36px compact), a 12px/10px radius
-   scale, 600-weight labels, inline-flex icon+label alignment, a lit
-   top edge + layered coloured shadow on filled buttons, a hairline
-   border + flat contact shadow on ghost buttons, a tactile press
-   (scale + shadow collapse) on everything, a desaturated disabled
-   state, and a visible focus ring. Every state resolves through the
-   theme variables, so dark mode mirrors light mode exactly. */
-.btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid transparent; background: var(--surface-2); color: var(--text); border-radius: var(--radius-sm); padding: .55rem 1.1rem; min-height: 44px; font-size: .94rem; font-weight: 600; letter-spacing: .01em; line-height: 1.2; cursor: pointer; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; transition: transform .15s cubic-bezier(.2,.7,.3,1), box-shadow .18s ease, background-color .18s ease, border-color .18s ease, filter .18s ease; }
-.btn:hover { background: var(--surface-3); }
-.btn:active { transform: scale(.97); }
-.btn:focus-visible { outline: none; box-shadow: var(--ring); }
-.btn-primary { background: var(--grad); color: #fff; box-shadow: var(--btn-shadow-primary); }
+/* buttons — Premium Button Pack: ONE pill system for every button
+   family. 48px standard height (40px compact, same pill radius),
+   700-weight labels, inline-flex icon+label alignment. Filled
+   (primary/danger) = brand gradient + lit top edge + coloured shadow
+   that collapses on press. Default .btn = light brand tint with
+   brand-coloured text — never flat dull grey. Ghost/Google = clean
+   bordered surface + soft shadow (Google stays white + bordered so
+   it still reads as a Google button). A tactile press (scale .97 +
+   shadow collapse) on everything, a desaturated disabled state, and
+   a visible focus ring. Every state resolves through the button
+   tokens, so dark mode mirrors light mode exactly. */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid var(--btn-tint-border); background: var(--btn-tint); color: var(--brand-dark); border-radius: var(--radius-pill); padding: .55rem 1.15rem; min-height: 48px; font-size: .94rem; font-weight: 700; letter-spacing: .01em; line-height: 1.2; cursor: pointer; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; text-decoration: none; box-shadow: var(--btn-shadow); transition: transform .18s cubic-bezier(.2,.7,.3,1), box-shadow .18s ease, background-color .18s ease, border-color .18s ease, filter .18s ease; }
+.btn:hover { background: var(--btn-tint-hover); box-shadow: var(--btn-shadow-hover); text-decoration: none; }
+.btn:active { transform: scale(.97); box-shadow: var(--btn-shadow); }
+.btn:focus-visible { outline: none; box-shadow: var(--btn-shadow), var(--ring); }
+.btn-primary { background: var(--grad); border-color: transparent; color: #fff; box-shadow: var(--btn-shadow-primary); }
 .btn-primary:hover { background: var(--grad); filter: brightness(1.06); box-shadow: var(--btn-shadow-primary-hover); }
-.btn-primary:active { box-shadow: inset 0 1px 0 rgba(255,255,255,.16), 0 1px 4px rgba(var(--brand-rgb),.28); }
+.btn-primary:active { box-shadow: var(--btn-shadow-primary-press); }
 .btn-primary:focus-visible { box-shadow: var(--btn-shadow-primary), var(--ring); }
-.btn-danger { background: var(--grad-danger); color: #fff; box-shadow: var(--btn-shadow-danger); }
-.btn-danger:hover { filter: brightness(1.05); box-shadow: var(--btn-shadow-danger-hover); }
-.btn-danger:active { box-shadow: inset 0 1px 0 rgba(255,255,255,.14), 0 1px 4px rgba(229,72,77,.25); }
+.btn-danger { background: var(--grad-danger); border-color: transparent; color: #fff; box-shadow: var(--btn-shadow-danger); }
+.btn-danger:hover { background: var(--grad-danger); filter: brightness(1.05); box-shadow: var(--btn-shadow-danger-hover); }
+.btn-danger:active { box-shadow: var(--btn-shadow-danger-press); }
 .btn-danger:focus-visible { box-shadow: var(--btn-shadow-danger), var(--ring); }
-.btn-ghost { background: var(--surface); border-color: var(--border); box-shadow: var(--btn-shadow-flat); }
-.btn-ghost:hover { background: var(--surface-2); border-color: var(--surface-3); box-shadow: var(--shadow); }
-.btn-ghost:active { background: var(--surface-3); }
+.btn-ghost { background: var(--surface); border-color: var(--border); color: var(--text); box-shadow: var(--btn-shadow); }
+.btn-ghost:hover { background: var(--surface); border-color: var(--btn-tint-border); box-shadow: var(--btn-shadow-hover); }
+.btn-ghost:active { background: var(--btn-tint); }
 @media (hover: hover) {
-  .btn-primary:hover, .btn-danger:hover { transform: translateY(-1px); }
-  .btn-primary:active, .btn-danger:active { transform: translateY(0) scale(.98); }
+  .btn:hover { transform: translateY(-1px); }
+  .btn:active { transform: translateY(0) scale(.97); }
 }
 .btn:disabled { opacity: .5; filter: saturate(.55); cursor: not-allowed; box-shadow: none !important; transform: none !important; }
-.btn-google { background: var(--surface); border-color: var(--border); box-shadow: var(--btn-shadow-flat); }
-.btn-google:hover { background: var(--surface); border-color: var(--surface-3); box-shadow: var(--shadow-md); }
-.btn-sm { padding: .4rem .8rem; min-height: 36px; font-size: .87rem; border-radius: 10px; gap: 5px; }
+.btn-google { background: var(--surface); border-color: var(--border); color: var(--text); font-weight: 600; box-shadow: var(--btn-shadow); }
+.btn-google:hover { background: var(--surface); border-color: var(--btn-tint-border); box-shadow: var(--btn-shadow-hover); }
+.btn-sm { padding: .4rem .85rem; min-height: 40px; font-size: .87rem; border-radius: var(--radius-pill); gap: 5px; }
 .btn-block { width: 100%; }
-.icon-btn { background: transparent; border: none; cursor: pointer; font-size: 1.1rem; padding: 6px; min-width: 40px; min-height: 40px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; color: var(--text); line-height: 1; -webkit-tap-highlight-color: transparent; transition: background-color .15s ease, transform .12s ease, box-shadow .15s ease; }
+.icon-btn { background: var(--surface); border: 1px solid var(--border); cursor: pointer; font-size: 1.1rem; padding: 6px; min-width: 40px; min-height: 40px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; color: var(--text); line-height: 1; -webkit-tap-highlight-color: transparent; box-shadow: var(--icon-btn-shadow); transition: background-color .18s ease, transform .18s ease, box-shadow .18s ease, border-color .18s ease; }
 .icon-btn:hover { background: var(--surface-2); }
-.icon-btn:active { transform: scale(.92); background: var(--surface-3); }
+.icon-btn:active { transform: scale(.92); background: var(--surface-3); box-shadow: none; }
 .icon-btn:focus-visible { outline: none; box-shadow: var(--ring); }
 .link-btn { background: none; border: none; color: var(--brand); cursor: pointer; padding: 0; font-size: inherit; font-weight: 600; border-radius: 6px; transition: color .15s ease, background-color .15s ease, transform .12s ease; }
 .link-btn:hover { color: var(--brand-dark); text-decoration: underline; }
@@ -206,13 +238,16 @@ html[data-theme="dark"] .auth-wrap::before { background: radial-gradient(620px 4
 .logo-big { font-size: 3.4rem; font-weight: 800; letter-spacing: -2px; line-height: 1.05; color: var(--brand); background: var(--grad); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
 .auth-hero p { font-size: 1.25rem; max-width: 420px; }
 .auth-card { padding: 24px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-lg); }
-.tabs { display: flex; gap: 8px; margin-bottom: 16px; }
-.tab { flex: 1; display: inline-flex; align-items: center; justify-content: center; min-height: 42px; padding: .6rem; border: none; border-radius: var(--radius-sm); background: var(--surface-2); font-weight: 700; cursor: pointer; color: var(--text); -webkit-tap-highlight-color: transparent; transition: background-color .18s ease, box-shadow .18s ease, transform .12s ease; }
-.tab:hover { background: var(--surface-3); }
-.tab:active { transform: scale(.98); }
+/* Tabs = segmented pill control (Premium Button Pack): a tinted
+   track, inactive tabs transparent on it, the active tab a gradient
+   pill with the filled-button shadow. */
+.tabs { display: flex; gap: 4px; margin-bottom: 16px; background: var(--tab-track); border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 4px; }
+.tab { flex: 1; display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: .55rem .8rem; border: none; border-radius: var(--radius-pill); background: transparent; font-weight: 700; cursor: pointer; color: var(--muted); -webkit-tap-highlight-color: transparent; transition: background-color .18s ease, box-shadow .18s ease, transform .18s ease, color .18s ease; }
+.tab:hover { color: var(--text); background: rgba(var(--brand-rgb),.06); }
+.tab:active { transform: scale(.97); }
 .tab:focus-visible { outline: none; box-shadow: var(--ring); }
 .tab.active { background: var(--grad); color: #fff; box-shadow: var(--btn-shadow-primary); }
-.tab.active:hover { background: var(--grad); }
+.tab.active:hover { background: var(--grad); color: #fff; }
 .boot-splash { display: grid; place-items: center; min-height: 70vh; gap: 8px; }
 .boot-logo { width: 72px; height: 72px; border-radius: 20px; background: var(--grad); color: #fff; font-size: 2.6rem; font-weight: 800; display: grid; place-items: center; overflow: hidden; position: relative; box-shadow: 0 10px 26px rgba(var(--brand-rgb),.38); }
 .boot-logo img { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -323,11 +358,14 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 .post-image { width: 100%; border-radius: 14px; margin: .4rem 0; max-height: 520px; object-fit: cover; }
 .post-stats { display: flex; gap: 14px; padding: 6px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .post-actions { display: flex; align-items: center; gap: 4px; padding: 4px 0; flex-wrap: wrap; }
-.action-btn { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; background: none; border: none; padding: .6rem .4rem; min-height: 40px; border-radius: 10px; font-weight: 600; font-size: .93rem; letter-spacing: .005em; color: var(--muted); cursor: pointer; white-space: nowrap; -webkit-tap-highlight-color: transparent; transition: background-color .15s ease, color .15s ease, transform .1s ease, box-shadow .15s ease; }
-.action-btn:hover { background: var(--surface-2); color: var(--text); }
-.action-btn:active { transform: scale(.96); background: var(--surface-3); }
+/* Action bar (Like/Comment/Share): stays a flat readable bar by
+   design — the polish is in the states: pills that tint on hover and
+   press instead of plain grey text (Premium Button Pack). */
+.action-btn { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; background: none; border: none; padding: .6rem .4rem; min-height: 40px; border-radius: var(--radius-pill); font-weight: 600; font-size: .93rem; letter-spacing: .005em; color: var(--muted); cursor: pointer; white-space: nowrap; -webkit-tap-highlight-color: transparent; transition: background-color .18s ease, color .18s ease, transform .18s ease, box-shadow .18s ease; }
+.action-btn:hover { background: var(--btn-tint); color: var(--brand-dark); }
+.action-btn:active { transform: scale(.96); background: var(--btn-tint-hover); }
 .action-btn:focus-visible { outline: none; box-shadow: var(--ring); }
-.action-btn.active { color: var(--danger); background: rgba(229,72,77,.08); }
+.action-btn.active { color: var(--danger); background: rgba(229,72,77,.10); box-shadow: inset 0 0 0 1px rgba(229,72,77,.18); }
 .action-btn.active:hover { color: var(--danger); }
 .reaction-bar { display: flex; gap: 2px; }
 .reaction-btn { background: none; border: none; cursor: pointer; font-size: 1.05rem; padding: 8px; min-width: 36px; min-height: 36px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; -webkit-tap-highlight-color: transparent; transition: transform .12s ease, background-color .12s ease, box-shadow .12s ease; }
@@ -419,7 +457,7 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
    box and Send always fit a phone screen. */
 .composer-tray { display: flex; flex-wrap: wrap; gap: 4px; padding: 10px 12px 2px; }
 .composer-tray .btn { min-width: 46px; min-height: 42px; font-size: 1.1rem; display: inline-flex; align-items: center; justify-content: center; }
-.msg-send-btn { border-radius: 999px; min-width: 48px; min-height: 44px; font-size: 1rem; padding-left: 13px; padding-right: 11px; }
+.msg-send-btn { border-radius: var(--radius-pill); min-width: 48px; min-height: 48px; font-size: 1rem; padding-left: 13px; padding-right: 11px; }
 
 /* notifications */
 .notif { display: flex; gap: 10px; align-items: center; width: 100%; text-align: left; cursor: pointer; border: none; font: inherit; color: var(--text); border-radius: 12px; transition: background .15s ease; }
@@ -616,7 +654,8 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
   .auth-feats { align-items: stretch; text-align: left; }
   .logo-big { font-size: 2.6rem; letter-spacing: -1px; }
   .auth-card { padding: 18px 16px; }
-  .auth-card input, .auth-card .btn { min-height: 44px; }
+  .auth-card input { min-height: 44px; }
+  .auth-card .btn { min-height: 48px; }
   .auth-card .tab { min-height: 44px; display: flex; align-items: center; justify-content: center; }
 
   /* slim topbar: brand, search icon, theme, avatar (nav lives in bottom bar) */
@@ -626,13 +665,17 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
   .topnav > a:not(.topnav-avatar), .topnav .logout-btn, .topnav .install-btn { display: none; }
   .brand { font-size: 1.25rem; }
 
-  /* bottom navigation — active item gets a gradient indicator bar */
+  /* bottom navigation — active item gets a tinted pill behind its
+     icon + bold label (Premium Button Pack; replaces the old 3px
+     gradient top bar). Icon and label sit above the pill via
+     position/z-index; clearance + safe-area rules unchanged. */
   .bottom-nav { display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 60; background: var(--surface); background: var(--header-bg); -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)); backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat)); border-top: 1px solid var(--border); box-shadow: 0 -4px 16px rgba(16,24,40,.08); padding-bottom: env(safe-area-inset-bottom); }
-  .bottom-nav-item { flex: 1; position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: 8px 2px 6px; font-size: 1.3rem; line-height: 1.1; color: var(--muted); min-height: 52px; -webkit-tap-highlight-color: transparent; transition: color .15s ease, background-color .15s ease; }
+  .bottom-nav-item { flex: 1; position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: 8px 2px 6px; font-size: 1.3rem; line-height: 1.1; color: var(--muted); min-height: 52px; -webkit-tap-highlight-color: transparent; transition: color .18s ease, background-color .18s ease; }
   .bottom-nav-item:hover { text-decoration: none; }
   .bottom-nav-item:active { background: color-mix(in srgb, var(--brand) 8%, transparent); }
-  .bottom-nav-item.active { color: var(--brand); font-weight: 700; }
-  .bottom-nav-item.active::before { content: ''; position: absolute; top: 0; left: 50%; transform: translateX(-50%); width: 34px; height: 3px; border-radius: 0 0 3px 3px; background: var(--grad); }
+  .bottom-nav-item .ic, .bottom-nav-label { position: relative; z-index: 1; }
+  .bottom-nav-item.active { color: var(--brand-dark); font-weight: 700; }
+  .bottom-nav-item.active::before { content: ''; position: absolute; top: 4px; left: 50%; transform: translateX(-50%); width: 48px; height: 28px; border-radius: var(--radius-pill); background: var(--btn-tint); border: 1px solid var(--btn-tint-border); box-shadow: var(--icon-btn-shadow); }
   .bottom-nav-label { font-size: .68rem; font-weight: 600; }
   .bottom-nav-item.active .bottom-nav-label { font-weight: 700; }
   .bottom-nav .nav-badge { top: 3px; right: calc(50% - 21px); }
@@ -651,7 +694,7 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
   .icon-btn { min-width: 40px; min-height: 40px; }
   .settings-logout { display: inline-flex; }
   .search-page-form { display: flex; max-width: none; margin-bottom: 14px; }
-  .search-page-form .btn { min-height: 44px; }
+  .search-page-form .btn { min-height: 48px; }
   .search-page-form input { min-height: 44px; }
 
   /* messenger: list OR thread, never stacked */
@@ -778,11 +821,14 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 .msg-picker .emoji-btn { width: 36px; height: 36px; font-size: 1.15rem; }
 /* Reaction count chips under the bubble. */
 .msg-chips { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 3px; }
-.msg-chip { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; font-size: .78rem; cursor: pointer; line-height: 1.5; transition: transform .12s ease, background .15s ease; }
-.msg-chip:hover { background: var(--surface-3); }
+/* Reaction chips join the button system (Premium Button Pack):
+   tinted pill when not yours, gradient pill with the filled shadow
+   when yours. */
+.msg-chip { background: var(--btn-tint); color: var(--brand-dark); border: 1px solid var(--btn-tint-border); border-radius: var(--radius-pill); padding: 2px 9px; font-size: .78rem; font-weight: 600; cursor: pointer; line-height: 1.5; box-shadow: var(--icon-btn-shadow); transition: transform .18s ease, background-color .18s ease, box-shadow .18s ease, filter .18s ease; }
+.msg-chip:hover { background: var(--btn-tint-hover); }
 .msg-chip:active { transform: scale(.94); }
-.msg-chip.mine:hover { background: var(--grad); }
-.msg-chip.mine { background: var(--grad); border-color: transparent; color: #fff; }
+.msg-chip.mine { background: var(--grad); border-color: transparent; color: #fff; box-shadow: var(--btn-shadow-primary); }
+.msg-chip.mine:hover { background: var(--grad); filter: brightness(1.06); }
 /* Jump-to-message flash. */
 @keyframes msgFlash { 0%, 100% { background: transparent; } 25%, 60% { background: rgba(250, 200, 60, .35); } }
 .msg-row.flash { animation: msgFlash 1.5s ease; border-radius: 12px; }
