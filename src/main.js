@@ -36,7 +36,7 @@ const appEl = document.getElementById('app');
 let authResolved = false;
 let authSessionSeen = false;
 let lastJoinCode = '';
-const BOOT_SPLASH_HTML = `<div class="boot-splash"><div class="boot-logo">M</div><div class="boot-sub">${t('taglineShort')}</div><div class="boot-spinner" aria-hidden="true"></div></div>`;
+const BOOT_SPLASH_HTML = `<div class="boot-splash"><div class="boot-logo">M</div><div class="boot-sub">${t('taglineShort')}</div><div class="boot-spinner" aria-hidden="true"></div><div class="boot-skeleton" aria-hidden="true"><div class="skel-row"><div class="skel skel-avatar"></div><div class="skel skel-line short"></div></div><div class="skel skel-card"></div><div class="skel skel-line"></div><div class="skel skel-line short"></div></div></div>`;
 
 function parseRoute() {
   const hash = location.hash.replace(/^#\/?/, '');
