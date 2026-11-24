@@ -4,7 +4,7 @@ import * as api from './api.js';
 import { firebaseReady, firebaseConfig } from './firebase.js';
 import { subscribe as storeSubscribe, mutate as demoMutate } from './store.js';
 import { setLocale, t } from './i18n.js';
-import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError, messageSnippet, focusMovesWithinForm, rsvpToastKey, isThreadPinned, pickScrollAnchor, anchoredScrollTop, threadRestoreMode, threadPinnedAfterScroll, safeMediaUrl } from './utils.js';
+import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError, messageSnippet, focusMovesWithinForm, createPressGate, PRESS_RENDER_BACKSTOP_MS, rsvpToastKey, isThreadPinned, pickScrollAnchor, anchoredScrollTop, threadRestoreMode, threadPinnedAfterScroll, safeMediaUrl } from './utils.js';
 import { toast, clearToasts, openModal, closeModal, confirmModal, adminActionModal, avatarHtml, postCardHtml, verifiedBadgeHtml } from './components.js';
 import { providerById } from './aiProviders.js';
 import { cldImg } from './cloudinary.js';
@@ -855,8 +855,47 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft') storyNav(-1);
 });
 
+// Press gate (utils.createPressGate): a data-driven render that lands
+// between pointerdown and pointerup replaces the pressed node, and the
+// browser then drops the click entirely — Like/Comment taps straddling
+// a realtime rebuild read as dead buttons (the composer's Send button
+// died of the same mechanism in 2026-11). Defer soft renders while a
+// press is in flight and flush on release; the backstop bounds the
+// deferral if a release is never observed. Capture phase + window, so
+// no control has to opt in and a release anywhere ends the press.
+const pressGate = createPressGate();
+let pressBackstopTimer = 0;
+const startPress = (source) => () => {
+  pressGate.press(source);
+  clearTimeout(pressBackstopTimer);
+  pressBackstopTimer = setTimeout(() => { if (pressGate.forceFlush()) softRender(); }, PRESS_RENDER_BACKSTOP_MS);
+};
+const endPress = (source) => () => {
+  const flush = pressGate.release(source);
+  if (!pressGate.active) clearTimeout(pressBackstopTimer);
+  // Flush AFTER the click: the browser computes the click from the
+  // press/release pair once release dispatch completes, so rebuilding
+  // synchronously inside the release handler would detach the target
+  // before the click exists and eat the tap after all. A 0ms timer
+  // runs after the click event — the tap lands first, then the page
+  // rebuilds.
+  if (flush) setTimeout(() => softRender(), 0);
+};
+// Pointer events are the primary source; mouse/touch are tracked too
+// so the gate still engages on engines whose input pipeline delivers
+// only some of them (the gate dedupes sources per press).
+window.addEventListener('pointerdown', startPress('pointer'), true);
+window.addEventListener('pointerup', endPress('pointer'), true);
+window.addEventListener('pointercancel', endPress('pointer'), true);
+window.addEventListener('mousedown', startPress('mouse'), true);
+window.addEventListener('mouseup', endPress('mouse'), true);
+window.addEventListener('touchstart', startPress('touch'), { capture: true, passive: true });
+window.addEventListener('touchend', endPress('touch'), true);
+window.addEventListener('touchcancel', endPress('touch'), true);
+
 function softRender() {
   if (voiceRec) return; // never re-render mid-recording — it would wipe the recording UI
+  if (pressGate.deferRender()) return; // never rebuild mid-press — it would eat the tap (see press gate above)
   // Signed-out → signed-in transitions must ALWAYS render, even while
   // focus sits in the login form's inputs: otherwise a successful login
   // (whose mirror update arrives after the submit handler) leaves the
@@ -1306,7 +1345,20 @@ document.addEventListener('click', async (e) => {
     case 'react': await engage(api.toggleReaction(postId, actEl.dataset.emoji), postId); break;
     case 'share': await handle(api.sharePost(postId), 'Post shared to your timeline.'); break;
     case 'save-post': document.getElementById(`menu-${postId}`)?.classList.add('hidden'); await engage(api.toggleSave(postId), postId, 'Saved list updated.'); break;
-    case 'focus-comment': postEl?.querySelector('.comment-form input')?.focus(); break;
+    case 'focus-comment': {
+      const input = postEl?.querySelector('.comment-form input');
+      if (input) {
+        // The comment box sits below the comments list — on a phone it
+        // can be at or past the fold while the Comment button is on
+        // screen, so a bare focus() left the tap with no visible
+        // effect. Bring the box into view first (only when it isn't
+        // already), then focus without letting the browser re-scroll.
+        const r = input.getBoundingClientRect();
+        if (r.top < 0 || r.bottom > window.innerHeight) input.scrollIntoView({ block: 'center' });
+        input.focus({ preventScroll: true });
+      }
+      break;
+    }
     case 'edit-post': {
       const post = d.posts.find((p) => p.id === postId);
       const modal = openModal(`<h3>Edit post</h3><form id="edit-post-form" data-id="${postId}" class="stack pf-form"><textarea name="text" rows="4" maxlength="2000">${escapeHtml(post?.text || '')}</textarea><div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">Save</button></div></form>`);

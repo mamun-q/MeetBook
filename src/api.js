@@ -2368,6 +2368,20 @@ export async function toggleGroupMembership(groupId) {
     return 'requested';
   }
   if (live) {
+    if (isMember && group.privacy === 'private') {
+      // Private-group leave rides the SECURITY DEFINER leave_group
+      // RPC (supabase/fix-leave-rpc-2026-11-25.sql): a direct members
+      // UPDATE is rejected by Postgres itself (42501) because the
+      // updated row — without the caller in it — is invisible under
+      // groups_select for a private group. (A PUBLIC group stays
+      // visible after leaving, so public joins/leaves keep the
+      // fresh-read update below.) The RPC removes only the caller's
+      // uid; the creator was already refused above. A missing
+      // function (pre-SQL) throws through sbRpc as a normal error.
+      const nextMembers = await sbRpc('leave_group', { p_group_id: groupId });
+      patchMirror((r) => { const g = (r.groups || []).find((x) => x.id === groupId); if (g) g.members = nextMembers; });
+      return 'left';
+    }
     // M5 fresh-read (toggleFollow pattern): the toggle is applied to
     // the STORED members, so a join/leave that landed concurrently is
     // never erased by this whole-array write — and the groups rule's
@@ -3693,6 +3707,22 @@ export async function removeGroupChatMember(conversationId, memberId) {
   const isSelf = memberId === user.id;
   const canRemove = isSelf || conv.createdBy === user.id || isAdminRole(user);
   if (!canRemove) throw new Error('Only the group creator can remove members.');
+  if (live && isSelf) {
+    // Self-leave rides the SECURITY DEFINER leave_conversation RPC
+    // (supabase/fix-leave-rpc-2026-11-25.sql): a direct participants
+    // UPDATE is rejected by Postgres itself (42501) because the
+    // updated row — without the caller in it — is invisible under
+    // conversations_select, whatever the UPDATE policy allows. The
+    // RPC removes only the caller's uid and enforces the ≥2 floor
+    // against the stored row; a missing function (pre-SQL) throws
+    // through sbRpc as a normal error, like any failed write. The
+    // mirror is patched with the returned list (the conversation
+    // drops out of the caller's slices on the next fetch, exactly
+    // as after the old direct write).
+    const next = await sbRpc('leave_conversation', { p_conversation_id: conversationId });
+    patchRemoteConversation(conversationId, (c) => { c.participants = next; });
+    return next;
+  }
   if (live) {
     // M5 fresh-read (toggleFollow pattern): the removal is applied
     // to the STORED participants, so members added concurrently are

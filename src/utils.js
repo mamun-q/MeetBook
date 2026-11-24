@@ -982,6 +982,66 @@ export function focusMovesWithinForm(currentFormId, nextFormId) {
   return Boolean(currentFormId) && currentFormId === nextFormId;
 }
 
+// ------------------------------------------------------------ press gate
+// A data-driven render must never land between a pointer press and its
+// release. render() rebuilds #app wholesale; if the pressed node is
+// replaced before pointerup, the browser drops the click entirely —
+// the tap simply never fires (proven in Firefox and in Chromium's
+// mouse pipeline; the composer Send button died of a synchronous
+// mid-press rebuild in 2026-11, see composer-send-blur). On the live
+// site, realtime echoes rebuild the DOM roughly every few seconds, so
+// an ordinary tap on Like / Comment / Save can straddle a rebuild and
+// read as a dead button — above all on a phone, where a tap lasts
+// 100-300ms and the rebuild itself is slow. main.js therefore tracks
+// presses with this gate: softRender() asks deferRender() and, when
+// deferred, flushes once on release. The gate is a pure state machine
+// over the set of active press sources; main.js owns the listeners
+// and the backstop timer —
+// PRESS_RENDER_BACKSTOP_MS bounds the deferral when a release is
+// never observed (long-press, a pointercancel the window missed), so
+// renders can be delayed by a press but never starved by one.
+export const PRESS_RENDER_BACKSTOP_MS = 1200;
+
+export function createPressGate() {
+  // One physical press can surface as several event sources (a touch
+  // tap is touch + pointer + compatibility mouse), so presses are
+  // tracked as a SET of active sources: the press is in flight until
+  // every source has released. Tracking sources rather than events
+  // also keeps the gate correct on engines whose input pipeline
+  // delivers some sources but not others.
+  const sources = new Set();
+  let pending = false;
+  return {
+    press(source = 'pointer') { sources.add(source); },
+    // Returns true when a deferred render should flush now (the last
+    // active source released with a render waiting).
+    release(source = 'pointer') {
+      sources.delete(source);
+      if (sources.size > 0) return false;
+      const flush = pending;
+      pending = false;
+      return flush;
+    },
+    // softRender()'s question: true = a press is in flight, hold this
+    // render (and remember it) until release.
+    deferRender() {
+      if (sources.size === 0) return false;
+      pending = true;
+      return true;
+    },
+    // Backstop fired: forget the press and report whether a deferred
+    // render is waiting.
+    forceFlush() {
+      sources.clear();
+      const flush = pending;
+      pending = false;
+      return flush;
+    },
+    get active() { return sources.size > 0; },
+    get pending() { return pending; }
+  };
+}
+
 // ------------------------------------------------------------ thread scroll
 // Messenger thread stability: the app re-renders by rebuilding the
 // whole DOM, so an open conversation's scroll position survives only

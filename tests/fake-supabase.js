@@ -506,6 +506,35 @@ async function rpc(name, args = {}) {
     }
     return { data: conv.id, error: null };
   }
+  if (name === 'leave_conversation') {
+    // Mirrors supabase/fix-leave-rpc-2026-11-25.sql: group chats
+    // only, caller must be a participant, >= 2 floor, and the ONLY
+    // change is removing the caller's own uid.
+    if (!caller) return rpcError('leave_conversation: caller is not signed in');
+    const conv = tableMap('conversations').get(args.p_conversation_id);
+    if (!conv) return rpcError('leave_conversation: conversation not found');
+    if (!conv.isGroup) return rpcError('leave_conversation: only group chats can be left');
+    if (!(conv.participants || []).includes(caller)) return rpcError('leave_conversation: caller is not a participant');
+    const next = (conv.participants || []).filter((id) => id !== caller);
+    if (next.length < 2) return rpcError('leave_conversation: a group needs at least two members');
+    conv.participants = next;
+    scheduleFlush();
+    return { data: [...next], error: null };
+  }
+  if (name === 'leave_group') {
+    // Mirrors supabase/fix-leave-rpc-2026-11-25.sql: the creator can
+    // never leave, the caller must be a member, no members floor,
+    // and the ONLY change is removing the caller's own uid.
+    if (!caller) return rpcError('leave_group: caller is not signed in');
+    const group = tableMap('groups').get(args.p_group_id);
+    if (!group) return rpcError('leave_group: group not found');
+    if (group.createdBy === caller) return rpcError('leave_group: group creators cannot leave their own group — delete the group instead');
+    if (!(group.members || []).includes(caller)) return rpcError('leave_group: caller is not a member');
+    const next = (group.members || []).filter((id) => id !== caller);
+    group.members = next;
+    scheduleFlush();
+    return { data: [...next], error: null };
+  }
   return rpcError(`function public.${name} does not exist`);
 }
 
