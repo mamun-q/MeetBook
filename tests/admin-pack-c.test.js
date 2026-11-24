@@ -24,7 +24,7 @@ let V;
 let api;
 
 beforeAll(async () => {
-  V = await import('../src/views.js');
+  V = { ...(await import('../src/views.js')), ...(await import('../src/adminViews.js')) };
   api = await import('../src/api.js');
   await api.login('admin@meetbook.app', 'admin123'); // demo admin session
 });

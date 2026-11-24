@@ -67,18 +67,38 @@ function unreadMsgCount(d, user) {
 }
 
 // ------------------------------------------------- admin routing (Pack A)
-// #/admin/* lives in the sidebar shell (views.adminShell). Visibility
+// #/admin/* lives in the sidebar shell (adminViews.adminShell). Visibility
 // ladder: analyst → overview only; moderator → + reports; admin and
 // superadmin → everything. Non-staff users get the long-standing
 // "Admins only." handling; staff without the tier for a module get the
 // shell's access-denied card. Pack B/C register further sub-routes here.
-function adminRoute(d, user, seg, query) {
+//
+// The admin views live in ./adminViews.js, split out of views.js so a
+// regular user's initial download never includes admin-only code. This
+// loader dynamic-imports it on first need and caches the module (and
+// the in-flight promise) for the session, so admin sub-navigation never
+// re-downloads or flashes after the first load.
+let adminViewsModule = null;
+let adminViewsPromise = null;
+let adminViewsFailed = false;
+function loadAdminViews() {
+  if (adminViewsModule) return Promise.resolve(adminViewsModule);
+  if (!adminViewsPromise) {
+    adminViewsFailed = false;
+    adminViewsPromise = import('./adminViews.js')
+      .then((m) => { adminViewsModule = m; adminViewsPromise = null; return m; })
+      .catch((err) => { adminViewsPromise = null; adminViewsFailed = true; throw err; });
+  }
+  return adminViewsPromise;
+}
+
+function adminRoute(A, d, user, seg, query) {
   if (!isStaff(user)) return `<div class="page narrow"><div class="card empty-state"><p>Admins only.</p></div></div>`;
   const sub = seg[1] || '';
-  const shell = (active, content) => V.adminShell(d, user, active, content);
+  const shell = (active, content) => A.adminShell(d, user, active, content);
   switch (sub) {
-    case '': return shell('overview', V.adminOverviewView(d, user, { firebase: firebaseReady, projectId: firebaseConfig.projectId }));
-    case 'analytics': return shell('analytics', V.adminAnalyticsView(d, user, { days: Number(query.get('days') || 30) }));
+    case '': return shell('overview', A.adminOverviewView(d, user, { firebase: firebaseReady, projectId: firebaseConfig.projectId }));
+    case 'analytics': return shell('analytics', A.adminAnalyticsView(d, user, { days: Number(query.get('days') || 30) }));
     case 'users': {
       // Emails come from the admin-only admin_user_emails() RPC once
       // fix-user-email-exposure.sql closes the mirrored column; the
@@ -90,35 +110,35 @@ function adminRoute(d, user, seg, query) {
       const du = Object.keys(emails).length
         ? { ...d, users: d.users.map((u) => (emails[u.id] ? { ...u, email: emails[u.id] } : u)) }
         : d;
-      return shell('users', isAdminRole(user) ? V.adminUsersView(du, user, {
+      return shell('users', isAdminRole(user) ? A.adminUsersView(du, user, {
         q: query.get('q') || '', status: query.get('status') || 'all',
         role: query.get('role') || 'all', kind: query.get('kind') || 'all',
         page: Number(query.get('page') || 1)
-      }) : V.adminDeniedView());
+      }) : A.adminDeniedView());
     }
-    case 'content': return shell('content', canModerate(user) ? V.adminContentView(d, user, {
+    case 'content': return shell('content', canModerate(user) ? A.adminContentView(d, user, {
       tab: query.get('tab') || 'posts', q: query.get('q') || '',
       kind: query.get('kind') || 'all', page: Number(query.get('page') || 1)
-    }) : V.adminDeniedView());
+    }) : A.adminDeniedView());
     case 'bots': {
-      if (!isAdminRole(user)) return shell('bots', V.adminDeniedView());
+      if (!isAdminRole(user)) return shell('bots', A.adminDeniedView());
       // Bot Control Center details page (Pack C): #/admin/bots/<id>?tab=
       if (seg[2]) {
         void api.loadBotAdminData(seg[2]); // live: mirror brain/memories/counters/conv meta, then re-render
-        return shell('bots', V.botDetailsView(d, user, seg[2], query.get('tab') || 'overview'));
+        return shell('bots', A.botDetailsView(d, user, seg[2], query.get('tab') || 'overview'));
       }
-      return shell('bots', V.botsView(d, user));
+      return shell('bots', A.botsView(d, user));
     }
-    case 'reports': return shell('reports', canModerate(user) ? V.reportsView(d, user, { status: query.get('status') || 'all' }) : V.adminDeniedView());
-    case 'announce': return shell('announce', isAdminRole(user) ? V.adminAnnounceView(d, user) : V.adminDeniedView());
-    case 'security': return shell('security', isAdminRole(user) ? V.adminSecurityView(d, user, { q: query.get('q') || '' }) : V.adminDeniedView());
-    case 'settings': return shell('settings', isAdminRole(user) ? V.adminSettingsView(d, user) : V.adminDeniedView());
+    case 'reports': return shell('reports', canModerate(user) ? A.reportsView(d, user, { status: query.get('status') || 'all' }) : A.adminDeniedView());
+    case 'announce': return shell('announce', isAdminRole(user) ? A.adminAnnounceView(d, user) : A.adminDeniedView());
+    case 'security': return shell('security', isAdminRole(user) ? A.adminSecurityView(d, user, { q: query.get('q') || '' }) : A.adminDeniedView());
+    case 'settings': return shell('settings', isAdminRole(user) ? A.adminSettingsView(d, user) : A.adminDeniedView());
     case 'health': {
-      if (!isAdminRole(user)) return shell('health', V.adminDeniedView());
+      if (!isAdminRole(user)) return shell('health', A.adminDeniedView());
       void api.probeFirestoreHealth(); // one-shot read probe; result mirrors into the dataset
-      return shell('health', V.adminHealthView(d, user, { firebase: firebaseReady, projectId: firebaseConfig.projectId }));
+      return shell('health', A.adminHealthView(d, user, { firebase: firebaseReady, projectId: firebaseConfig.projectId }));
     }
-    default: return shell('', V.adminDeniedView());
+    default: return shell('', A.adminDeniedView());
   }
 }
 
@@ -262,7 +282,19 @@ export function render() {
     case 'saved': body = V.savedView(d, user); break;
     case 'memories': body = V.memoriesView(d, user); break;
     case 'settings': body = V.settingsView(d, user, prefs); break;
-    case 'admin': body = adminRoute(d, user, seg, query); break;
+    case 'admin': {
+      // Admin code is a lazy chunk (see loadAdminViews): render it once
+      // loaded; until then show the standard loading card and re-render
+      // when the chunk arrives. A failed load shows a plain error card;
+      // navigating away and back retries.
+      if (adminViewsModule) body = adminRoute(adminViewsModule, d, user, seg, query);
+      else if (adminViewsFailed) body = `<div class="page narrow"><div class="card empty-state"><p>Admin panel could not be loaded. Check your connection and try again.</p></div></div>`;
+      else {
+        void loadAdminViews().then(() => render(), () => render());
+        body = `<div class="page narrow"><div class="card empty-state"><div class="spinner" aria-hidden="true"></div></div></div>`;
+      }
+      break;
+    }
     case 'bots': location.hash = '#/admin/bots'; return; // legacy link → Bot Center inside the admin shell
     case 'help': case 'terms': case 'privacy': case 'guidelines': body = V.staticView(route); break;
     case 'login': case 'register': location.hash = '#/'; return;
@@ -1485,7 +1517,7 @@ document.addEventListener('click', async (e) => {
     case 'report-resolve-open': {
       const rep = d.reports.find((x) => x.id === actEl.dataset.id);
       if (!rep) break;
-      const modal = openModal(V.reportResolveFormHtml(rep));
+      const modal = openModal((await loadAdminViews()).reportResolveFormHtml(rep));
       modal.querySelector('[data-close]').onclick = closeModal;
       break;
     }
@@ -1572,8 +1604,8 @@ document.addEventListener('click', async (e) => {
       await handle(api.adminSavePlatformSettings({ aiPaidApproved: turningOn }), turningOn ? 'Paid providers unlocked.' : 'Paid providers locked.');
       break;
     }
-    case 'bot-new': { const modal = openModal(V.botFormHtml(null)); modal.querySelector('[data-close]').onclick = closeModal; break; }
-    case 'bot-edit': { const bot = d.bots.find((b) => b.id === actEl.dataset.id); const modal = openModal(V.botFormHtml(bot)); modal.querySelector('[data-close]').onclick = closeModal; break; }
+    case 'bot-new': { const modal = openModal((await loadAdminViews()).botFormHtml(null)); modal.querySelector('[data-close]').onclick = closeModal; break; }
+    case 'bot-edit': { const bot = d.bots.find((b) => b.id === actEl.dataset.id); const modal = openModal((await loadAdminViews()).botFormHtml(bot)); modal.querySelector('[data-close]').onclick = closeModal; break; }
     case 'bot-toggle': { const bot = d.bots.find((b) => b.id === actEl.dataset.id); if (bot) await handle(api.saveBot({ ...bot, active: !bot.active }), bot.active ? 'Bot deactivated.' : 'Bot activated.'); break; }
     case 'bot-delete': {
       // Hard confirm with a reason (Pack C) — the deletion is audited

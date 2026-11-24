@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
-import * as V from '../src/views.js';
+import * as viewsNs from '../src/views.js';
+import * as adminViewsNs from '../src/adminViews.js';
+const V = { ...viewsNs, ...adminViewsNs }; // admin views live in adminViews.js (lazy chunk); merged for call-site compatibility
 import { userNameHtml, postCardHtml } from '../src/components.js';
 import { buildBotPrompt, templateBotMessageReply, normaliseBot, BOT_PRESENCE_RULES } from '../src/botLogic.js';
 import { buildGeminiPrompt } from '../src/gemini.js';

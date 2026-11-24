@@ -21,7 +21,7 @@ let api;
 let store;
 
 beforeAll(async () => {
-  V = await import('../src/views.js');
+  V = { ...(await import('../src/views.js')), ...(await import('../src/adminViews.js')) };
   store = await import('../src/store.js');
   api = await import('../src/api.js');
 });

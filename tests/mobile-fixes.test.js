@@ -7,7 +7,9 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mergePostLists, collapseDuplicateNotifications, memoriesFor } from '../src/utils.js';
 import { setLocale, t } from '../src/i18n.js';
 import { userNameHtml, postCardHtml } from '../src/components.js';
-import * as V from '../src/views.js';
+import * as viewsNs from '../src/views.js';
+import * as adminViewsNs from '../src/adminViews.js';
+const V = { ...viewsNs, ...adminViewsNs }; // admin views live in adminViews.js (lazy chunk); merged for call-site compatibility
 
 afterEach(() => { setLocale('en'); });
 

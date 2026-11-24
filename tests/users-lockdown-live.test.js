@@ -67,7 +67,7 @@ beforeAll(async () => {
   fake.seed('users', 'boss1', ROW('Boss Admin', 'boss', 'superadmin', 'boss@example.com'));
   fake.seed('users', 'asha1', ROW('Asha User', 'asha', 'user', 'asha@example.com'));
   api = await import('../src/api.js');
-  V = await import('../src/views.js');
+  V = { ...(await import('../src/views.js')), ...(await import('../src/adminViews.js')) };
   api.onAuthReady(() => {});
 });
 

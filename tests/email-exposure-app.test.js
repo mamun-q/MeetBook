@@ -51,7 +51,7 @@ beforeAll(async () => {
   fake.seed('users', 'asha1', ROW('Asha User', 'asha', 'user'));
   fake.setRpcEmails(RPC_EMAILS);
   api = await import('../src/api.js');
-  V = await import('../src/views.js');
+  V = { ...(await import('../src/views.js')), ...(await import('../src/adminViews.js')) };
   api.onAuthReady(() => {});
 });
 

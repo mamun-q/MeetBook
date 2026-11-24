@@ -10,7 +10,9 @@ import {
 } from '../src/aiProviders.js';
 import { generateGeminiDetailed } from '../src/gemini.js';
 import { normaliseBot } from '../src/botLogic.js';
-import * as V from '../src/views.js';
+import * as viewsNs from '../src/views.js';
+import * as adminViewsNs from '../src/adminViews.js';
+const V = { ...viewsNs, ...adminViewsNs }; // admin views live in adminViews.js (lazy chunk); merged for call-site compatibility
 
 const nova = {
   id: 'bot_nova', name: 'Nova', username: 'nova.bot', active: true,

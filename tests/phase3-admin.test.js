@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { botDetailsView } from '../src/views.js';
+import { botDetailsView } from '../src/adminViews.js';
 import { appendBotDecision } from '../src/botLogic.js';
 
 // Master Vision Phase 3: Admin decision history + memory viewer grouped

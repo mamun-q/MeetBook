@@ -11,7 +11,9 @@ import { readFileSync } from 'node:fs';
 import { rsvpToastKey, shouldClearToast, reviewText, platformStats } from '../src/utils.js';
 import { LOCALES, setLocale, t } from '../src/i18n.js';
 import { toast, clearToasts } from '../src/components.js';
-import * as V from '../src/views.js';
+import * as viewsNs from '../src/views.js';
+import * as adminViewsNs from '../src/adminViews.js';
+const V = { ...viewsNs, ...adminViewsNs }; // admin views live in adminViews.js (lazy chunk); merged for call-site compatibility
 
 vi.mock('../src/supabase.js', () => ({
   supabaseReady: false, isSupabaseConfigured: false, supabaseConfig: {}, supabase: null
