@@ -138,7 +138,7 @@ export function feedView(d, meUser, page = 1) {
             <span class="spacer"></span>
             <button class="btn btn-primary" type="submit">${t('post')}</button>
           </div>
-          <div id="poll-fields" class="stack hidden">
+          <div id="poll-fields" class="stack hidden pf-form">
             <div id="poll-options-list" class="stack">
               ${[1, 2].map((i) => `<div class="row gap-sm poll-opt-row"><input name="pollOption" maxlength="60" placeholder="${t('pollOption')} ${i}" autocomplete="off" /></div>`).join('')}
             </div>
@@ -273,7 +273,7 @@ export function storiesRailHtml(d, meUser, ctx) {
 
 export function storyFormHtml() {
   return `<h3>${icon('plus')} ${t('createStory')}</h3>
-  <form id="story-form" class="stack">
+  <form id="story-form" class="stack pf-form">
     <label>${t('storyText')}<textarea name="text" rows="3" maxlength="300" placeholder="${t('storyTextPlaceholder')}"></textarea></label>
     <label>${icon('camera')} Photo<input type="file" name="image" accept="image/*" /></label>
     <div>
@@ -612,16 +612,25 @@ export function groupView(d, meUser, groupId, opts = {}) {
 
 export function groupFormHtml(group = null) {
   return `<h3>${group ? `${t('edit')} group` : t('createGroup')}</h3>
-  <form id="group-form" data-id="${group?.id || ''}" class="stack">
-    <label>${t('groupName')}<input name="name" required maxlength="80" value="${escapeHtml(group?.name || '')}" /></label>
-    <label>${t('description')}<textarea name="description" rows="3" maxlength="500">${escapeHtml(group?.description || '')}</textarea></label>
-    <label>${t('privacyLabel')}
-      <select name="privacy">
-        <option value="public" ${group?.privacy !== 'private' ? 'selected' : ''}>${t('publicLabel')}</option>
-        <option value="private" ${group?.privacy === 'private' ? 'selected' : ''}>${t('privateLabel')}</option>
-      </select>
-    </label>
-    <label>Cover photo<input type="file" name="cover" accept="image/*" /></label>
+  <form id="group-form" data-id="${group?.id || ''}" class="stack pf-form">
+    <section class="pf-section">
+      <div class="pf-head"><span class="pf-chip pf-chip--basic">${icon('users')}</span><h4>${t('basicInfo')}</h4></div>
+      <label>${t('groupName')}<input name="name" required maxlength="80" value="${escapeHtml(group?.name || '')}" /></label>
+      <label>${t('description')}<textarea name="description" rows="3" maxlength="500">${escapeHtml(group?.description || '')}</textarea></label>
+    </section>
+    <section class="pf-section">
+      <div class="pf-head"><span class="pf-chip pf-chip--privacy">${icon('lock')}</span><h4>${t('privacyLabel')}</h4></div>
+      <label>${t('privacyLabel')}
+        <select name="privacy">
+          <option value="public" ${group?.privacy !== 'private' ? 'selected' : ''}>${t('publicLabel')}</option>
+          <option value="private" ${group?.privacy === 'private' ? 'selected' : ''}>${t('privateLabel')}</option>
+        </select>
+      </label>
+    </section>
+    <section class="pf-section">
+      <div class="pf-head"><span class="pf-chip pf-chip--photos">${icon('camera')}</span><h4>${t('photos')}</h4></div>
+      <label>Cover photo<input type="file" name="cover" accept="image/*" /></label>
+    </section>
     <div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">${group ? 'Save group' : t('createGroup')}</button></div>
   </form>`;
 }
@@ -703,7 +712,7 @@ export function pageView(d, meUser, pageId) {
       <h3>${icon('star')} ${t('reviews')} ${ratingSummary.count ? `· <span class="stars">${stars(ratingSummary.average)}</span> ${ratingSummary.average} (${ratingSummary.count})` : ''}</h3>
       ${pageReviews.map((r) => { const a = ctx.usersById[r.authorId]; return `<div class="row gap-sm review-item">${avatarHtml(a, 36)}<div class="grow"><b>${escapeHtml(a?.name || '')}${verifiedBadgeHtml(a)}</b> <span class="stars">${stars(r.rating)}</span> <span class="muted small">· ${timeAgo(r.createdAt)}</span>${reviewText(r) ? `<br/>${escapeHtml(reviewText(r))}` : ''}</div>${r.authorId === meUser.id ? `<button class="btn btn-ghost btn-sm" data-act="delete-review" data-id="${escapeHtml(r.id)}" aria-label="${t('delete')}">${icon('trash')}</button>` : ''}</div>`; }).join('') || `<p class="muted">${t('noReviews')}</p>`}
       ${isOwner ? '' : `
-      <form id="review-form" data-page="${escapeHtml(page.id)}" class="stack">
+      <form id="review-form" data-page="${escapeHtml(page.id)}" class="stack pf-form">
         <h4>${myReview ? t('yourReview') : t('writeReview')}</h4>
         <div class="star-picker" role="radiogroup" aria-label="${t('rating')}">
           ${[1, 2, 3, 4, 5].map((n) => `<label class="star-option"><input type="radio" name="rating" value="${n}" ${Number(myReview?.rating || 0) === n ? 'checked' : ''} required /><span>${n <= Number(myReview?.rating || 0) ? iconFill('star') : icon('star')}</span></label>`).join('')}
@@ -719,13 +728,19 @@ const PAGE_CATEGORIES = ['Community', 'Business', 'Food & Drink', 'Technology', 
 
 export function pageFormHtml(page = null) {
   return `<h3>${page ? `${t('edit')} page` : t('createPage')}</h3>
-  <form id="page-form" data-id="${page?.id || ''}" class="stack">
-    <label>Page name<input name="name" required maxlength="80" value="${escapeHtml(page?.name || '')}" /></label>
-    <label>${t('category')}<input name="category" list="page-categories" maxlength="60" value="${escapeHtml(page?.category || '')}" placeholder="Community" /></label>
-    <datalist id="page-categories">${PAGE_CATEGORIES.map((c) => `<option value="${c}"></option>`).join('')}</datalist>
-    <label>${t('about')}<textarea name="about" rows="3" maxlength="500">${escapeHtml(page?.about || '')}</textarea></label>
-    <label>Profile picture<input type="file" name="avatar" accept="image/*" /></label>
-    <label>Cover photo<input type="file" name="cover" accept="image/*" /></label>
+  <form id="page-form" data-id="${page?.id || ''}" class="stack pf-form">
+    <section class="pf-section">
+      <div class="pf-head"><span class="pf-chip pf-chip--basic">${icon('flag')}</span><h4>${t('basicInfo')}</h4></div>
+      <label>Page name<input name="name" required maxlength="80" value="${escapeHtml(page?.name || '')}" /></label>
+      <label>${t('category')}<input name="category" list="page-categories" maxlength="60" value="${escapeHtml(page?.category || '')}" placeholder="Community" /></label>
+      <datalist id="page-categories">${PAGE_CATEGORIES.map((c) => `<option value="${c}"></option>`).join('')}</datalist>
+      <label>${t('about')}<textarea name="about" rows="3" maxlength="500">${escapeHtml(page?.about || '')}</textarea></label>
+    </section>
+    <section class="pf-section">
+      <div class="pf-head"><span class="pf-chip pf-chip--photos">${icon('camera')}</span><h4>${t('photos')}</h4></div>
+      <label>Profile picture<input type="file" name="avatar" accept="image/*" /></label>
+      <label>Cover photo<input type="file" name="cover" accept="image/*" /></label>
+    </section>
     <div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">${page ? 'Save page' : t('createPage')}</button></div>
   </form>`;
 }
@@ -819,18 +834,30 @@ export function eventFormHtml() {
   // datetime-local needs a value in local time; leave empty and let the
   // browser picker fill it (required).
   return `<h3>${icon('calendar')} ${t('createEvent')}</h3>
-  <form id="event-form" class="stack">
-    <label>${t('eventTitle')}<input name="title" required maxlength="120" /></label>
-    <label>${t('description')}<textarea name="description" rows="3" maxlength="1000"></textarea></label>
-    <label>${t('eventDate')}<input name="dateTime" type="datetime-local" required /></label>
-    <label>${t('eventLocation')}<input name="location" maxlength="120" placeholder="e.g. TSC, University of Dhaka" /></label>
-    <label>Cover photo<input type="file" name="cover" accept="image/*" /></label>
-    <label>${t('privacyLabel')}
-      <select name="visibility">
-        <option value="public">${t('publicLabel')}</option>
-        <option value="friends">${t('friends')}</option>
-      </select>
-    </label>
+  <form id="event-form" class="stack pf-form">
+    <section class="pf-section">
+      <div class="pf-head"><span class="pf-chip pf-chip--edu">${icon('calendar')}</span><h4>${t('basicInfo')}</h4></div>
+      <label>${t('eventTitle')}<input name="title" required maxlength="120" /></label>
+      <label>${t('description')}<textarea name="description" rows="3" maxlength="1000"></textarea></label>
+    </section>
+    <section class="pf-section">
+      <div class="pf-head"><span class="pf-chip pf-chip--time">${icon('clock')}</span><h4>${t('whenAndWhere')}</h4></div>
+      <label>${t('eventDate')}<input name="dateTime" type="datetime-local" required /></label>
+      <label>${t('eventLocation')}<input name="location" maxlength="120" placeholder="e.g. TSC, University of Dhaka" /></label>
+    </section>
+    <section class="pf-section">
+      <div class="pf-head"><span class="pf-chip pf-chip--photos">${icon('camera')}</span><h4>${t('photos')}</h4></div>
+      <label>Cover photo<input type="file" name="cover" accept="image/*" /></label>
+    </section>
+    <section class="pf-section">
+      <div class="pf-head"><span class="pf-chip pf-chip--privacy">${icon('lock')}</span><h4>${t('privacyLabel')}</h4></div>
+      <label>${t('privacyLabel')}
+        <select name="visibility">
+          <option value="public">${t('publicLabel')}</option>
+          <option value="friends">${t('friends')}</option>
+        </select>
+      </label>
+    </section>
     <div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">${t('createEvent')}</button></div>
   </form>`;
 }
@@ -935,7 +962,7 @@ export function messagesView(d, meUser, activeConvId = '') {
         </div>
         ${(() => { const media = active.msgs.filter((m) => m.image && !m.unsent); return media.length ? `<div class="conv-info-section"><h4>${icon('image')} ${t('sharedMedia')}</h4><div class="media-grid">${media.slice(-9).reverse().map((m) => `<button type="button" class="media-thumb" data-act="jump-message" data-id="${escapeHtml(m.id)}"><img src="${escapeHtml(safeMediaUrl(cldImg(m.image, 480)))}" alt="${t('sharedMedia')}" loading="lazy" decoding="async" /></button>`).join('')}</div></div>` : ''; })()}
         ${active.isGroup ? (() => { const conv = active.conv; const canManage = conv.createdBy === meUser.id || isAdminRole(meUser); const addable = [...friendIdsOfData(d, meUser.id)].map((id) => byId[id]).filter((u) => u && !conv.participants.includes(u.id)); return `<div class="conv-info-section"><h4>${icon('users')} ${t('members')}</h4>
-          <form id="group-rename-form" data-conv="${escapeHtml(conv.id)}" class="row gap-sm">
+          <form id="group-rename-form" data-conv="${escapeHtml(conv.id)}" class="row gap-sm pf-form">
             <input name="title" class="grow" value="${escapeHtml(conv.title || '')}" maxlength="60" aria-label="${t('groupName')}" />
             <button class="btn btn-ghost btn-sm" type="submit">${t('renameGroup')}</button>
           </form>
@@ -1095,7 +1122,7 @@ export function groupChatFormHtml(d, meUser) {
   const byId = usersById(d);
   const friends = [...friendIdsOfData(d, meUser.id)].map((id) => byId[id]).filter(Boolean);
   return `<h3>${icon('users')} ${t('newGroupChat')}</h3>
-  <form id="group-chat-form" class="stack">
+  <form id="group-chat-form" class="stack pf-form">
     <label>${t('groupChat')}<input name="title" maxlength="60" placeholder="e.g. Weekend Plans" /></label>
     <div class="stack group-pick-list">
       ${friends.length ? friends.map((u) => `<label class="row gap-sm"><input type="checkbox" name="member" value="${escapeHtml(u.id)}" /> ${avatarHtml(u, 30)}<span>${escapeHtml(u.name)}</span></label>`).join('') : `<p class="muted small">${t('noFriendsForGroupChat')}</p><div><a class="btn btn-primary btn-sm" href="#/friends" data-close>🔍 ${t('findFriends')}</a></div>`}
@@ -1249,7 +1276,7 @@ export function settingsView(d, meUser, prefs) {
     </div>
     <div class="card stack">
       <h3>${t('settingsNotifications')}</h3>
-      <form id="notif-prefs-form" class="stack">
+      <form id="notif-prefs-form" class="stack pf-form">
         ${types.map((type) => `<label class="notif-pref-row"><span class="grow">${prefLabels[type]}</span><input type="checkbox" name="${type}" ${np[type] === false ? '' : 'checked'} /></label>`).join('')}
         <label class="notif-pref-row"><span class="grow">${icon('bell')} ${t('browserNotifications')}</span><input type="checkbox" name="browserNotifications" ${meUser.settings?.browserNotifications ? 'checked' : ''} /></label>
         <p class="muted small">${t('browserNotificationsHelp')}</p>
@@ -1258,7 +1285,7 @@ export function settingsView(d, meUser, prefs) {
     </div>
     <div class="card stack">
       <h3>${t('settingsPrivacy')}</h3>
-      <form id="privacy-prefs-form" class="stack">
+      <form id="privacy-prefs-form" class="stack pf-form">
         <label>${t('defaultPostPrivacy')}
           <select name="defaultPostPrivacy">
             <option value="public" ${defaultPrivacy === 'public' ? 'selected' : ''}>${t('publicLabel')}</option>
@@ -1559,7 +1586,7 @@ export function appealStatusLabel(status) {
 // reported message as evidence inside api.reportContent.
 export function reportFormHtml(targetType, targetId) {
   return `<h3>${icon('flag')} ${t('reportDialogTitle')}</h3>
-  <form id="report-form" data-type="${escapeHtml(targetType)}" data-id="${escapeHtml(targetId)}" class="stack">
+  <form id="report-form" data-type="${escapeHtml(targetType)}" data-id="${escapeHtml(targetId)}" class="stack pf-form">
     <label>${t('categoryLabel')}<select name="category">${REPORT_CATEGORIES.map((c) => `<option value="${c}">${escapeHtml(reportCategoryLabel(c))}</option>`).join('')}</select></label>
     <label>${t('reportReasonLabel')}<textarea name="reason" rows="3" maxlength="500" required placeholder="${t('reportReasonLabel')}"></textarea></label>
     <div class="row gap end"><button class="btn btn-ghost" type="button" data-close>${t('cancel')}</button><button class="btn btn-primary" type="submit">${t('reportSubmit')}</button></div>
@@ -1725,7 +1752,7 @@ export function supportDecisionSummary(r) {
 
 export function supportAppealFormHtml(report) {
   return `<h3>${icon('mail')} ${t('supportAppealTitle')}</h3>
-  <form id="support-appeal-form" data-id="${escapeHtml(report.id)}" class="stack">
+  <form id="support-appeal-form" data-id="${escapeHtml(report.id)}" class="stack pf-form">
     <p class="muted small">${t('appealNoRestore')}</p>
     <label>${t('supportAppealTextLabel')}<textarea name="text" rows="4" maxlength="500" placeholder="${t('supportAppealTextLabel')}"></textarea></label>
     <div class="row gap end"><button class="btn btn-ghost" type="button" data-close>${t('cancel')}</button><button class="btn btn-primary" type="submit">${t('supportAppealSubmit')}</button></div>

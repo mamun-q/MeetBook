@@ -1098,8 +1098,13 @@ a, button, input, select, textarea, label { touch-action: manipulation; }
    changes appearance. Fields are grouped into titled sections, each
    with a soft tinted circular icon chip and a hairline divider.
    Tints are flat color-mix washes (no shadows, no blur) so they stay
-   cheap on mobile and read correctly in dark mode too. */
-.pf-form { gap: 0; }
+   cheap on mobile and read correctly in dark mode too.
+   All-forms extension (2026-11-24): the same .pf-form soft-input
+   system is reused by the group/page/event/story/report/appeal/
+   review/settings/modal forms. Only a form that actually contains
+   .pf-section blocks collapses the stack gap (sections carry their
+   own padding); flat forms keep the normal stack spacing. */
+.pf-form:has(> .pf-section) { gap: 0; }
 .pf-section { display: flex; flex-direction: column; gap: 12px; padding: 16px 0 18px; border-bottom: 1px solid var(--border); }
 .pf-section:first-child { padding-top: 4px; }
 .pf-head { display: flex; align-items: center; gap: 10px; }
@@ -1113,6 +1118,8 @@ a, button, input, select, textarea, label { touch-action: manipulation; }
 .pf-chip--places { --pf-accent: 217,119,6; }
 .pf-chip--personal { --pf-accent: 225,29,72; }
 .pf-chip--web { --pf-accent: 219,39,119; }
+.pf-chip--privacy { --pf-accent: 225,29,72; }
+.pf-chip--time { --pf-accent: 217,119,6; }
 .pf-form label { font-size: .88rem; }
 .pf-form input:not([type="checkbox"]):not([type="radio"]), .pf-form select, .pf-form textarea { background: var(--surface-2); border: 1px solid transparent; border-radius: 14px; padding: .65rem .9rem; box-shadow: none; }
 .pf-form input:not([type="checkbox"]):not([type="radio"]):focus, .pf-form select:focus, .pf-form textarea:focus { background: var(--surface); border-color: var(--brand); box-shadow: var(--ring); }

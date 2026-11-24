@@ -1200,11 +1200,11 @@ document.addEventListener('click', async (e) => {
       }, () => toast(t('locationUnavailable'), 'error'), { timeout: 10000, maximumAge: 60000 });
       break;
     }
-    case 'poll-open': openModal(`<h3>${icon('bar-chart')} ${t('createPoll')}</h3><form id="chat-poll-form" data-conv="${actEl.dataset.conv}" class="stack"><input name="question" placeholder="${t('pollQuestion')}" maxlength="120" required /><input name="option1" placeholder="${t('pollOption')} 1" maxlength="60" required /><input name="option2" placeholder="${t('pollOption')} 2" maxlength="60" required /><input name="option3" placeholder="${t('pollOption')} 3 (${t('optional')})" maxlength="60" /><input name="option4" placeholder="${t('pollOption')} 4 (${t('optional')})" maxlength="60" /><div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">${t('createPoll')}</button></div></form>`); break;
+    case 'poll-open': openModal(`<h3>${icon('bar-chart')} ${t('createPoll')}</h3><form id="chat-poll-form" data-conv="${actEl.dataset.conv}" class="stack pf-form"><input name="question" placeholder="${t('pollQuestion')}" maxlength="120" required /><input name="option1" placeholder="${t('pollOption')} 1" maxlength="60" required /><input name="option2" placeholder="${t('pollOption')} 2" maxlength="60" required /><input name="option3" placeholder="${t('pollOption')} 3 (${t('optional')})" maxlength="60" /><input name="option4" placeholder="${t('pollOption')} 4 (${t('optional')})" maxlength="60" /><div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">${t('createPoll')}</button></div></form>`); break;
     case 'vote-poll': await handle(api.voteChatPoll(actEl.dataset.id, actEl.dataset.option)); break;
     case 'set-nickname': {
       const d = api.data(); const conv = d.conversations.find((c) => c.id === actEl.dataset.conv); const target = d.users.find((u) => u.id === actEl.dataset.id);
-      openModal(`<h3>${icon('tag')} ${t('setNickname')}</h3><form id="nickname-form" data-conv="${actEl.dataset.conv}" data-user="${actEl.dataset.id}" class="stack"><label>${escapeHtml(target?.name || '')}<input name="nickname" value="${escapeHtml(conv?.nicknames?.[actEl.dataset.id] || '')}" placeholder="${escapeHtml(target?.name || '')}" maxlength="40" /></label><p class="muted small">${t('nicknameHint')}</p><div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">Save</button></div></form>`);
+      openModal(`<h3>${icon('tag')} ${t('setNickname')}</h3><form id="nickname-form" data-conv="${actEl.dataset.conv}" data-user="${actEl.dataset.id}" class="stack pf-form"><label>${escapeHtml(target?.name || '')}<input name="nickname" value="${escapeHtml(conv?.nicknames?.[actEl.dataset.id] || '')}" placeholder="${escapeHtml(target?.name || '')}" maxlength="40" /></label><p class="muted small">${t('nicknameHint')}</p><div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">Save</button></div></form>`);
       break;
     }
     case 'pin-message': { const pinned = await handle(api.togglePinMessage(actEl.dataset.id)); if (pinned !== null) toast(pinned ? t('messagePinned') : t('messageUnpinned'), 'success'); break; }
@@ -1224,7 +1224,7 @@ document.addEventListener('click', async (e) => {
     }
     case 'edit-message': {
       const msg = d.messages.find((m) => m.id === actEl.dataset.id);
-      if (msg) openModal(`<h3>${t('editMessage')}</h3><form id="edit-message-form" data-id="${msg.id}" class="stack"><textarea name="text" rows="3" maxlength="2000">${escapeHtml(msg.text || '')}</textarea><div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">Save</button></div></form>`);
+      if (msg) openModal(`<h3>${t('editMessage')}</h3><form id="edit-message-form" data-id="${msg.id}" class="stack pf-form"><textarea name="text" rows="3" maxlength="2000">${escapeHtml(msg.text || '')}</textarea><div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">Save</button></div></form>`);
       break;
     }
     case 'unsend-message': V.uiState.msgMenuFor = ''; if (await confirmModal(t('unsendMessage'), t('unsendConfirm'))) await handle(api.unsendMessage(actEl.dataset.id), t('messageUnsentDone')); break;
@@ -1276,7 +1276,7 @@ document.addEventListener('click', async (e) => {
     case 'focus-comment': postEl?.querySelector('.comment-form input')?.focus(); break;
     case 'edit-post': {
       const post = d.posts.find((p) => p.id === postId);
-      const modal = openModal(`<h3>Edit post</h3><form id="edit-post-form" data-id="${postId}" class="stack"><textarea name="text" rows="4" maxlength="2000">${escapeHtml(post?.text || '')}</textarea><div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">Save</button></div></form>`);
+      const modal = openModal(`<h3>Edit post</h3><form id="edit-post-form" data-id="${postId}" class="stack pf-form"><textarea name="text" rows="4" maxlength="2000">${escapeHtml(post?.text || '')}</textarea><div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">Save</button></div></form>`);
       modal.querySelector('[data-close]').onclick = closeModal;
       break;
     }
