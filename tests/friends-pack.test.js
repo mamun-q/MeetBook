@@ -167,6 +167,13 @@ describe('friends pack — Discover photo header, friends view only', () => {
   it('photo-header CSS is scoped and light (no backdrop-filter)', () => {
     expect(css).toContain('.person-card--photo { padding: 0; overflow: hidden; }');
     expect(css).toMatch(/\.person-photo \{[^}]*height: 84px/);
+    // Regression pin (2026-11-25): .person-card is a column flexbox with
+    // align-items:center, so a flex item sizes to fit-content — the empty
+    // .person-photo div collapsed to width:0 and its gradient painted
+    // nothing (band occupied 84px of height but rendered pure white in a
+    // real Chromium render). The band MUST declare width:100% itself,
+    // exactly like .person-body does.
+    expect(css).toMatch(/\.person-photo \{[^}]*width: 100%/);
     const block = css.slice(css.indexOf('/* Friends Pack'));
     expect(block).not.toContain('backdrop-filter');
   });
