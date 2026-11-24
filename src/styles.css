@@ -367,7 +367,6 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 .action-btn:focus-visible { outline: none; box-shadow: var(--ring); }
 .action-btn.active { color: var(--danger); background: rgba(229,72,77,.10); box-shadow: inset 0 0 0 1px rgba(229,72,77,.18); }
 .action-btn.active:hover { color: var(--danger); }
-.reaction-bar { display: flex; gap: 2px; }
 .reaction-btn { background: none; border: none; cursor: pointer; font-size: 1.05rem; padding: 8px; min-width: 36px; min-height: 36px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; -webkit-tap-highlight-color: transparent; transition: transform .12s ease, background-color .12s ease, box-shadow .12s ease; }
 .reaction-btn:hover { transform: scale(1.22); }
 .reaction-btn:active { transform: scale(1.35); }
@@ -743,12 +742,19 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 .notif-pref-row:last-of-type { border-bottom: none; }
 .notif-pref-row input[type="checkbox"] { width: 18px; height: 18px; flex: none; }
 
-/* Reaction stats + desktop hover-reveal reaction bar. */
+/* Reaction stats. */
 .stats-reactions { font-weight: 600; color: var(--text); }
-@media (min-width: 721px) {
-  .post-actions .reaction-bar { opacity: 0; visibility: hidden; transition: opacity .15s ease; }
-  .post-actions:hover .reaction-bar, .post-actions:focus-within .reaction-bar { opacity: 1; visibility: visible; }
-}
+
+/* Reaction popup (Facebook pattern, 2026-11-25): ONE floating picker
+   in document.body, opened by long-pressing a post's Like button —
+   reactions are no longer a permanent row under every post. It is
+   position:fixed because main.js pins it to the pressed button's
+   viewport rect; living outside #app keeps feed re-renders from
+   wiping it mid-gesture. */
+.reaction-popup { position: fixed; z-index: 90; display: flex; gap: 2px; padding: 6px 8px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-pill); box-shadow: var(--shadow-lg); animation: mb-menu .16s ease-out; }
+.reaction-popup .reaction-btn { font-size: 1.3rem; min-width: 44px; min-height: 44px; }
+/* A long-press on Like must read as a hold, not a text selection. */
+.action-btn { -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; }
 
 /* Composer photo preview with a remove (×) button. */
 .composer-preview-wrap { position: relative; }

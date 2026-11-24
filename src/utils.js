@@ -1042,6 +1042,59 @@ export function createPressGate() {
   };
 }
 
+// ------------------------------------------------------------ long press
+// The Facebook reaction pattern (owner's choice, 2026-11-25): reactions
+// no longer sit in a permanent emoji row under every post — a plain tap
+// on Like likes, and a LONG-PRESS on Like opens a floating picker. This
+// machine owns the gesture decisions so they are unit-testable without
+// a DOM: main.js feeds it press points and owns the actual timer
+// (LONG_PRESS_MS) and the popup element. A press stays eligible until
+// it ends, is cancelled (a scroll stole it — main.js calls cancel), or
+// drifts past the move threshold (the "press" became a scroll/drag).
+// When the hold matures, fire() latches `fired`: the browser is about
+// to dispatch a click for that same press on release, and end() tells
+// main.js that this click must be swallowed so opening the picker does
+// not also toggle the like.
+export const LONG_PRESS_MS = 500;
+export const LONG_PRESS_MOVE_PX = 10;
+
+export function createLongPress({ moveThreshold = LONG_PRESS_MOVE_PX } = {}) {
+  let tracking = false; // a press is down and still eligible to mature
+  let fired = false;    // the hold matured (picker opened) — latched until end()
+  let sx = 0;
+  let sy = 0;
+  return {
+    begin(x, y) { tracking = true; fired = false; sx = x; sy = y; },
+    // Returns whether the press is still eligible after this move.
+    move(x, y) {
+      if (tracking && Math.hypot(x - sx, y - sy) > moveThreshold) tracking = false;
+      return tracking;
+    },
+    // The timer's question: mature the hold now? Only an eligible,
+    // still-held press fires — exactly once.
+    fire() {
+      if (!tracking) return false;
+      tracking = false;
+      fired = true;
+      return true;
+    },
+    // A scroll stole the gesture before it matured: no longer eligible.
+    // A latched `fired` is deliberately untouched — if the picker had
+    // already opened, the release click still has to be swallowed.
+    cancel() { tracking = false; },
+    // The press ended. Returns true when the hold had fired, i.e. the
+    // click belonging to this press must be swallowed.
+    end() {
+      const f = fired;
+      tracking = false;
+      fired = false;
+      return f;
+    },
+    get tracking() { return tracking; },
+    get fired() { return fired; }
+  };
+}
+
 // ------------------------------------------------------------ thread scroll
 // Messenger thread stability: the app re-renders by rebuilding the
 // whole DOM, so an open conversation's scroll position survives only

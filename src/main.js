@@ -4,8 +4,8 @@ import * as api from './api.js';
 import { firebaseReady, firebaseConfig } from './firebase.js';
 import { subscribe as storeSubscribe, mutate as demoMutate } from './store.js';
 import { setLocale, t } from './i18n.js';
-import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError, messageSnippet, focusMovesWithinForm, createPressGate, PRESS_RENDER_BACKSTOP_MS, rsvpToastKey, isThreadPinned, pickScrollAnchor, anchoredScrollTop, threadRestoreMode, threadPinnedAfterScroll, safeMediaUrl } from './utils.js';
-import { toast, clearToasts, openModal, closeModal, confirmModal, adminActionModal, avatarHtml, postCardHtml, verifiedBadgeHtml } from './components.js';
+import { escapeHtml, uid as genId, timeAgo, storyBackgroundCss, normalisePoll, isStaff, canModerate, isAdminRole, accountStatus, analyticsSeries, seriesToCsv, recordClientError, messageSnippet, focusMovesWithinForm, createPressGate, PRESS_RENDER_BACKSTOP_MS, createLongPress, LONG_PRESS_MS, rsvpToastKey, isThreadPinned, pickScrollAnchor, anchoredScrollTop, threadRestoreMode, threadPinnedAfterScroll, safeMediaUrl } from './utils.js';
+import { toast, clearToasts, openModal, closeModal, confirmModal, adminActionModal, avatarHtml, postCardHtml, verifiedBadgeHtml, reactionButtonsHtml } from './components.js';
 import { providerById } from './aiProviders.js';
 import { cldImg } from './cloudinary.js';
 import * as V from './views.js';
@@ -893,6 +893,152 @@ window.addEventListener('touchstart', startPress('touch'), { capture: true, pass
 window.addEventListener('touchend', endPress('touch'), true);
 window.addEventListener('touchcancel', endPress('touch'), true);
 
+// ------------------------------------------------------- reaction popup
+// Facebook pattern (owner's choice, 2026-11-25): the reaction picker is
+// NOT a permanent emoji row under every post — on a phone that row ate
+// a full line of every card. A plain tap on Like still likes; a
+// LONG-PRESS on Like (utils.createLongPress owns the gesture decisions)
+// opens this one floating popup. The element lives in document.body,
+// OUTSIDE #app, so the wholesale re-renders that rebuild the feed can
+// never wipe it mid-gesture — and while the opening press is in flight
+// the press gate above holds those renders back anyway. Picking a
+// reaction routes through the normal data-act="react" delegation; the
+// popup carries the post id because its buttons sit outside the card.
+let reactionPopupEl = null;
+let reactionPopupPostId = '';
+
+function ensureReactionPopup() {
+  if (reactionPopupEl) return reactionPopupEl;
+  reactionPopupEl = document.createElement('div');
+  reactionPopupEl.id = 'reaction-popup';
+  reactionPopupEl.className = 'reaction-popup hidden';
+  reactionPopupEl.setAttribute('role', 'menu');
+  reactionPopupEl.setAttribute('aria-label', 'Reactions');
+  document.body.appendChild(reactionPopupEl);
+  return reactionPopupEl;
+}
+
+function closeReactionPopup() {
+  reactionPopupPostId = '';
+  reactionPopupEl?.classList.add('hidden');
+}
+
+function openReactionPopup(anchorBtn, postId) {
+  const el = ensureReactionPopup();
+  const post = api.data().posts.find((p) => p.id === postId);
+  el.innerHTML = reactionButtonsHtml(post?.reactions?.[me()?.id] || '');
+  reactionPopupPostId = postId;
+  // Measure while invisible, then pin above the Like button (below it
+  // when there is no room above), centred on it and clamped on-screen.
+  el.style.visibility = 'hidden';
+  el.classList.remove('hidden');
+  const r = anchorBtn.getBoundingClientRect();
+  const pw = el.offsetWidth;
+  const ph = el.offsetHeight;
+  let top = r.top - ph - 8;
+  if (top < 8) top = Math.min(r.bottom + 8, Math.max(8, window.innerHeight - ph - 8));
+  const left = Math.max(8, Math.min(r.left + r.width / 2 - pw / 2, window.innerWidth - pw - 8));
+  el.style.top = `${top}px`;
+  el.style.left = `${left}px`;
+  el.style.visibility = '';
+}
+
+// The gesture: pointer + mouse + touch sources tracked as a set (like
+// the press gate — one physical press surfaces as several sources, and
+// some engines deliver only some of them). The FIRST source to land on
+// a Like button arms the hold; the hold matures on the LONG_PRESS_MS
+// timer unless the press ends, drifts past the move threshold, or a
+// scroll steals it.
+const likeLongPress = createLongPress();
+const likePressSources = new Set();
+let likePressTimer = 0;
+let likePressAnchor = null; // { btn, postId } of the press being timed
+let swallowLikeClick = false; // the release-click of a hold that opened the popup
+let likePressEndedAt = 0; // when the last tracked press fully ended
+
+const pressPoint = (e) => {
+  const t = e.touches?.[0] || e.changedTouches?.[0];
+  return { x: t?.clientX ?? e.clientX ?? 0, y: t?.clientY ?? e.clientY ?? 0 };
+};
+
+const beginLikePress = (source) => (e) => {
+  // Compatibility mouse events trail a touch press by a few ms — they
+  // are the tail of the SAME gesture, not a fresh press: they must not
+  // retire the swallow flag or dismiss the popup the hold just opened
+  // (their release is simply absorbed below). A genuinely fresh press,
+  // on the other hand, retires a stale swallow flag — it belongs to a
+  // hold whose release-click never arrived and must not eat a real tap
+  // — and a press landing outside an open popup dismisses it (the press
+  // itself still does whatever it was going to do).
+  const trailing = likePressSources.size === 0 && Date.now() - likePressEndedAt < 120;
+  if (!trailing) {
+    swallowLikeClick = false;
+    if (reactionPopupPostId && !e.target?.closest?.('#reaction-popup')) closeReactionPopup();
+  }
+  if (likePressSources.size > 0 || trailing) { likePressSources.add(source); return; }
+  const btn = e.target?.closest?.('[data-act="like"]');
+  if (!btn) return;
+  const postId = btn.closest('[data-post]')?.dataset.post;
+  if (!postId) return;
+  likePressSources.add(source);
+  likePressAnchor = { btn, postId };
+  const { x, y } = pressPoint(e);
+  likeLongPress.begin(x, y);
+  clearTimeout(likePressTimer);
+  likePressTimer = setTimeout(() => {
+    if (likeLongPress.fire() && likePressAnchor) openReactionPopup(likePressAnchor.btn, likePressAnchor.postId);
+  }, LONG_PRESS_MS);
+};
+
+const endLikePress = (source) => () => {
+  likePressSources.delete(source);
+  if (likePressSources.size > 0) return;
+  clearTimeout(likePressTimer);
+  likePressAnchor = null;
+  likePressEndedAt = Date.now();
+  // A matured hold already opened the popup; the click this release is
+  // about to produce belongs to the hold, not to a Like tap.
+  if (likeLongPress.end()) swallowLikeClick = true;
+};
+
+const moveLikePress = (e) => {
+  if (!likePressAnchor) return;
+  const { x, y } = pressPoint(e);
+  if (!likeLongPress.move(x, y)) clearTimeout(likePressTimer);
+};
+
+window.addEventListener('pointerdown', beginLikePress('pointer'), true);
+window.addEventListener('pointerup', endLikePress('pointer'), true);
+window.addEventListener('pointercancel', endLikePress('pointer'), true);
+window.addEventListener('mousedown', beginLikePress('mouse'), true);
+window.addEventListener('mouseup', endLikePress('mouse'), true);
+window.addEventListener('touchstart', beginLikePress('touch'), { capture: true, passive: true });
+window.addEventListener('touchend', endLikePress('touch'), true);
+window.addEventListener('touchcancel', endLikePress('touch'), true);
+window.addEventListener('pointermove', moveLikePress, { capture: true, passive: true });
+window.addEventListener('touchmove', moveLikePress, { capture: true, passive: true });
+
+// Swallow exactly the release-click of a popup-opening hold. Capture
+// phase on window runs before the delegated document click handler, so
+// the Like never toggles for that tap; every other click passes.
+window.addEventListener('click', (e) => {
+  if (!swallowLikeClick) return;
+  swallowLikeClick = false;
+  e.preventDefault();
+  e.stopPropagation();
+}, true);
+
+// Scrolling cancels a hold that has not matured yet, and dismisses an
+// open popup (its anchor is moving away underneath it).
+window.addEventListener('scroll', () => {
+  if (likePressAnchor && !likeLongPress.fired) { clearTimeout(likePressTimer); likeLongPress.cancel(); }
+  if (reactionPopupPostId) closeReactionPopup();
+}, { capture: true, passive: true });
+
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeReactionPopup(); });
+// A long-press must not summon the browser's own context menu/callout.
+document.addEventListener('contextmenu', (e) => { if (e.target?.closest?.('[data-act="like"]')) e.preventDefault(); });
+
 function softRender() {
   if (voiceRec) return; // never re-render mid-recording — it would wipe the recording UI
   if (pressGate.deferRender()) return; // never rebuild mid-press — it would eat the tap (see press gate above)
@@ -923,7 +1069,7 @@ document.addEventListener('load', (e) => {
 }, true);
 window.addEventListener('resize', () => applyThreadScroll());
 window.visualViewport?.addEventListener('resize', () => applyThreadScroll());
-window.addEventListener('hashchange', () => { feedPage = 1; clearToasts(1500); replyTarget = null; stopTyping(); render(); window.scrollTo({ top: 0 }); });
+window.addEventListener('hashchange', () => { feedPage = 1; clearToasts(1500); replyTarget = null; stopTyping(); closeReactionPopup(); render(); window.scrollTo({ top: 0 }); });
 
 // Infinite scroll for the feed (the Load more button is the fallback).
 window.addEventListener('scroll', () => {
@@ -1014,6 +1160,12 @@ function fileFrom(form, name) {
 
 // ------------------------------------------------------------- click actions
 document.addEventListener('click', async (e) => {
+  // A click anywhere outside the reaction popup dismisses it (presses
+  // already close it on the way down; this covers clicks that arrive
+  // without one, e.g. keyboard activation). Clicks inside the popup
+  // fall through to the 'react' case, which closes it after picking.
+  if (reactionPopupPostId && !e.target.closest('#reaction-popup')) closeReactionPopup();
+
   const nav = e.target.closest('[data-nav]');
   if (nav) { location.hash = nav.dataset.nav; return; }
 
@@ -1342,7 +1494,15 @@ document.addEventListener('click', async (e) => {
     case 'poll-vote': await engage(api.votePoll(postId, actEl.dataset.option), postId); break;
     case 'toggle-pin': { const pinned = await handle(api.togglePinPost(postId)); if (pinned !== null) toast(pinned ? 'Pinned as announcement.' : 'Announcement unpinned.', 'success'); break; }
     case 'dismiss-memories': V.uiState.memoriesDismissed = true; render(); break;
-    case 'react': await engage(api.toggleReaction(postId, actEl.dataset.emoji), postId); break;
+    case 'react': {
+      // Reactions are picked from the floating popup (long-press Like),
+      // whose buttons live outside the card — the post id rides on the
+      // popup there; in-card callers resolve it from the card as usual.
+      const pid = postId || reactionPopupPostId;
+      closeReactionPopup();
+      if (pid) await engage(api.toggleReaction(pid, actEl.dataset.emoji), pid);
+      break;
+    }
     case 'share': await handle(api.sharePost(postId), 'Post shared to your timeline.'); break;
     case 'save-post': document.getElementById(`menu-${postId}`)?.classList.add('hidden'); await engage(api.toggleSave(postId), postId, 'Saved list updated.'); break;
     case 'focus-comment': {

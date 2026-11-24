@@ -149,6 +149,15 @@ export function pageVerifiedBadgeHtml(page, usersById = {}) {
   return isVerifiedPage(page, usersById) ? ` ${verifiedBadgeSpan()}` : '';
 }
 
+// The five post reactions, in picker order. They are NOT rendered as a
+// permanent row under the post (owner's call, 2026-11-25 — the row ate
+// a full line on every phone card): main.js opens ONE floating popup
+// with these buttons on a long-press of the Like button.
+export const REACTION_EMOJIS = ['❤️', '😆', '😮', '😢', '👏'];
+export function reactionButtonsHtml(myReaction = '') {
+  return REACTION_EMOJIS.map((e) => `<button type="button" class="reaction-btn ${myReaction === e ? 'active' : ''}" data-act="react" data-emoji="${e}" aria-label="React ${e}">${e}</button>`).join('');
+}
+
 export function postCardHtml(post, ctx) {
   const { usersById, me, friendIds } = ctx;
   const author = usersById[post.authorId];
@@ -162,7 +171,6 @@ export function postCardHtml(post, ctx) {
   const group = post.groupId ? (ctx.groupsById || {})[post.groupId] : null;
   const liked = post.likes?.includes(me?.id);
   const saved = post.savedBy?.includes(me?.id);
-  const myReaction = post.reactions?.[me?.id] || '';
   const reactionCounts = {};
   for (const e of Object.values(post.reactions || {})) reactionCounts[e] = (reactionCounts[e] || 0) + 1;
   // Facebook-style stats: ONE total (likes + emoji reactions) next to the
@@ -223,9 +231,6 @@ export function postCardHtml(post, ctx) {
       <button class="action-btn ${liked ? 'active' : ''}" data-act="like">${liked ? iconFill('heart') : icon('heart')} ${t('like')}</button>
       <button class="action-btn" data-act="focus-comment">${icon('message-circle')} ${t('comment')}</button>
       <button class="action-btn" data-act="share">${icon('share-2')} ${t('share')}</button>
-      <span class="reaction-bar">
-        ${['❤️', '😆', '😮', '😢', '👏'].map((e) => `<button class="reaction-btn ${myReaction === e ? 'active' : ''}" data-act="react" data-emoji="${e}" aria-label="React ${e}">${e}</button>`).join('')}
-      </span>
     </div>
     <div class="comments">${comments || `<p class="muted small">${t('noCommentsYet')}</p>`}</div>
     <form class="comment-form" data-comment-form="${escapeHtml(post.id)}">
