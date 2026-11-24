@@ -127,6 +127,29 @@ describe('button pack — tabs, chips, icon buttons, action bar, bottom nav', ()
     expect(active).toContain('box-shadow: inset 0 0 0 1px rgba(229,72,77,.18)');
   });
 
+  it('conversation filter chips wrap inside the list pane (no clipped Requests chip, no h-scrollbar)', () => {
+    // Two consecutive live sweeps (design pack 0f236ef AND button pack
+    // 92a16a4) found the same defect: the All / Unread / Archived /
+    // Requests row is wider than the 300px conversation pane, so
+    // "Requests (2)" clipped and .conv-list grew a horizontal
+    // scrollbar. The row must wrap and its pills must shrink.
+    const filters = rule(/\.conv-filters \{[^}]*\}/);
+    expect(filters).toContain('flex-wrap: wrap');
+    expect(filters).toContain('max-width: 100%');
+    expect(filters).toContain('box-sizing: border-box');
+    const chip = rule(/\.conv-filters \.btn \{[^}]*\}/);
+    expect(chip).toContain('flex: 1 1 40%');
+    expect(chip).toContain('min-width: 0');
+    expect(chip).toContain('padding-left: .5rem');
+    expect(chip).toContain('padding-right: .5rem');
+    expect(chip).toContain('white-space: nowrap');
+    // the pane itself must never grow a horizontal scrollbar from a
+    // stray wide row, while vertical scrolling stays
+    const list = rule(/\.conv-list \{[^}]*\}/);
+    expect(list).toContain('overflow-y: auto');
+    expect(list).toContain('overflow-x: hidden');
+  });
+
   it('bottom-nav active item gets a tinted pill behind the icon (old 3px bar gone)', () => {
     const pill = rule(/\.bottom-nav-item\.active::before \{[^}]*\}/);
     expect(pill).toContain('background: var(--btn-tint)');

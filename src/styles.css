@@ -425,7 +425,7 @@ html[data-theme="dark"] .maintenance-banner { background: #4d1414; color: #f5c2c
 
 /* messenger */
 .messenger { display: grid; grid-template-columns: 300px minmax(0, 1fr); padding: 0; overflow: hidden; min-height: 70vh; }
-.conv-list { border-right: 1px solid var(--border); padding: 14px; display: flex; flex-direction: column; gap: 6px; overflow-y: auto; scrollbar-width: thin; overscroll-behavior: contain; }
+.conv-list { border-right: 1px solid var(--border); padding: 14px; display: flex; flex-direction: column; gap: 6px; overflow-y: auto; overflow-x: hidden; scrollbar-width: thin; overscroll-behavior: contain; }
 .conv-search { border-radius: 999px; background: var(--surface-2); border: none; padding: .5rem .8rem; margin-bottom: 4px; }
 .conv-search:focus { background: var(--surface); box-shadow: var(--ring); }
 .conv-item { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: none; border: none; border-radius: 12px; padding: 8px; cursor: pointer; color: var(--text); position: relative; transition: background .15s ease; }
@@ -922,7 +922,12 @@ a, button, input, select, textarea, label { touch-action: manipulation; }
 .conv-item-wrap > .conv-item { flex: 1; }
 .conv-menu-btn { flex: none; }
 .conv-menu { position: static; flex-basis: 100%; margin: 2px 0 6px auto; width: fit-content; min-width: 200px; box-shadow: var(--shadow-md); }
-.conv-filters { margin: 2px 0 6px; }
+/* Filter chips wrap inside the 300px list pane (two per row) instead
+   of overflowing it: the four .btn-sm pills (All / Unread / Archived /
+   Requests + counts) are wider than the pane on one nowrap row, which
+   clipped "Requests" and forced a horizontal scrollbar on .conv-list. */
+.conv-filters { margin: 2px 0 6px; flex-wrap: wrap; max-width: 100%; box-sizing: border-box; }
+.conv-filters .btn { flex: 1 1 40%; min-width: 0; padding-left: .5rem; padding-right: .5rem; white-space: nowrap; }
 .muted-badge { background: var(--surface-3); color: var(--muted); }
 .active-rail { display: flex; gap: 10px; overflow-x: auto; padding: 4px 2px 10px; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
 .active-rail::-webkit-scrollbar { display: none; }
