@@ -1100,6 +1100,7 @@ document.addEventListener('click', async (e) => {
     case 'set-theme': await handle(api.setConversationTheme(actEl.dataset.conv, actEl.dataset.theme)); break;
     // ---- Messenger Complete Pack: filters, archive/mute, thread emoji
     case 'conv-filter': V.uiState.convFilter = actEl.dataset.filter || 'all'; V.uiState.convMenuFor = ''; render(); break;
+    case 'friends-tab': V.uiState.friendsTab = actEl.dataset.tab || 'discover'; render(); break;
     case 'conv-menu': {
       const id = actEl.dataset.id;
       const menu = document.getElementById(`conv-menu-${id}`);

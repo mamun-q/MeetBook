@@ -13,7 +13,7 @@ import { firebaseReady } from './firebase.js';
 
 // Transient per-session UI state that views need but which is not app
 // data (main.js flips these; a re-render reads them).
-export const uiState = { memoriesDismissed: false, convInfoFor: '', convFilter: 'all', msgMenuFor: '', convMenuFor: '' };
+export const uiState = { memoriesDismissed: false, convInfoFor: '', convFilter: 'all', msgMenuFor: '', convMenuFor: '', friendsTab: '' };
 
 export function usersById(d) {
   return Object.fromEntries(d.users.map((u) => [u.id, u]));
@@ -319,7 +319,7 @@ export function rightRail(d, meUser) {
   return `<div class="card rail">
     ${pending.length ? `<h4>Friend requests</h4>${pending.map((f) => `<div class="row gap-sm rail-person">${avatarHtml(byId[f.from], 36)}<span class="grow">${escapeHtml(byId[f.from]?.name || '')}</span><button class="btn btn-primary btn-sm" data-act="accept-request" data-id="${escapeHtml(f.id)}">Accept</button><button class="btn btn-ghost btn-sm" data-act="reject-request" data-id="${escapeHtml(f.id)}" aria-label="Reject">${icon('x')}</button></div>`).join('')}` : ''}
     <h4>People you may know</h4>
-    ${suggestions.map((u) => { const mutual = mutualFriendCount(d.friendships, meUser.id, u.id); return `<div class="row gap-sm rail-person">${avatarHtml(u, 36)}<span class="grow"><a href="#/profile/${escapeHtml(u.id)}">${escapeHtml(u.name)}</a>${verifiedBadgeHtml(u)}${mutual > 0 ? `<br/><span class="muted small">${mutual} ${mutual === 1 ? t('mutualFriend') : t('mutualFriends')}</span>` : ''}</span><button class="btn btn-ghost btn-sm" data-act="send-request" data-id="${escapeHtml(u.id)}">${t('addFriend')}</button></div>`; }).join('') || '<p class="muted small">No suggestions right now.</p>'}
+    ${suggestions.map((u) => { const mutual = mutualFriendCount(d.friendships, meUser.id, u.id); return `<div class="row gap-sm rail-person">${avatarHtml(u, 36)}<span class="grow"><a href="#/profile/${escapeHtml(u.id)}">${escapeHtml(u.name)}</a>${verifiedBadgeHtml(u)}${u.currentCity ? `<br/>${locationLineHtml(u)}` : mutual > 0 ? `<br/><span class="muted small">${mutual} ${mutual === 1 ? t('mutualFriend') : t('mutualFriends')}</span>` : ''}</span><button class="btn btn-ghost btn-sm" data-act="send-request" data-id="${escapeHtml(u.id)}">${t('addFriend')}</button></div>`; }).join('') || '<p class="muted small">No suggestions right now.</p>'}
     <h4>Online</h4>
     ${d.users.filter((u) => u.id !== meUser.id && isFreshOnline(u)).slice(0, 6).map((u) => `<a class="row gap-sm rail-person" href="#/profile/${escapeHtml(u.id)}"><span class="online-dot"></span>${escapeHtml(u.name)}${verifiedBadgeHtml(u)}</a>`).join('') || '<p class="muted small">Nobody online.</p>'}
     <p class="muted small">${friendIds.size} friends · MeetBook</p>
@@ -444,6 +444,15 @@ export function introCardHtml(user, isMe = false) {
   </div>`;
 }
 
+// Green "Lives in <city>" line for person cards/rows (Friends Pack,
+// 2026-11-25): the text is the profile's EXISTING currentCity, labelled
+// exactly as the profile Intro labels it (t('livesIn')). No new data —
+// profiles without a city simply get no line.
+export function locationLineHtml(u) {
+  if (!u || !u.currentCity) return '';
+  return `<span class="loc-line">${icon('map-pin', 'ic-sm')} ${t('livesIn')} ${escapeHtml(u.currentCity)}</span>`;
+}
+
 // ------------------------------------------------------------------ FRIENDS
 export function friendsView(d, meUser) {
   const byId = usersById(d);
@@ -456,23 +465,53 @@ export function friendsView(d, meUser) {
     const n = mutualFriendCount(d.friendships, meUser.id, u.id);
     return n > 0 ? `<span class="muted small">${n} ${n === 1 ? t('mutualFriend') : t('mutualFriends')}</span>` : '';
   };
-  const person = (u, actions, extra = '') => {
+  const person = (u, actions, extra = '', photo = false) => {
     // A friendship can outlive the other account (admin deletion):
     // rendering a card for a missing user used to throw and take the
     // whole Friends page down with it.
     if (!u) return '';
-    return `<div class="card person-card">${avatarHtml(u, 56)}<a href="#/profile/${escapeHtml(u.id)}"><b>${escapeHtml(u.name)}</b></a>${verifiedBadgeHtml(u)}<span class="muted small">@${escapeHtml(u.username)}</span>${extra}<div class="row gap wrap center">${actions}</div></div>`;
+    const body = `${photo ? `<span class="person-ava">${avatarHtml(u, 72)}</span>` : avatarHtml(u, 56)}<a href="#/profile/${escapeHtml(u.id)}"><b>${escapeHtml(u.name)}</b></a>${verifiedBadgeHtml(u)}<span class="muted small">@${escapeHtml(u.username)}</span>${locationLineHtml(u)}${extra}<div class="row gap wrap center">${actions}</div>`;
+    if (!photo) return `<div class="card person-card">${body}</div>`;
+    // Discover variant (Friends Pack): photo header from the user's
+    // EXISTING cover (lazy, 600w) or the brand gradient when they have
+    // none — same person card, Fexbo-style header, no new data.
+    const head = u.cover
+      ? `<div class="person-photo"><img src="${escapeHtml(safeMediaUrl(cldImg(u.cover, 600)))}" alt="" loading="lazy" decoding="async" /></div>`
+      : `<div class="person-photo"></div>`;
+    return `<div class="card person-card person-card--photo">${head}<div class="person-body">${body}</div></div>`;
   };
-  return `<div class="page">
-    <h2>${icon('users')} ${t('friends')}</h2>
+  // Segmented tabs (Friends Pack, Fexbo-style): Requests / Friends /
+  // Discover with real counts, reusing the app's .tabs/.tab system and
+  // the conv-filter state pattern (uiState + data-act + render()).
+  // Default: Requests when anything is pending, otherwise Discover.
+  const tab = ['requests', 'friends', 'discover'].includes(uiState.friendsTab)
+    ? uiState.friendsTab
+    : (incoming.length || outgoing.length ? 'requests' : 'discover');
+  const requestsHtml = `
     <h3>${t('requestsReceived')}</h3>
     ${incoming.length ? `<div class="grid-people">${incoming.map((f) => person(byId[f.from], `<button class="btn btn-primary btn-sm" data-act="accept-request" data-id="${escapeHtml(f.id)}">Accept</button><button class="btn btn-ghost btn-sm" data-act="reject-request" data-id="${escapeHtml(f.id)}">Reject</button>`, mutualLine(byId[f.from]))).join('')}</div>` : `<p class="muted">${t('noRequestsReceived')}</p>`}
     <h3>${t('requestsSent')}</h3>
-    ${outgoing.length ? `<div class="grid-people">${outgoing.map((f) => person(byId[f.to], `<button class="btn btn-ghost btn-sm" data-act="cancel-request" data-id="${escapeHtml(f.id)}">${t('cancelRequest')}</button>`)).join('')}</div>` : `<p class="muted">${t('noRequestsSent')}</p>`}
-    <h3>${t('yourFriends')} (${friendIds.size})</h3>
-    <div class="grid-people">${[...friendIds].map((id) => { const rel = d.friendships.find((f) => f.status === 'accepted' && ((f.from === meUser.id && f.to === id) || (f.to === meUser.id && f.from === id))); const isClose = (meUser.closeFriends || []).includes(id); return person(byId[id], `<button class="btn ${isClose ? 'btn-primary' : 'btn-ghost'} btn-sm" data-act="toggle-close-friend" data-id="${id}" title="${t('closeFriends')}">${isClose ? iconFill('star') : icon('star')} ${t('closeFriends')}</button><button class="btn btn-ghost btn-sm" data-act="message-user" data-id="${id}">Message</button><button class="btn btn-ghost btn-sm" data-act="remove-friend" data-id="${rel?.id}">Remove</button>`); }).join('') || '<p class="muted">No friends yet — send a request below.</p>'}</div>
-    <h3>${t('suggestedForYou')}</h3>
-    <div class="grid-people">${suggestions.map((u) => person(u, `<button class="btn btn-primary btn-sm" data-act="send-request" data-id="${escapeHtml(u.id)}">${t('addFriend')}</button>`, mutualLine(u))).join('') || '<p class="muted">No suggestions.</p>'}</div>
+    ${outgoing.length ? `<div class="grid-people">${outgoing.map((f) => person(byId[f.to], `<button class="btn btn-ghost btn-sm" data-act="cancel-request" data-id="${escapeHtml(f.id)}">${t('cancelRequest')}</button>`)).join('')}</div>` : `<p class="muted">${t('noRequestsSent')}</p>`}`;
+  const friendsHtml = `
+    <div class="grid-people">${[...friendIds].map((id) => { const rel = d.friendships.find((f) => f.status === 'accepted' && ((f.from === meUser.id && f.to === id) || (f.to === meUser.id && f.from === id))); const isClose = (meUser.closeFriends || []).includes(id); return person(byId[id], `<button class="btn ${isClose ? 'btn-primary' : 'btn-ghost'} btn-sm" data-act="toggle-close-friend" data-id="${id}" title="${t('closeFriends')}">${isClose ? iconFill('star') : icon('star')} ${t('closeFriends')}</button><button class="btn btn-ghost btn-sm" data-act="message-user" data-id="${id}">Message</button><button class="btn btn-ghost btn-sm" data-act="remove-friend" data-id="${rel?.id}">Remove</button>`); }).join('') || '<p class="muted">No friends yet — find people in the Discover tab.</p>'}</div>`;
+  const discoverHtml = `
+    <div class="grid-people">${suggestions.map((u) => person(u, `<button class="btn btn-primary btn-sm" data-act="send-request" data-id="${escapeHtml(u.id)}">${t('addFriend')}</button>`, mutualLine(u), true)).join('') || '<p class="muted">No suggestions.</p>'}</div>`;
+  // All three panels render (every action stays live in the DOM, as on
+  // the old stacked page); the tab only flips which one is visible.
+  const panel = (name, html) => `<div class="friends-panel" data-panel="${name}"${tab === name ? '' : ' hidden'}>${html}</div>`;
+  return `<div class="page">
+    <div class="card friends-head">
+      <h2>${icon('users')} ${t('friends')}</h2>
+      <p class="muted">${t('friendsSubtitle')}</p>
+    </div>
+    <div class="tabs friends-tabs" role="tablist">
+      <button class="tab ${tab === 'requests' ? 'active' : ''}" data-act="friends-tab" data-tab="requests" role="tab" aria-selected="${tab === 'requests'}">${t('requestsReceived')} (${incoming.length + outgoing.length})</button>
+      <button class="tab ${tab === 'friends' ? 'active' : ''}" data-act="friends-tab" data-tab="friends" role="tab" aria-selected="${tab === 'friends'}">${t('yourFriends')} (${friendIds.size})</button>
+      <button class="tab ${tab === 'discover' ? 'active' : ''}" data-act="friends-tab" data-tab="discover" role="tab" aria-selected="${tab === 'discover'}">${t('suggestedForYou')} (${suggestions.length})</button>
+    </div>
+    ${panel('requests', requestsHtml)}
+    ${panel('friends', friendsHtml)}
+    ${panel('discover', discoverHtml)}
   </div>`;
 }
 
