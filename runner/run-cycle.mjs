@@ -23,7 +23,8 @@ import {
   emptyBotCounters, counterDayKey, botCountersForDay, memoryFromConversation,
   pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost,
   globalBotTotals, isOwnerUserId, wantsPhotoRequest, countAlbumPhotosSent, nextAlbumPhoto, pickPhotoCaption,
-  sanitizeBotOutput, mergeBotCountersMax, botPostPacing, freshTemplateComment, ownCommentTexts
+  sanitizeBotOutput, mergeBotCountersMax, botPostPacing, freshTemplateComment, ownCommentTexts,
+  botCounterDeltas, applyBotCounterDeltas
 } from '../src/botLogic.js';
 import {
   resolveAiConfig, generateRouted, normaliseUsageMap, usageTotals,
@@ -103,6 +104,54 @@ async function sbUpdate(table, id, patch) {
   const { data, error } = await supabase.from(table).update(patch).eq('id', id).select(returningColumnsFor(table));
   if (error) throw sbError(error, table);
   return data?.[0] || null;
+}
+
+// Persist this cycle's counter DELTAS atomically — step-for-step the
+// same protocol as api.js saveLiveBotCounters (root-cause fix,
+// 2026-11-25). The old save wrote back a per-field MAX merge of the
+// cycle's snapshot: monotonic but NOT additive, so when the instant
+// responder (or a browser cycle) incremented the same bot+field from
+// the same base mid-cycle, one real action was never counted
+// (watchdog: Anika messagesToday 3 vs actual 4, recurring daily).
+// Deltas + a compare-and-swap on the row's updatedAt make concurrent
+// increments ADD instead of absorbing each other; the loser of the
+// CAS re-reads and retries on top of the winner's values. A newer
+// Dhaka day owning the row ends the save. After the retry budget the
+// legacy MAX-merge upsert remains as a never-worse fallback.
+async function saveBotCountersCas(day, baseMap, finalMap) {
+  const deltas = botCounterDeltas(baseMap, finalMap);
+  if (!Object.keys(deltas).length) return;
+  const casSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      const row = await sbGet('botSettings', 'counters');
+      if (!row) {
+        const { data, error } = await supabase.from('botSettings')
+          .upsert({ id: 'counters', day, counters: applyBotCounterDeltas({}, deltas), updatedAt: Date.now() }, { onConflict: 'id', ignoreDuplicates: true })
+          .select('id');
+        if (error) throw sbError(error, 'botSettings');
+        if (data?.length) return;
+      } else {
+        if (row.day && row.day > day) return; // a newer day owns the doc now
+        const stored = row.day === day ? (row.counters || {}) : {};
+        const next = applyBotCounterDeltas(stored, deltas);
+        let q = supabase.from('botSettings')
+          .update({ day, counters: next, updatedAt: Math.max(Date.now(), Number(row.updatedAt || 0) + 1) })
+          .eq('id', 'counters');
+        q = row.updatedAt == null ? q.is('updatedAt', null) : q.eq('updatedAt', row.updatedAt);
+        const { data, error } = await q.select('id');
+        if (error) throw sbError(error, 'botSettings');
+        if (data?.length) return;
+      }
+    } catch { /* contention or transient error — retry on fresh state */ }
+    await casSleep(120 + Math.random() * 250);
+  }
+  try {
+    const current = await sbGet('botSettings', 'counters');
+    const merged = current && current.day === day ? mergeBotCountersMax(current.counters || {}, finalMap) : finalMap;
+    await sbUpsert('botSettings', { id: 'counters', day, counters: merged, updatedAt: Date.now() });
+    console.log('warn: counter CAS save exhausted retries — legacy MAX-merge fallback used');
+  } catch { /* best-effort — the in-memory counters still gated this cycle */ }
 }
 
 // AI usage accounting — identical math to api.js bumpAiUsage; attempts
@@ -260,6 +309,9 @@ async function main() {
   const platformConfig = configRow || {};
   const day = counterDayKey();
   const counters = countersRow ? botCountersForDay(countersRow, day) : {};
+  // Pristine copy of the loaded snapshot: the end-of-cycle save
+  // persists only the deltas over THIS base (see saveBotCountersCas).
+  const countersBase = JSON.parse(JSON.stringify(counters));
 
   resetLastRoutedFailure();
   const results = [];
@@ -567,17 +619,10 @@ async function main() {
     }
   }
 
-  // Counters merge per bot, exactly like api.js saveLiveBotCounters:
-  // read the stored row and merge this cycle's counters over it, so a
-  // cycle never wipes another writer's increments for OTHER bots
-  // (a whole-row overwrite would be last-writer-wins). Same-day only;
-  // a stale-day row is replaced wholesale, matching
-  // botCountersForDay's reset semantics.
-  try {
-    const current = await sbGet('botSettings', 'counters');
-    const merged = current && current.day === day ? mergeBotCountersMax(current.counters || {}, counters) : counters;
-    await sbUpsert('botSettings', { id: 'counters', day, counters: merged, updatedAt: Date.now() });
-  } catch { /* best-effort — the in-memory counters still gated this cycle */ }
+  // Counters persist as additive deltas under a compare-and-swap —
+  // see saveBotCountersCas above (the MAX-merge save it replaced lost
+  // concurrent increments of the same bot+field).
+  await saveBotCountersCas(day, countersBase, counters);
   // Phase 3: persist decision history (botRunners/decisions_<botId>,
   // admin read/write; capped at 50 per bot). Best-effort per bot.
   {

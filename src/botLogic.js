@@ -782,6 +782,68 @@ export function mergeBotCountersMax(currentMap = {}, incomingMap = {}) {
   return out;
 }
 
+// --- Additive counter deltas (root-cause fix, 2026-11-25) -------------
+// mergeBotCountersMax above keeps every field MONOTONIC, but it is not
+// ADDITIVE — and that distinction is the recurring counter drift the
+// watchdog kept flagging (2026-11-23 Anika messagesToday, 2026-11-24
+// three bots' commentsToday, 2026-11-25 Anika again: counter 3, actual
+// 4). Two writers that load the SAME base B and each add +1 to the same
+// bot+field both persist B+1; the MAX merge then stores B+1, so one
+// real action is never counted and the caps run against fiction.
+// Concurrency is structural: the instant responder answers DMs at any
+// moment (it is deliberately outside the autocycle window claim), and
+// a slow cycle can straddle its 3-minute claim window into the next
+// one. The fix: a writer persists only the DELTAS it actually added
+// (final − its own loaded base), applied ADDITIVELY onto the freshest
+// stored map under a compare-and-swap on the row's updatedAt (see
+// saveBotCountersCas in api.js / run-cycle.mjs / responder.mjs — the
+// conditional UPDATE matches the seen updatedAt for exactly one
+// writer; the loser re-reads and adds its deltas on top). No increment
+// can be absorbed, and the day/caps semantics are unchanged.
+const COUNTER_COUNT_FIELDS = ['postsToday', 'commentsToday', 'likesToday', 'messagesToday'];
+
+// What one writer actually added between the counters map it loaded
+// (baseMap) and the map it finished with (finalMap). Count fields are
+// per-field differences (never negative); lastActionAt rides along as
+// a timestamp (max semantics at apply time), not a count.
+export function botCounterDeltas(baseMap = {}, finalMap = {}) {
+  const deltas = {};
+  const ids = new Set([...Object.keys(baseMap || {}), ...Object.keys(finalMap || {})]);
+  for (const id of ids) {
+    const base = baseMap?.[id] || {};
+    const fin = finalMap?.[id] || {};
+    const d = {};
+    let any = false;
+    for (const f of COUNTER_COUNT_FIELDS) {
+      const n = Math.max(0, Number(fin[f] || 0) - Number(base[f] || 0));
+      if (n > 0) { d[f] = n; any = true; }
+    }
+    if (Number(fin.lastActionAt || 0) > Number(base.lastActionAt || 0)) {
+      d.lastActionAt = Number(fin.lastActionAt);
+      any = true;
+    }
+    if (any) deltas[id] = d;
+  }
+  return deltas;
+}
+
+// Apply one writer's deltas onto the freshest stored map: count fields
+// ADD, lastActionAt takes the max. Applying two writers' deltas (in
+// any order) onto the same base yields base + both increments — the
+// property the MAX merge could not provide.
+export function applyBotCounterDeltas(currentMap = {}, deltasMap = {}) {
+  const out = {};
+  const ids = new Set([...Object.keys(currentMap || {}), ...Object.keys(deltasMap || {})]);
+  for (const id of ids) {
+    const cur = { ...emptyBotCounters(), ...(currentMap?.[id] || {}) };
+    const d = deltasMap?.[id] || {};
+    for (const f of COUNTER_COUNT_FIELDS) cur[f] = Number(cur[f] || 0) + Math.max(0, Number(d[f] || 0));
+    if (Number(d.lastActionAt || 0) > Number(cur.lastActionAt || 0)) cur.lastActionAt = Number(d.lastActionAt);
+    out[id] = cur;
+  }
+  return out;
+}
+
 export function memoryFromConversation(existing = [], userText, botText, now = Date.now(), category = 'conversation') {
   const text = `Conversation note: user talked about "${String(userText || '').slice(0, 80)}"; I replied about "${String(botText || '').slice(0, 80)}".`;
   return upsertMemory(existing, {

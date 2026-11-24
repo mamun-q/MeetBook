@@ -9,7 +9,7 @@ import {
 } from './store.js';
 import { supabase, supabaseReady } from './supabase.js';
 import { uid as genId, validateUsername, extractMentions, normaliseGroup, normalisePage, normaliseEvent, postAudience, castPollVote, tsToMs, normaliseTimeFields, friendlyAuthError, isAdminRole, isSuperAdmin, canManageUser, canChangeRole, ASSIGNABLE_ROLES, isStaff, canModerate, REPORT_CATEGORIES, countPostComments, truncate, mergePostLists, toggleEmojiReaction, replySnapshot, chatTheme, canEditMessage, chatPollVote, VANISH_TTL_MS, TYPING_FRESH_MS, isGroupMember } from './utils.js';
-import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, pickFriendRequestsToAccept, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost, freshTemplateComment, ownCommentTexts, globalBotTotals, isOwnerUserId, wantsPhotoRequest, countAlbumPhotosSent, nextAlbumPhoto, pickPhotoCaption, sanitizeBotOutput, mergeBotCountersMax, botPostPacing } from './botLogic.js';
+import { generateTemplatePost, generateTemplateComment, templateBotMessageReply, decideBotAction, memoryFromConversation, normaliseBot, findBotReplyTargets, pickFriendRequestsToAccept, emptyBotCounters, counterDayKey, botCountersForDay, pickBotCommentTarget, pickBotReplyTarget, appendBotDecision, memoryFromActivity, isDuplicateBotText, isNearDuplicateBotText, threadContextText, freshTemplatePost, freshTemplateComment, ownCommentTexts, globalBotTotals, isOwnerUserId, wantsPhotoRequest, countAlbumPhotosSent, nextAlbumPhoto, pickPhotoCaption, sanitizeBotOutput, mergeBotCountersMax, botPostPacing, botCounterDeltas, applyBotCounterDeltas } from './botLogic.js';
 import { canAccessBotSecrets, botModel } from './gemini.js';
 import { providerById, resolveAiConfig, generateRouted, testProvider as testAiProvider, getLastRoutedFailure, resetLastRoutedFailure, anyProviderConfigured, dhakaDayKey, normaliseUsageMap, usageTotals, mergeUsageMapsMax } from './aiProviders.js';
 import { isCloudinaryConfigured, uploadToCloudinary, uploadFileToCloudinary } from './cloudinary.js';
@@ -4946,16 +4946,50 @@ async function persistBotDecisions(list) {
   }
 }
 
-async function saveLiveBotCounters(day, counters) {
-  // The counters map merges per bot, so a cycle never wipes another
-  // writer's increments for OTHER bots (a naive whole-row overwrite
-  // would be last-writer-wins): read the stored row and merge this
-  // cycle's counters over it — same-day only; a stale-day row is
-  // replaced wholesale, matching botCountersForDay's reset semantics.
-  // The merge itself is per-field MAX (mergeBotCountersMax): a shallow
-  // spread still let a writer holding a stale copy of a bot's entry
-  // erase that bot's fresh increments from another writer (live proof
-  // 2026-11-23: counters said Nova 0 posts, feed showed 2).
+// Persist this cycle's counter DELTAS atomically (root-cause fix,
+// 2026-11-25). The old save — re-read the row and write back a
+// per-field MAX merge of the cycle's snapshot — was monotonic but NOT
+// additive: when the instant responder (or a second cycle straddling
+// its claim window) incremented the same bot+field from the same base
+// while this cycle was still generating, both sides computed base+1
+// and the stored value stayed base+1 — one real action uncounted
+// (watchdog: Anika messagesToday 3 vs actual 4, recurring daily).
+// Now: deltas = what THIS cycle added over the snapshot it loaded;
+// each attempt re-reads the row, adds the deltas onto the row's
+// freshest same-day map, and PATCHes with a compare-and-swap on
+// updatedAt (the conditional UPDATE matches the seen value for
+// exactly one concurrent writer; the loser retries on top of the
+// winner's values). A newer Dhaka day owning the row ends the save —
+// yesterday's counts must not clobber it. After the retry budget the
+// legacy MAX-merge upsert remains as a never-worse fallback.
+async function saveLiveBotCounters(day, counters, baseMap = {}) {
+  const deltas = botCounterDeltas(baseMap, counters);
+  if (!Object.keys(deltas).length) return;
+  const casSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      const row = await sbGet('botSettings', 'counters');
+      if (!row) {
+        const { data, error } = await supabase.from('botSettings')
+          .upsert({ id: 'counters', day, counters: applyBotCounterDeltas({}, deltas), updatedAt: Date.now() }, { onConflict: 'id', ignoreDuplicates: true })
+          .select('id');
+        if (error) throw sbError(error, 'botSettings');
+        if (data?.length) return;
+      } else {
+        if (row.day && row.day > day) return; // a newer day owns the doc now
+        const stored = row.day === day ? (row.counters || {}) : {};
+        const next = applyBotCounterDeltas(stored, deltas);
+        let q = supabase.from('botSettings')
+          .update({ day, counters: next, updatedAt: Math.max(Date.now(), Number(row.updatedAt || 0) + 1) })
+          .eq('id', 'counters');
+        q = row.updatedAt == null ? q.is('updatedAt', null) : q.eq('updatedAt', row.updatedAt);
+        const { data, error } = await q.select('id');
+        if (error) throw sbError(error, 'botSettings');
+        if (data?.length) return;
+      }
+    } catch { /* contention or transient error — retry on fresh state */ }
+    await casSleep(120 + Math.random() * 250);
+  }
   try {
     const current = await sbGet('botSettings', 'counters');
     const merged = current && current.day === day ? mergeBotCountersMax(current.counters || {}, counters) : counters;
@@ -5027,6 +5061,11 @@ export async function runLiveBotCycle() {
     resetLastRoutedFailure(); // the summary reports only THIS cycle's AI outcome
     await loadBotSecrets(); // make sure the provider keys are in memory
     const { day, counters } = await loadLiveBotCounters();
+    // Pristine copy of the loaded snapshot: the save at the end of the
+    // cycle persists only the deltas over THIS base (see
+    // saveLiveBotCounters), so a concurrent writer's increments of the
+    // same bot+field can no longer be absorbed by a MAX merge.
+    const countersBase = JSON.parse(JSON.stringify(counters));
     let actions = 0;
     const details = [];
     // Post pacing state for THIS cycle: the mirror can lag a post this
@@ -5351,7 +5390,7 @@ export async function runLiveBotCycle() {
         cycleDecisions.push({ botId: bot.id, action: r.action, reason: r.reason || '', at: Date.now() });
       }
     }
-    await saveLiveBotCounters(day, counters);
+    await saveLiveBotCounters(day, counters, countersBase);
     await persistBotDecisions(cycleDecisions);
     const aiFailure = getLastRoutedFailure();
     // Blocked-DM notes (pendingDMs > 0) are part of the summary even
