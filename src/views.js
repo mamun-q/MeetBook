@@ -2504,33 +2504,54 @@ const RELATIONSHIP_OPTIONS = ['', 'Single', 'In a relationship', 'Engaged', 'Mar
 
 export function editProfileHtml(user) {
   return `<h3>${icon('pencil')} ${t('editProfile')}</h3>
-  <form id="edit-profile-form" class="stack">
-    <label>Name<input name="name" required maxlength="60" value="${escapeHtml(user.name)}" /></label>
-    <label>Username<input name="username" required maxlength="24" value="${escapeHtml(user.username)}" /></label>
-    <label>${t('nickname')}<input name="nickname" maxlength="40" value="${escapeHtml(user.nickname || '')}" /></label>
-    <label>Bio<textarea name="bio" rows="3" maxlength="300">${escapeHtml(user.bio || '')}</textarea></label>
-    <label>${t('work')}<input name="work" maxlength="100" value="${escapeHtml(user.work || '')}" /></label>
-    <label>${t('education')}<input name="education" maxlength="100" value="${escapeHtml(user.education || '')}" /></label>
-    <label>${t('currentCity')}<input name="currentCity" maxlength="80" value="${escapeHtml(user.currentCity || '')}" /></label>
-    <label>${t('hometown')}<input name="hometown" maxlength="80" value="${escapeHtml(user.hometown || '')}" /></label>
-    <label>${t('relationship')}
-      <select name="relationship">
-        ${RELATIONSHIP_OPTIONS.map((opt) => `<option value="${escapeHtml(opt)}" ${String(user.relationship || '') === opt ? 'selected' : ''}>${opt === '' ? '—' : escapeHtml(opt)}</option>`).join('')}
-      </select>
-    </label>
-    <label>${t('dob')}<input name="dob" type="date" value="${escapeHtml(user.dob || '')}" /></label>
-    <label>${t('gender')}
-      <select name="gender">
-        <option value="" ${!user.gender ? 'selected' : ''}>—</option>
-        <option value="Female" ${user.gender === 'Female' ? 'selected' : ''}>${t('genderFemale')}</option>
-        <option value="Male" ${user.gender === 'Male' ? 'selected' : ''}>${t('genderMale')}</option>
-        <option value="Other" ${user.gender === 'Other' ? 'selected' : ''}>${t('genderOther')}</option>
-        <option value="Prefer not to say" ${user.gender === 'Prefer not to say' ? 'selected' : ''}>${t('genderPreferNot')}</option>
-      </select>
-    </label>
-    <label>${t('website')}<input name="website" type="text" maxlength="200" placeholder="https://example.com" value="${escapeHtml(user.website || '')}" /></label>
-    <label>Profile picture<input type="file" name="avatar" accept="image/*" /></label>
-    <label>Cover photo<input type="file" name="cover" accept="image/*" /></label>
+  <form id="edit-profile-form" class="stack pf-form">
+    <section class="pf-section">
+      <div class="pf-head"><span class="pf-chip pf-chip--basic">${icon('user')}</span><h4>${t('basicInfo')}</h4></div>
+      <label>Name<input name="name" required maxlength="60" value="${escapeHtml(user.name)}" /></label>
+      <label>Username<input name="username" required maxlength="24" value="${escapeHtml(user.username)}" /></label>
+      <label>${t('nickname')}<input name="nickname" maxlength="40" value="${escapeHtml(user.nickname || '')}" /></label>
+      <label>Bio<textarea name="bio" rows="3" maxlength="300">${escapeHtml(user.bio || '')}</textarea></label>
+    </section>
+    <section class="pf-section">
+      <div class="pf-head"><span class="pf-chip pf-chip--photos">${icon('camera')}</span><h4>${t('photos')}</h4></div>
+      <label>Profile picture<input type="file" name="avatar" accept="image/*" /></label>
+      <label>Cover photo<input type="file" name="cover" accept="image/*" /></label>
+    </section>
+    <section class="pf-section">
+      <div class="pf-head"><span class="pf-chip pf-chip--edu">${icon('grad-cap')}</span><h4>${t('education')}</h4></div>
+      <label>${t('education')}<input name="education" maxlength="100" value="${escapeHtml(user.education || '')}" /></label>
+    </section>
+    <section class="pf-section">
+      <div class="pf-head"><span class="pf-chip pf-chip--work">${icon('briefcase')}</span><h4>${t('work')}</h4></div>
+      <label>${t('work')}<input name="work" maxlength="100" value="${escapeHtml(user.work || '')}" /></label>
+    </section>
+    <section class="pf-section">
+      <div class="pf-head"><span class="pf-chip pf-chip--places">${icon('map-pin')}</span><h4>${t('places')}</h4></div>
+      <label>${t('currentCity')}<input name="currentCity" maxlength="80" value="${escapeHtml(user.currentCity || '')}" /></label>
+      <label>${t('hometown')}<input name="hometown" maxlength="80" value="${escapeHtml(user.hometown || '')}" /></label>
+    </section>
+    <section class="pf-section">
+      <div class="pf-head"><span class="pf-chip pf-chip--personal">${icon('heart')}</span><h4>${t('personal')}</h4></div>
+      <label>${t('relationship')}
+        <select name="relationship">
+          ${RELATIONSHIP_OPTIONS.map((opt) => `<option value="${escapeHtml(opt)}" ${String(user.relationship || '') === opt ? 'selected' : ''}>${opt === '' ? '—' : escapeHtml(opt)}</option>`).join('')}
+        </select>
+      </label>
+      <label>${t('dob')}<input name="dob" type="date" value="${escapeHtml(user.dob || '')}" /></label>
+      <label>${t('gender')}
+        <select name="gender">
+          <option value="" ${!user.gender ? 'selected' : ''}>—</option>
+          <option value="Female" ${user.gender === 'Female' ? 'selected' : ''}>${t('genderFemale')}</option>
+          <option value="Male" ${user.gender === 'Male' ? 'selected' : ''}>${t('genderMale')}</option>
+          <option value="Other" ${user.gender === 'Other' ? 'selected' : ''}>${t('genderOther')}</option>
+          <option value="Prefer not to say" ${user.gender === 'Prefer not to say' ? 'selected' : ''}>${t('genderPreferNot')}</option>
+        </select>
+      </label>
+    </section>
+    <section class="pf-section">
+      <div class="pf-head"><span class="pf-chip pf-chip--web">${icon('link')}</span><h4>${t('website')}</h4></div>
+      <label>${t('website')}<input name="website" type="text" maxlength="200" placeholder="https://example.com" value="${escapeHtml(user.website || '')}" /></label>
+    </section>
     <div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">Save profile</button></div>
   </form>`;
 }
