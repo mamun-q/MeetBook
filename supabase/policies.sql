@@ -42,14 +42,21 @@
 --    writable until it is added to the pin lists (RLS_NOTES.md
 --    summary #6 — this file is the checklist for that).
 --  * OWNER BRANCHES: where Firestore pins nothing for the owner
---    (posts author, stories author, groups creator, pages owner,
---    events creator, notifications owner, conversation participants)
---    the policy carries an explicit `with check (true)`. Omitting
---    WITH CHECK would silently impose USING on the new row too and
---    narrow the guarantee (e.g. a participant could never remove
---    themselves from a conversation). Role-based branches
+--    the policy originally carried an explicit `with check (true)`.
+--    Omitting WITH CHECK would silently impose USING on the new row
+--    too and narrow the guarantee (e.g. a participant could never
+--    remove themselves from a conversation). Role-based branches
 --    (admin/moderator/superadmin) repeat their predicate in
 --    WITH CHECK instead, which is equivalent and self-documenting.
+--    2026-11-25 HARDENING (audit H1/H2/M1–M4): the check(true)
+--    owner branches were the audit's main hole — the posts author,
+--    stories author, groups/events creator, conversation
+--    participant and users self branches now pin the columns the
+--    owner must never move (identity, ownership, timestamps) and
+--    delta-check the rest to the app's real writes, using the
+--    *_row() self-lookups and the jsonb delta helpers below. Pages
+--    owner and notifications owner remain check(true) by design
+--    (audited, out of that pack's scope).
 --  * Subqueries inside policies are themselves RLS-filtered as the
 --    caller. Where the caller is guaranteed to pass the referenced
 --    table's SELECT policy (the common case) this changes nothing;
@@ -79,7 +86,9 @@ alter default privileges in schema public
 -- Guarantee: any signed-in user reads all profiles; self-register
 -- only as role='user', isBot=false, and only while registration is
 -- open — or an admin creating a bot profile (isBot=true, role='bot');
--- updates by self/admin with role+isBot pinned (superadmin unpinned),
+-- updates by self/admin with role+isBot pinned and (2026-11-25, H1)
+-- status/verified movable only by an admin on someone else's row,
+-- followers/botId/createdAt/email pinned (superadmin unpinned),
 -- plus a followers-only branch where anyone may add/remove exactly
 -- their own uid; delete by self or admin.
 -- (Carried-over exposure, mirrored 1:1: email/status are readable by
@@ -179,6 +188,270 @@ $$;
 revoke execute on function public."users_row"(text) from public, anon;
 grant execute on function public."users_row"(text) to authenticated;
 
+-- ---------------------------------------------------------------------
+-- Engagement delta helpers (2026-11-25 audit fix pack, H2/M2/M3/M4).
+-- Pure jsonb transforms (no table access, so plain immutable — not
+-- security definer): they express "this jsonb value may only move by
+-- the caller's own uid" for the whole-value array/object writes the
+-- app performs. The followers/story-views policies spell the ±uid
+-- delta out inline; these helpers give the posts/conversations/
+-- messages/events branches the same guarantee for their richer
+-- shapes (reactions maps, poll votes, nested comment replies).
+-- ---------------------------------------------------------------------
+create or replace function public.jsonb_uid_count(p_list jsonb, p_uid text)
+returns integer
+language sql immutable set search_path = public as $$
+  select coalesce((
+    select count(*)::integer
+    from jsonb_array_elements(coalesce(p_list, '[]'::jsonb)) e
+    where e = to_jsonb(p_uid)), 0)
+$$;
+revoke execute on function public.jsonb_uid_count(jsonb, text) from public, anon;
+grant execute on function public.jsonb_uid_count(jsonb, text) to authenticated;
+
+-- The list with every occurrence of p_uid removed, order preserved.
+create or replace function public.jsonb_list_without_uid(p_list jsonb, p_uid text)
+returns jsonb
+language sql immutable set search_path = public as $$
+  select coalesce((
+    select jsonb_agg(e order by ord)
+    from jsonb_array_elements(coalesce(p_list, '[]'::jsonb))
+           with ordinality as t(e, ord)
+    where e <> to_jsonb(p_uid)), '[]'::jsonb)
+$$;
+revoke execute on function public.jsonb_list_without_uid(jsonb, text) from public, anon;
+grant execute on function public.jsonb_list_without_uid(jsonb, text) to authenticated;
+
+-- True when new = old, or new differs from old ONLY by the caller's
+-- uid appearing once more or once fewer (a like/save/RSVP toggle).
+create or replace function public.uid_list_delta_ok(p_old jsonb, p_new jsonb, p_uid text)
+returns boolean
+language sql immutable set search_path = public as $$
+  select public.jsonb_list_without_uid(p_old, p_uid)
+           = public.jsonb_list_without_uid(p_new, p_uid)
+    and abs(public.jsonb_uid_count(p_new, p_uid)
+            - public.jsonb_uid_count(p_old, p_uid)) <= 1
+$$;
+revoke execute on function public.uid_list_delta_ok(jsonb, jsonb, text) from public, anon;
+grant execute on function public.uid_list_delta_ok(jsonb, jsonb, text) to authenticated;
+
+-- True when new differs from old only by INSERTIONS of the caller's
+-- uid (at most one) — read receipts (readBy) and remove-for-me
+-- (hiddenFor) only ever grow by the reader's own uid.
+create or replace function public.uid_list_add_ok(p_old jsonb, p_new jsonb, p_uid text)
+returns boolean
+language sql immutable set search_path = public as $$
+  select public.jsonb_list_without_uid(p_old, p_uid)
+           = public.jsonb_list_without_uid(p_new, p_uid)
+    and public.jsonb_uid_count(p_new, p_uid)
+          - public.jsonb_uid_count(p_old, p_uid) between 0 and 1
+    and jsonb_array_length(coalesce(p_new, '[]'::jsonb))
+          - jsonb_array_length(coalesce(p_old, '[]'::jsonb))
+          = public.jsonb_uid_count(p_new, p_uid)
+            - public.jsonb_uid_count(p_old, p_uid)
+$$;
+revoke execute on function public.uid_list_add_ok(jsonb, jsonb, text) from public, anon;
+grant execute on function public.uid_list_add_ok(jsonb, jsonb, text) to authenticated;
+
+-- For { uid: value } maps (post reactions, poll votes): true when
+-- the two maps agree everywhere except possibly at the caller's key.
+create or replace function public.uid_map_delta_ok(p_old jsonb, p_new jsonb, p_uid text)
+returns boolean
+language sql immutable set search_path = public as $$
+  select (coalesce(p_new, '{}'::jsonb) - p_uid)
+           = (coalesce(p_old, '{}'::jsonb) - p_uid)
+$$;
+revoke execute on function public.uid_map_delta_ok(jsonb, jsonb, text) from public, anon;
+grant execute on function public.uid_map_delta_ok(jsonb, jsonb, text) to authenticated;
+
+-- Post polls { options, votes: { uid: optionId } }: options (and any
+-- other key) identical; votes move only at the caller's key.
+create or replace function public.post_poll_delta_ok(p_old jsonb, p_new jsonb, p_uid text)
+returns boolean
+language sql immutable set search_path = public as $$
+  select (p_old is null and p_new is null)
+    or (
+      p_old is not null and p_new is not null
+      and (p_new - 'votes') = (p_old - 'votes')
+      and public.uid_map_delta_ok(p_old->'votes', p_new->'votes', p_uid)
+    )
+$$;
+revoke execute on function public.post_poll_delta_ok(jsonb, jsonb, text) from public, anon;
+grant execute on function public.post_poll_delta_ok(jsonb, jsonb, text) to authenticated;
+
+-- Chat polls { options: [{ id, text, votes: [uid] }] }: the poll
+-- with the caller's votes stripped from every option — two polls
+-- whose stripped forms are equal differ only in the caller's votes.
+create or replace function public.chat_poll_without_voter(p_poll jsonb, p_uid text)
+returns jsonb
+language sql immutable set search_path = public as $$
+  select case when p_poll is null then null
+    else jsonb_set(p_poll, '{options}', coalesce((
+      select jsonb_agg(
+               jsonb_set(o, '{votes}',
+                 public.jsonb_list_without_uid(o->'votes', p_uid))
+               order by ord)
+      from jsonb_array_elements(coalesce(p_poll->'options', '[]'::jsonb))
+             with ordinality as t(o, ord)), '[]'::jsonb))
+  end
+$$;
+revoke execute on function public.chat_poll_without_voter(jsonb, text) from public, anon;
+grant execute on function public.chat_poll_without_voter(jsonb, text) to authenticated;
+
+create or replace function public.chat_poll_delta_ok(p_old jsonb, p_new jsonb, p_uid text)
+returns boolean
+language sql immutable set search_path = public as $$
+  select (p_old is null and p_new is null)
+    or (
+      p_old is not null and p_new is not null
+      and public.chat_poll_without_voter(p_old, p_uid)
+            = public.chat_poll_without_voter(p_new, p_uid)
+      and (select count(*)
+           from jsonb_array_elements(coalesce(p_new->'options', '[]'::jsonb)) o,
+                jsonb_array_elements(coalesce(o->'votes', '[]'::jsonb)) v
+           where v = to_jsonb(p_uid)) <= 1
+    )
+$$;
+revoke execute on function public.chat_poll_delta_ok(jsonb, jsonb, text) from public, anon;
+grant execute on function public.chat_poll_delta_ok(jsonb, jsonb, text) to authenticated;
+
+-- Message reactions { emoji: [uid] }: the map with the caller
+-- stripped from every list (empty lists dropped) — equal stripped
+-- forms mean only the caller's own reactions moved.
+create or replace function public.msg_reactions_without_user(p_r jsonb, p_uid text)
+returns jsonb
+language sql immutable set search_path = public as $$
+  select coalesce((
+    select jsonb_object_agg(k, stripped)
+    from (
+      select e.key as k,
+             public.jsonb_list_without_uid(e.value, p_uid) as stripped
+      from jsonb_each(coalesce(p_r, '{}'::jsonb)) e
+    ) s
+    where jsonb_array_length(stripped) > 0), '{}'::jsonb)
+$$;
+revoke execute on function public.msg_reactions_without_user(jsonb, text) from public, anon;
+grant execute on function public.msg_reactions_without_user(jsonb, text) to authenticated;
+
+create or replace function public.msg_reactions_delta_ok(p_old jsonb, p_new jsonb, p_uid text)
+returns boolean
+language sql immutable set search_path = public as $$
+  select public.msg_reactions_without_user(p_old, p_uid)
+           = public.msg_reactions_without_user(p_new, p_uid)
+$$;
+revoke execute on function public.msg_reactions_delta_ok(jsonb, jsonb, text) from public, anon;
+grant execute on function public.msg_reactions_delta_ok(jsonb, jsonb, text) to authenticated;
+
+-- One comment element whose `replies` moved legally: every field
+-- except replies identical, and the replies delta is exactly one
+-- append authored by the caller, or exactly one removal whose
+-- author is the caller or the post author (the UI's delete rule:
+-- comment/reply author or post author).
+create or replace function public.replies_delta_ok(p_old_el jsonb, p_new_el jsonb, p_uid text, p_post_author text)
+returns boolean
+language sql immutable set search_path = public as $$
+  select (p_new_el - 'replies') = (p_old_el - 'replies')
+    and (
+      ( -- append one reply authored by the caller
+        jsonb_array_length(coalesce(p_new_el->'replies', '[]'::jsonb))
+          = jsonb_array_length(coalesce(p_old_el->'replies', '[]'::jsonb)) + 1
+        and not exists (
+          select 1
+          from jsonb_array_elements(coalesce(p_old_el->'replies', '[]'::jsonb)) r
+          where not exists (
+            select 1
+            from jsonb_array_elements(coalesce(p_new_el->'replies', '[]'::jsonb)) r2
+            where r2 = r))
+        and exists (
+          select 1
+          from jsonb_array_elements(coalesce(p_new_el->'replies', '[]'::jsonb)) r
+          where (r->>'authorId') = p_uid
+            and not exists (
+              select 1
+              from jsonb_array_elements(coalesce(p_old_el->'replies', '[]'::jsonb)) r2
+              where (r2->>'id') = (r->>'id')))
+      )
+      or
+      ( -- remove one reply (its author, or the post author)
+        jsonb_array_length(coalesce(p_new_el->'replies', '[]'::jsonb))
+          = jsonb_array_length(coalesce(p_old_el->'replies', '[]'::jsonb)) - 1
+        and not exists (
+          select 1
+          from jsonb_array_elements(coalesce(p_new_el->'replies', '[]'::jsonb)) r
+          where not exists (
+            select 1
+            from jsonb_array_elements(coalesce(p_old_el->'replies', '[]'::jsonb)) r2
+            where r2 = r))
+        and exists (
+          select 1
+          from jsonb_array_elements(coalesce(p_old_el->'replies', '[]'::jsonb)) r
+          where ((r->>'authorId') = p_uid or p_post_author = p_uid)
+            and not exists (
+              select 1
+              from jsonb_array_elements(coalesce(p_new_el->'replies', '[]'::jsonb)) r2
+              where (r2->>'id') = (r->>'id')))
+      )
+    )
+$$;
+revoke execute on function public.replies_delta_ok(jsonb, jsonb, text, text) from public, anon;
+grant execute on function public.replies_delta_ok(jsonb, jsonb, text, text) to authenticated;
+
+-- A post's whole comments array may only move by ONE of the app's
+-- comment writes: append one top-level comment authored by the
+-- caller (with no pre-filled replies), delete one top-level comment
+-- (its author or the post author), or change exactly one comment's
+-- replies by a legal replies delta. Anything else — wiping the
+-- array, editing or deleting other people's comments, forging
+-- authorship — fails.
+create or replace function public.comments_delta_ok(p_old jsonb, p_new jsonb, p_uid text, p_post_author text)
+returns boolean
+language sql immutable set search_path = public as $$
+  with o_el as (
+    select e from jsonb_array_elements(coalesce(p_old, '[]'::jsonb)) e),
+  n_el as (
+    select e from jsonb_array_elements(coalesce(p_new, '[]'::jsonb)) e),
+  added as (
+    select e from n_el
+    where not exists (
+      select 1 from o_el where (o_el.e->>'id') = (n_el.e->>'id'))),
+  removed as (
+    select e from o_el
+    where not exists (
+      select 1 from n_el where (n_el.e->>'id') = (o_el.e->>'id'))),
+  changed as (
+    select o_el.e as oe, n_el.e as ne
+    from o_el join n_el on (n_el.e->>'id') = (o_el.e->>'id')
+    where n_el.e is distinct from o_el.e)
+  select
+    (select count(*) from added) = 0
+      and (select count(*) from removed) = 0
+      and (select count(*) from changed) = 0
+    or (
+      (select count(*) from added) = 1
+      and (select count(*) from removed) = 0
+      and (select count(*) from changed) = 0
+      and (select bool_and((e->>'authorId') = p_uid
+                           and coalesce(e->'replies', '[]'::jsonb) = '[]'::jsonb)
+             from added)
+    )
+    or (
+      (select count(*) from removed) = 1
+      and (select count(*) from added) = 0
+      and (select count(*) from changed) = 0
+      and (select bool_and((e->>'authorId') = p_uid or p_post_author = p_uid)
+             from removed)
+    )
+    or (
+      (select count(*) from changed) = 1
+      and (select count(*) from added) = 0
+      and (select count(*) from removed) = 0
+      and (select bool_and(public.replies_delta_ok(oe, ne, p_uid, p_post_author))
+             from changed)
+    )
+$$;
+revoke execute on function public.comments_delta_ok(jsonb, jsonb, text, text) from public, anon;
+grant execute on function public.comments_delta_ok(jsonb, jsonb, text, text) to authenticated;
+
 create policy users_select_all on public.users
   for select to authenticated
   using (true);
@@ -214,6 +487,35 @@ create policy users_update_self_admin on public.users
           ((public."users_row"(users.id)).role)
     and "isBot" is not distinct from
           ((public."users_row"(users.id))."isBot")
+    -- 2026-11-25 audit H1: status/verified/followers/botId/
+    -- createdAt/email were writable through this branch — a banned
+    -- user could PATCH their own row back to status='active'
+    -- (voiding writer_status_ok() everywhere) and anyone could
+    -- self-grant verified=true. status/verified now move only when
+    -- an admin changes SOMEONE ELSE's row (the app's
+    -- adminSetUserStatus/adminSetVerified are admin-only and refuse
+    -- self-management — utils.canManageUser; superadmins keep the
+    -- unpinned branch above). followers move only through
+    -- users_update_followers (± caller uid); botId/createdAt/email
+    -- never move after insert.
+    and (
+      status is not distinct from
+        ((public."users_row"(users.id)).status)
+      or (public.is_admin() and id <> (select auth.uid())::text)
+    )
+    and (
+      verified is not distinct from
+        ((public."users_row"(users.id)).verified)
+      or (public.is_admin() and id <> (select auth.uid())::text)
+    )
+    and followers is not distinct from
+          ((public."users_row"(users.id)).followers)
+    and "botId" is not distinct from
+          ((public."users_row"(users.id))."botId")
+    and "createdAt" is not distinct from
+          ((public."users_row"(users.id))."createdAt")
+    and email is not distinct from
+          ((public."users_row"(users.id)).email)
   );
 
 -- Followers-only branch: every column except `followers` pinned via
@@ -312,9 +614,10 @@ create policy users_delete_self_admin on public.users
 -- showing them to former members. Create by an active writer with
 -- likes empty, as self (group posts only if a member of that group),
 -- or by an admin as a bot (plain feed only — no group/page posts);
--- update by admin, by author, or by any signed-in user with
--- authorship/text/image/visibility/group/page/audience all pinned
--- (engagement only); delete by author or admin.
+-- update by admin, by the author (text/editedAt only — 2026-11-25
+-- M1), or by any signed-in user with every content column pinned
+-- and every engagement column delta-checked to ± the caller's own
+-- uid (2026-11-25 H2); delete by author or admin.
 -- =====================================================================
 create policy posts_select on public.posts
   for select to authenticated
@@ -370,17 +673,72 @@ create policy posts_update_admin on public.posts
   using (public.is_admin())
   with check (public.is_admin());
 
--- Firestore's author branch pins nothing (see header convention).
+-- Author branch. 2026-11-25 audit M1: this was `with check (true)`
+-- (the old header convention) — the author could rewrite authorId
+-- (impersonation), createdAt, group/page placement and pre-load
+-- engagement on their own post. The author's only content write in
+-- the app is editPost ({text, editedAt}), so everything else is now
+-- pinned to the stored row. Engagement on the author's own post is
+-- unaffected: it rides posts_update_engagement below.
 create policy posts_update_author on public.posts
   for update to authenticated
   using ("authorId" = (select auth.uid())::text)
-  with check (true);
+  with check (
+    "authorId" = (select auth.uid())::text
+    and image is not distinct from
+      ((public."posts_row"(posts.id)).image)
+    and visibility is not distinct from
+      ((public."posts_row"(posts.id)).visibility)
+    and "audienceIds" is not distinct from
+      ((public."posts_row"(posts.id))."audienceIds")
+    and "createdAt" is not distinct from
+      ((public."posts_row"(posts.id))."createdAt")
+    and likes is not distinct from
+      ((public."posts_row"(posts.id)).likes)
+    and reactions is not distinct from
+      ((public."posts_row"(posts.id)).reactions)
+    and comments is not distinct from
+      ((public."posts_row"(posts.id)).comments)
+    and shares is not distinct from
+      ((public."posts_row"(posts.id)).shares)
+    and "sharedFrom" is not distinct from
+      ((public."posts_row"(posts.id))."sharedFrom")
+    and "savedBy" is not distinct from
+      ((public."posts_row"(posts.id))."savedBy")
+    and "groupId" is not distinct from
+      ((public."posts_row"(posts.id))."groupId")
+    and "pageId" is not distinct from
+      ((public."posts_row"(posts.id))."pageId")
+    and "pageName" is not distinct from
+      ((public."posts_row"(posts.id))."pageName")
+    and "pageAvatar" is not distinct from
+      ((public."posts_row"(posts.id))."pageAvatar")
+    and poll is not distinct from
+      ((public."posts_row"(posts.id)).poll)
+    and location is not distinct from
+      ((public."posts_row"(posts.id)).location)
+    and feeling is not distinct from
+      ((public."posts_row"(posts.id)).feeling)
+    and pinned is not distinct from
+      ((public."posts_row"(posts.id)).pinned)
+  );
 
 -- Engagement branch. NOTE (RLS_NOTES.md summary #5): the pin
 -- self-lookups are filtered by posts_select, so engagement
 -- effectively requires the post to be readable by the caller —
 -- Firestore allowed engaging with an unreadable post by id. Safe
 -- direction; no real flow changes (clients engage with loaded posts).
+-- 2026-11-25 audit H2: the engagement columns themselves were
+-- unpinned — any signed-in user could wipe a post's comments,
+-- forge like counts, rewrite poll votes or pin/unpin at will.
+-- Every engagement column now carries a ±-caller delta check (the
+-- helpers above), shaped to exactly the writes src/api.js performs:
+-- likes/savedBy ± own uid; reactions move only at the caller's key;
+-- poll votes only at the caller's key with options identical;
+-- shares +1 at most; pinned only by the post's group creator
+-- (togglePinPost); comments by the single-comment deltas in
+-- comments_delta_ok (append own / delete own-or-post-author's /
+-- one reply delta).
 create policy posts_update_engagement on public.posts
   for update to authenticated
   using (true)
@@ -399,6 +757,49 @@ create policy posts_update_engagement on public.posts
       ((public."posts_row"(posts.id))."pageId")
     and "audienceIds" is not distinct from
       ((public."posts_row"(posts.id))."audienceIds")
+    and "pageName" is not distinct from
+      ((public."posts_row"(posts.id))."pageName")
+    and "pageAvatar" is not distinct from
+      ((public."posts_row"(posts.id))."pageAvatar")
+    and "sharedFrom" is not distinct from
+      ((public."posts_row"(posts.id))."sharedFrom")
+    and location is not distinct from
+      ((public."posts_row"(posts.id)).location)
+    and feeling is not distinct from
+      ((public."posts_row"(posts.id)).feeling)
+    and "createdAt" is not distinct from
+      ((public."posts_row"(posts.id))."createdAt")
+    and "editedAt" is not distinct from
+      ((public."posts_row"(posts.id))."editedAt")
+    and public.uid_list_delta_ok(
+          ((public."posts_row"(posts.id)).likes), likes,
+          (select auth.uid())::text)
+    and public.uid_list_delta_ok(
+          ((public."posts_row"(posts.id))."savedBy"), "savedBy",
+          (select auth.uid())::text)
+    and public.uid_map_delta_ok(
+          ((public."posts_row"(posts.id)).reactions), reactions,
+          (select auth.uid())::text)
+    and public.post_poll_delta_ok(
+          ((public."posts_row"(posts.id)).poll), poll,
+          (select auth.uid())::text)
+    and (
+      shares = ((public."posts_row"(posts.id)).shares)
+      or shares = ((public."posts_row"(posts.id)).shares) + 1
+    )
+    and (
+      pinned is not distinct from
+        ((public."posts_row"(posts.id)).pinned)
+      or exists (
+        select 1 from public.groups g
+        where g.id = ((public."posts_row"(posts.id))."groupId")
+          and g."createdBy" = (select auth.uid())::text
+      )
+    )
+    and public.comments_delta_ok(
+          ((public."posts_row"(posts.id)).comments), comments,
+          (select auth.uid())::text,
+          ((public."posts_row"(posts.id))."authorId"))
   );
 
 create policy posts_delete on public.posts
@@ -429,10 +830,34 @@ create policy stories_insert on public.stories
     and views = '[]'::jsonb
   );
 
+-- 2026-11-25 audit M1 (sibling of posts_update_author): was
+-- `with check (true)` — an author could fabricate their own story
+-- views or rewrite authorId. The app has NO story content-edit
+-- flow (create / view / delete only; views move through
+-- stories_update_views below), so every column is pinned here and
+-- this branch passes only no-op writes.
 create policy stories_update_author_admin on public.stories
   for update to authenticated
   using ("authorId" = (select auth.uid())::text or public.is_admin())
-  with check (true);
+  with check (
+    ("authorId" = (select auth.uid())::text or public.is_admin())
+    and "authorId" is not distinct from
+      ((public."stories_row"(stories.id))."authorId")
+    and image is not distinct from
+      ((public."stories_row"(stories.id)).image)
+    and text is not distinct from
+      ((public."stories_row"(stories.id)).text)
+    and bg is not distinct from
+      ((public."stories_row"(stories.id)).bg)
+    and visibility is not distinct from
+      ((public."stories_row"(stories.id)).visibility)
+    and "audienceIds" is not distinct from
+      ((public."stories_row"(stories.id))."audienceIds")
+    and views is not distinct from
+      ((public."stories_row"(stories.id)).views)
+    and "createdAt" is not distinct from
+      ((public."stories_row"(stories.id))."createdAt")
+  );
 
 -- Views-append branch: every column except `views` pinned; the views
 -- delta is exactly + the caller's uid (same jsonb construction as
@@ -495,10 +920,45 @@ create policy groups_insert on public.groups
     and (select auth.uid())::text = any (members)
   );
 
+-- 2026-11-25 audit M1 (sibling of posts_update_author): was
+-- `with check (true)` — a group creator could rewrite createdBy
+-- (transferring ownership) or the whole members list. createdBy/
+-- createdAt are now pinned for everyone on this branch; content
+-- fields stay free for admin/creator (updateGroup); members move
+-- freely for admins, and for the creator only by the exact deltas
+-- the app performs: +1 (respondGroupRequest approve) or −1, never
+-- the creator themselves (removeGroupMember). Ordinary join/leave
+-- rides groups_update_self_membership below.
 create policy groups_update_admin_creator on public.groups
   for update to authenticated
   using (public.is_admin() or "createdBy" = (select auth.uid())::text)
-  with check (true);
+  with check (
+    (public.is_admin() or "createdBy" = (select auth.uid())::text)
+    and "createdBy" is not distinct from
+      ((public."groups_row"(groups.id))."createdBy")
+    and "createdAt" is not distinct from
+      ((public."groups_row"(groups.id))."createdAt")
+    and (
+      public.is_admin()
+      or members is not distinct from
+        ((public."groups_row"(groups.id)).members)
+      or (
+        cardinality(members)
+          = cardinality(((public."groups_row"(groups.id)).members)) + 1
+        and members @> ((public."groups_row"(groups.id)).members)
+      )
+      or (
+        cardinality(members)
+          = cardinality(((public."groups_row"(groups.id)).members)) - 1
+        and ((public."groups_row"(groups.id)).members) @> members
+        and not exists (
+          select 1
+          from unnest(((public."groups_row"(groups.id)).members)) x
+          where x <> all (members)
+            and x = ((public."groups_row"(groups.id))."createdBy"))
+      )
+    )
+  );
 
 -- Self-membership branch: `members` is text[], so the ±self check is
 -- exact — cardinality ±1, superset one way, and the caller's
@@ -714,15 +1174,29 @@ create policy events_insert on public.events
     and "createdBy" = (select auth.uid())::text
   );
 
+-- 2026-11-25: createdBy/createdAt pinned (same M1 shape as the
+-- posts/stories/groups creator branches — ownership and timestamps
+-- never move; the app has no event-edit flow at all, create-only).
 create policy events_update_admin_creator on public.events
   for update to authenticated
   using (public.is_admin() or "createdBy" = (select auth.uid())::text)
-  with check (true);
+  with check (
+    (public.is_admin() or "createdBy" = (select auth.uid())::text)
+    and "createdBy" is not distinct from
+      ((public."events_row"(events.id))."createdBy")
+    and "createdAt" is not distinct from
+      ((public."events_row"(events.id))."createdAt")
+  );
 
 -- RSVP branch: content/audience fields pinned via self-lookup,
 -- exactly the set firestore.rules pins. (The pin self-lookups are
 -- filtered by events_select — same safe-direction narrowing as posts
 -- engagement, summary #5; clients RSVP on events they have loaded.)
+-- 2026-11-25 audit M4: going/interested were unpinned — anyone
+-- could add/remove OTHER people's uids. Each list now carries the
+-- ±-caller delta (toggleEventRsvp moves both lists in one write:
+-- the chosen list ± self, the other − self), and the caller may
+-- not end up on both lists in one write.
 create policy events_update_rsvp on public.events
   for update to authenticated
   using (true)
@@ -743,6 +1217,24 @@ create policy events_update_rsvp on public.events
       ((public."events_row"(events.id)).visibility)
     and "audienceIds" is not distinct from
       ((public."events_row"(events.id))."audienceIds")
+    and "createdAt" is not distinct from
+      ((public."events_row"(events.id))."createdAt")
+    and public.uid_list_delta_ok(
+          ((public."events_row"(events.id)).going), going,
+          (select auth.uid())::text)
+    and public.uid_list_delta_ok(
+          ((public."events_row"(events.id)).interested), interested,
+          (select auth.uid())::text)
+    and not (
+      going @> jsonb_build_array((select auth.uid())::text)
+      and interested @> jsonb_build_array((select auth.uid())::text)
+      and not (
+        ((public."events_row"(events.id)).going)
+          @> jsonb_build_array((select auth.uid())::text)
+        and ((public."events_row"(events.id)).interested)
+          @> jsonb_build_array((select auth.uid())::text)
+      )
+    )
   );
 
 create policy events_delete on public.events
@@ -753,10 +1245,11 @@ create policy events_delete on public.events
 -- conversations
 -- Guarantee: read by participants or admins; create with caller ∈
 -- participants, ≥ 2 participants, group chats only with
--- createdBy = caller; update freely by participants — or by a
--- NON-participant adding exactly themselves to participants only,
--- when the conversation carries a joinCode backed by a live invites
--- doc; delete admin-only.
+-- createdBy = caller; update by participants with identity columns
+-- pinned and membership/per-user columns delta-checked (2026-11-25
+-- M2) — or by a NON-participant adding exactly themselves to
+-- participants only, when the conversation carries a joinCode
+-- backed by a live invites doc; delete admin-only.
 -- =====================================================================
 create policy conversations_select on public.conversations
   for select to authenticated
@@ -774,16 +1267,110 @@ create policy conversations_insert on public.conversations
     and (not "isGroup" or "createdBy" = (select auth.uid())::text)
   );
 
--- Participant branch: Firestore checks membership on the OLD row
--- only and leaves the new row unconstrained (participants manage
--- themes/typing/flags — and may remove themselves or others). The
--- explicit `with check (true)` reproduces that; omitting WITH CHECK
--- would impose the membership test on the NEW row and, among other
--- things, make leaving a conversation impossible.
+-- Participant branch. Firestore checked membership on the OLD row
+-- only and left the new row unconstrained; the original port kept
+-- an explicit `with check (true)`. 2026-11-25 audit M2: that let
+-- ANY participant rewrite the member list — kick the group
+-- creator, add strangers to a private chat — and every other
+-- column besides. The branch now pins the identity columns and
+-- constrains each mutable column to the deltas src/api.js actually
+-- performs, while USING still tests the OLD row only. (One delta
+-- below — a member removing THEMSELVES — is permitted by this
+-- WITH CHECK but still rejected by Postgres itself: an UPDATE's
+-- new row must remain visible under conversations_select, and a
+-- departed member no longer is. That wall predates this pack —
+-- the old check(true) hit it identically — and lifting it needs a
+-- SECURITY DEFINER leave-conversation RPC, not a policy change;
+-- flagged in the 2026-11-25 fix-pack report, not silently worked
+-- around here.):
+--   participants: unchanged, or (group chats only) additions of
+--     any size (addGroupMembers), or removal of exactly one member
+--     who is the caller, or removed by the creator/admin
+--     (removeGroupChatMember), never dropping below 2;
+--   archivedBy/mutedBy/pinnedBy: ± the caller's own uid
+--     (setConversationFlag);
+--   acceptedBy: the caller may only ADD themselves
+--     (acceptConversationRequest / replying to a request);
+--   mutedUntil: only the caller's own key may move
+--     (setConversationMute);
+--   joinCode: may only be SET ('' -> code, createConversationInvite);
+--   typing: pinned (live typing is a broadcast heartbeat now, no
+--     DB write — setTyping);
+--   theme/emoji/nicknames/title/vanish: free for participants by
+--     design (chat themes, quick emoji, Messenger-style nicknames,
+--     group rename, vanish toggle).
 create policy conversations_update_participant on public.conversations
   for update to authenticated
   using ((select auth.uid())::text = any (participants))
-  with check (true);
+  with check (
+    "isGroup" is not distinct from
+      ((public."conversations_row"(conversations.id))."isGroup")
+    and "createdBy" is not distinct from
+      ((public."conversations_row"(conversations.id))."createdBy")
+    and "createdAt" is not distinct from
+      ((public."conversations_row"(conversations.id))."createdAt")
+    and typing is not distinct from
+      ((public."conversations_row"(conversations.id)).typing)
+    and (
+      participants is not distinct from
+        ((public."conversations_row"(conversations.id)).participants)
+      or (
+        ((public."conversations_row"(conversations.id))."isGroup")
+        and participants
+              @> ((public."conversations_row"(conversations.id)).participants)
+        and cardinality(participants)
+              > cardinality(((public."conversations_row"(conversations.id)).participants))
+      )
+      or (
+        ((public."conversations_row"(conversations.id))."isGroup")
+        and cardinality(participants)
+              = cardinality(((public."conversations_row"(conversations.id)).participants)) - 1
+        and ((public."conversations_row"(conversations.id)).participants)
+              @> participants
+        and cardinality(participants) >= 2
+        and exists (
+          select 1
+          from unnest(((public."conversations_row"(conversations.id)).participants)) x
+          where x <> all (participants)
+            and (
+              x = (select auth.uid())::text
+              or ((public."conversations_row"(conversations.id))."createdBy")
+                   = (select auth.uid())::text
+              or public.is_admin()
+            ))
+      )
+    )
+    and public.uid_list_delta_ok(
+          ((public."conversations_row"(conversations.id))."archivedBy"),
+          "archivedBy", (select auth.uid())::text)
+    and public.uid_list_delta_ok(
+          ((public."conversations_row"(conversations.id))."mutedBy"),
+          "mutedBy", (select auth.uid())::text)
+    and public.uid_list_delta_ok(
+          ((public."conversations_row"(conversations.id))."pinnedBy"),
+          "pinnedBy", (select auth.uid())::text)
+    and public.jsonb_list_without_uid(
+          ((public."conversations_row"(conversations.id))."acceptedBy"),
+          (select auth.uid())::text)
+          = public.jsonb_list_without_uid(
+              "acceptedBy", (select auth.uid())::text)
+    and public.jsonb_uid_count(
+          "acceptedBy", (select auth.uid())::text)
+          >= public.jsonb_uid_count(
+               ((public."conversations_row"(conversations.id))."acceptedBy"),
+               (select auth.uid())::text)
+    and ("mutedUntil" - (select auth.uid())::text)
+          = (((public."conversations_row"(conversations.id))."mutedUntil")
+             - (select auth.uid())::text)
+    and (
+      "joinCode" is not distinct from
+        ((public."conversations_row"(conversations.id))."joinCode")
+      or (
+        ((public."conversations_row"(conversations.id))."joinCode") = ''
+        and "joinCode" <> ''
+      )
+    )
+  );
 
 -- Self-join branch (invite links): caller ∉ old participants; new
 -- participants = old + exactly the caller; every other column pinned
@@ -893,9 +1480,11 @@ create policy invites_delete on public.invites
 -- Guarantee: read by the denormalised participants snapshot or
 -- admins; create as self with caller ∈ message participants AND ∈
 -- the conversation's live participants — or by an admin as a bot
--- with the bot in both sets; update by any participant with senderId
--- and participants pinned and text changeable only by the sender;
--- delete admin-only.
+-- with the bot in both sets; update by any participant with the
+-- identity columns pinned and every mutable column guarded to its
+-- own flow's delta (sender-only text/unsend, self-only readBy/
+-- hiddenFor/reactions/poll votes — 2026-11-25 M3); delete
+-- admin-only.
 -- =====================================================================
 create policy messages_select on public.messages
   for select to authenticated
@@ -929,19 +1518,152 @@ create policy messages_insert on public.messages
     )
   );
 
+-- 2026-11-25 audit M3: only senderId/participants/text were
+-- pinned — a chat partner could set unsent=true on YOUR messages
+-- (censorship), swap your shared file/image URLs, forge readBy,
+-- or rewrite a chat poll's votes. The check is now field-wise:
+-- identity columns are pinned outright (conversationId joins them
+-- — it was unpinned, so a message could be moved into another
+-- conversation), and every mutable column carries the exact guard
+-- for the src/api.js flow that writes it. Field-wise guards
+-- compose: each legitimate write (read receipts, reactions, pin,
+-- hide-for-me, poll vote, sender edit/unsend) touches a disjoint
+-- field set and passes its own guard while every other field
+-- stays pinned by its guard.
 create policy messages_update on public.messages
   for update to authenticated
   using ((select auth.uid())::text = any (participants))
   with check (
     "senderId" is not distinct from
       ((public."messages_row"(messages.id))."senderId")
+    and "conversationId" is not distinct from
+      ((public."messages_row"(messages.id))."conversationId")
     and participants is not distinct from
       ((public."messages_row"(messages.id)).participants)
+    and "createdAt" is not distinct from
+      ((public."messages_row"(messages.id))."createdAt")
+    and sticker is not distinct from
+      ((public."messages_row"(messages.id)).sticker)
+    and location is not distinct from
+      ((public."messages_row"(messages.id)).location)
+    and file is not distinct from
+      ((public."messages_row"(messages.id)).file)
+    and mentions is not distinct from
+      ((public."messages_row"(messages.id)).mentions)
+    and "replyToId" is not distinct from
+      ((public."messages_row"(messages.id))."replyToId")
+    and "replyToName" is not distinct from
+      ((public."messages_row"(messages.id))."replyToName")
+    and "replyToText" is not distinct from
+      ((public."messages_row"(messages.id))."replyToText")
+    and forwarded is not distinct from
+      ((public."messages_row"(messages.id)).forwarded)
+    and vanish is not distinct from
+      ((public."messages_row"(messages.id)).vanish)
+    and "expiresAt" is not distinct from
+      ((public."messages_row"(messages.id))."expiresAt")
+    -- text/editedAt: only the sender edits (editMessage)
     and (
       text is not distinct from
         ((public."messages_row"(messages.id)).text)
-      or (select auth.uid())::text = "senderId"
+      or (select auth.uid())::text
+           = ((public."messages_row"(messages.id))."senderId")
     )
+    and (
+      "editedAt" is not distinct from
+        ((public."messages_row"(messages.id))."editedAt")
+      or (select auth.uid())::text
+           = ((public."messages_row"(messages.id))."senderId")
+    )
+    -- unsent: only the sender, only false -> true (unsendMessage)
+    and (
+      unsent is not distinct from
+        ((public."messages_row"(messages.id)).unsent)
+      or (
+        (select auth.uid())::text
+          = ((public."messages_row"(messages.id))."senderId")
+        and unsent
+        and not ((public."messages_row"(messages.id)).unsent)
+      )
+    )
+    -- image/audio: only cleared, by the sender, as part of unsend
+    and (
+      image is not distinct from
+        ((public."messages_row"(messages.id)).image)
+      or (
+        (select auth.uid())::text
+          = ((public."messages_row"(messages.id))."senderId")
+        and unsent
+        and not ((public."messages_row"(messages.id)).unsent)
+        and image = ''
+      )
+    )
+    and (
+      audio is not distinct from
+        ((public."messages_row"(messages.id)).audio)
+      or (
+        (select auth.uid())::text
+          = ((public."messages_row"(messages.id))."senderId")
+        and unsent
+        and not ((public."messages_row"(messages.id)).unsent)
+        and audio = ''
+      )
+    )
+    -- status/readBy: read receipts only — status may become
+    -- 'read', readBy may only gain the caller's own uid
+    -- (markConversationRead)
+    and (
+      status is not distinct from
+        ((public."messages_row"(messages.id)).status)
+      or status = 'read'
+    )
+    and public.uid_list_add_ok(
+          ((public."messages_row"(messages.id))."readBy"), "readBy",
+          (select auth.uid())::text)
+    -- reactions: only the caller's own reactions move
+    -- (toggleMessageReaction); the sender's unsend may clear all
+    and (
+      public.msg_reactions_delta_ok(
+        ((public."messages_row"(messages.id)).reactions), reactions,
+        (select auth.uid())::text)
+      or (
+        (select auth.uid())::text
+          = ((public."messages_row"(messages.id))."senderId")
+        and unsent
+        and not ((public."messages_row"(messages.id)).unsent)
+        and reactions = '{}'::jsonb
+      )
+    )
+    -- pin trio: unchanged, or a pin stamped with the caller, or an
+    -- unpin reset (togglePinMessage — any participant may pin)
+    and (
+      (
+        pinned is not distinct from
+          ((public."messages_row"(messages.id)).pinned)
+        and "pinnedBy" is not distinct from
+          ((public."messages_row"(messages.id))."pinnedBy")
+        and "pinnedAt" is not distinct from
+          ((public."messages_row"(messages.id))."pinnedAt")
+      )
+      or (
+        pinned
+        and "pinnedBy" = (select auth.uid())::text
+      )
+      or (
+        not pinned
+        and "pinnedBy" = ''
+        and "pinnedAt" = 0
+      )
+    )
+    -- hiddenFor: only gains the caller's own uid (hideMessage)
+    and public.uid_list_add_ok(
+          ((public."messages_row"(messages.id))."hiddenFor"), "hiddenFor",
+          (select auth.uid())::text)
+    -- chat poll: votes move only at the caller's own uid
+    -- (voteChatPoll)
+    and public.chat_poll_delta_ok(
+          ((public."messages_row"(messages.id)).poll), poll,
+          (select auth.uid())::text)
   );
 
 create policy messages_delete on public.messages

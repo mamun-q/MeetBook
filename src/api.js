@@ -1764,9 +1764,25 @@ export async function toggleLike(postId) {
     // mutates the very object `post` points at, so reading post.likes
     // afterwards would double-count (Firestore's arrayUnion hid this —
     // a whole-array write cannot).
-    const nextLikes = has ? (post?.likes || []).filter((id) => id !== user.id) : [...(post?.likes || []), user.id];
+    const mirrorLikes = has ? (post?.likes || []).filter((id) => id !== user.id) : [...(post?.likes || []), user.id];
     patchRemotePost(postId, applyLike, { silent: true });
     try {
+      // M5 fresh-read (the toggleFollow pattern): the payload is
+      // recomputed from the STORED likes with only the caller's own
+      // toggle applied, so a like/unlike that landed concurrently
+      // (another session, another user) is never erased by this
+      // whole-array write — and the H2 engagement delta check sees
+      // exactly a ±caller delta against the stored row. The mirror
+      // value stays as the fallback if the read itself fails.
+      let nextLikes = mirrorLikes;
+      const fresh = await sbGet('posts', postId).catch(() => null);
+      if (fresh) {
+        const stored = fresh.likes || [];
+        nextLikes = has
+          ? stored.filter((id) => id !== user.id)
+          : (stored.includes(user.id) ? stored : [...stored, user.id]);
+        patchRemotePost(postId, (p) => { p.likes = nextLikes; }, { silent: true });
+      }
       await sbUpdate('posts', postId, { likes: nextLikes });
     } catch (err) { patchRemotePost(postId, undoLike, { silent: true }); throw err; }
     if (!has && post) { try { await createNotification({ userId: post.authorId, type: 'like', actorId: user.id, text: `${user.name} liked your post.`, postId, conversationId: '', read: false, createdAt: Date.now() }); } catch { /* the like itself already succeeded */ } }
@@ -1789,7 +1805,18 @@ export async function toggleReaction(postId, emoji) {
     if (reactions[user.id] === emoji) delete reactions[user.id]; else reactions[user.id] = emoji;
     patchRemotePost(postId, (p) => { p.reactions = reactions; }, { silent: true });
     try {
-      await sbUpdate('posts', postId, { reactions });
+      // M5 fresh-read (toggleFollow pattern): only the caller's own
+      // reaction key is applied to the STORED map, so reactions other
+      // users added concurrently survive the whole-map write — and
+      // the H2 uid_map delta check sees exactly that.
+      let payload = reactions;
+      const fresh = await sbGet('posts', postId).catch(() => null);
+      if (fresh) {
+        payload = { ...(fresh.reactions || {}) };
+        if (reactions[user.id] === undefined) delete payload[user.id]; else payload[user.id] = reactions[user.id];
+        patchRemotePost(postId, (p) => { p.reactions = payload; }, { silent: true });
+      }
+      await sbUpdate('posts', postId, { reactions: payload });
     } catch (err) { if (prevReactions) patchRemotePost(postId, (p) => { p.reactions = prevReactions; }, { silent: true }); throw err; }
     return;
   }
@@ -1809,9 +1836,19 @@ export async function toggleSave(postId) {
     const applySave = (p) => { p.savedBy = has ? (p.savedBy || []).filter((id) => id !== user.id) : [...(p.savedBy || []), user.id]; };
     const undoSave = (p) => { p.savedBy = has ? [...(p.savedBy || []), user.id] : (p.savedBy || []).filter((id) => id !== user.id); };
     // Payload captured before the optimistic patch — see toggleLike.
-    const nextSavedBy = has ? (post?.savedBy || []).filter((id) => id !== user.id) : [...(post?.savedBy || []), user.id];
+    const mirrorSavedBy = has ? (post?.savedBy || []).filter((id) => id !== user.id) : [...(post?.savedBy || []), user.id];
     patchRemotePost(postId, applySave, { silent: true });
     try {
+      // M5 fresh-read (toggleFollow pattern) — see toggleLike.
+      let nextSavedBy = mirrorSavedBy;
+      const fresh = await sbGet('posts', postId).catch(() => null);
+      if (fresh) {
+        const stored = fresh.savedBy || [];
+        nextSavedBy = has
+          ? stored.filter((id) => id !== user.id)
+          : (stored.includes(user.id) ? stored : [...stored, user.id]);
+        patchRemotePost(postId, (p) => { p.savedBy = nextSavedBy; }, { silent: true });
+      }
       await sbUpdate('posts', postId, { savedBy: nextSavedBy });
     } catch (err) { patchRemotePost(postId, undoSave, { silent: true }); throw err; }
     return;
@@ -1837,7 +1874,17 @@ export async function votePoll(postId, optionId) {
     const prevPoll = post.poll;
     patchRemotePost(postId, (p) => { p.poll = { options: prevPoll.options, votes }; }, { silent: true });
     try {
-      await sbUpdate('posts', postId, { poll: { options: post.poll.options, votes } });
+      // M5 fresh-read (toggleFollow pattern): the vote is applied to
+      // the STORED poll, so votes cast concurrently by other users
+      // survive — and the H2 post_poll delta check sees only the
+      // caller's own votes key move.
+      let nextPoll = { options: post.poll.options, votes };
+      const fresh = await sbGet('posts', postId).catch(() => null);
+      if (fresh?.poll) {
+        nextPoll = { options: fresh.poll.options, votes: castPollVote(fresh.poll, user.id, optionId) };
+        patchRemotePost(postId, (p) => { p.poll = nextPoll; }, { silent: true });
+      }
+      await sbUpdate('posts', postId, { poll: nextPoll });
     } catch (err) { patchRemotePost(postId, (p) => { p.poll = prevPoll; }, { silent: true }); throw err; }
     return;
   }
@@ -1887,7 +1934,7 @@ export async function sharePost(postId) {
     // the optimistic patch — the patch mutates the shared `original`
     // object, so reading original.shares again at write time would
     // double-count.
-    const nextShares = (original.shares || 0) + 1;
+    let nextShares = (original.shares || 0) + 1;
     const echo = { id: `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, ...shared };
     localEchoPosts = [echo, ...localEchoPosts];
     patchRemotePost(postId, (p) => { p.shares = nextShares; });
@@ -1897,6 +1944,17 @@ export async function sharePost(postId) {
       await sbInsert('posts', { id: shareId, ...shared });
       echo.id = shareId;
       if (remergePosts) remergePosts(); else emitData();
+      // M5 fresh-read (toggleFollow pattern): the count is recomputed
+      // from the STORED row after the share insert lands, immediately
+      // before the count update — the H2 check accepts exactly
+      // stored+1, so a count computed from a stale mirror (another
+      // share landed meanwhile) would be rejected AFTER the share
+      // post was already created, orphaning it.
+      const fresh = await sbGet('posts', postId).catch(() => null);
+      if (fresh) {
+        nextShares = (fresh.shares || 0) + 1;
+        patchRemotePost(postId, (p) => { p.shares = nextShares; });
+      }
       await sbUpdate('posts', postId, { shares: nextShares });
     } catch (err) {
       localEchoPosts = localEchoPosts.filter((p) => p !== echo);
@@ -1933,7 +1991,22 @@ export async function addComment(postId, text, parentCommentId = '') {
     } else comments = [...prevComments, comment];
     patchRemotePost(postId, (p) => { p.comments = comments; });
     try {
-      await sbUpdate('posts', postId, { comments });
+      // M5 fresh-read (toggleFollow pattern): the append is applied
+      // to the STORED comments, so a comment/reply another user added
+      // concurrently is never erased by this whole-array write — and
+      // the H2 comments delta check sees exactly one appended entry.
+      // If the parent comment was deleted concurrently, the comment
+      // lands top-level instead of vanishing with the stale array.
+      let payload = comments;
+      const fresh = await sbGet('posts', postId).catch(() => null);
+      if (fresh) {
+        const stored = fresh.comments || [];
+        if (parentCommentId && stored.some((c) => c.id === parentCommentId)) {
+          payload = stored.map((c) => (c.id === parentCommentId ? { ...c, replies: [...(c.replies || []), comment] } : c));
+        } else payload = [...stored, comment];
+        patchRemotePost(postId, (p) => { p.comments = payload; });
+      }
+      await sbUpdate('posts', postId, { comments: payload });
     } catch (err) { patchRemotePost(postId, (p) => { p.comments = prevComments; }); throw err; }
     // Notification parity with demo mode: a REPLY notifies the parent
     // comment's author (not the post author), a top-level comment
@@ -1972,11 +2045,22 @@ export async function deleteComment(postId, commentId) {
   if (live) {
     const post = data().posts.find((p) => p.id === postId);
     const prevComments = post?.comments || [];
-    const comments = prevComments.filter((c) => c.id !== commentId)
+    const without = (list) => list.filter((c) => c.id !== commentId)
       .map((c) => ({ ...c, replies: (c.replies || []).filter((r) => r.id !== commentId) }));
+    const comments = without(prevComments);
     patchRemotePost(postId, (p) => { p.comments = comments; });
     try {
-      await sbUpdate('posts', postId, { comments });
+      // M5 fresh-read (toggleFollow pattern): the removal is applied
+      // to the STORED comments, so comments added concurrently since
+      // the mirror's snapshot survive the delete — and the H2 delta
+      // check sees exactly one removed entry.
+      let payload = comments;
+      const fresh = await sbGet('posts', postId).catch(() => null);
+      if (fresh) {
+        payload = without(fresh.comments || []);
+        patchRemotePost(postId, (p) => { p.comments = payload; });
+      }
+      await sbUpdate('posts', postId, { comments: payload });
     } catch (err) { patchRemotePost(postId, (p) => { p.comments = prevComments; }); throw err; }
     return;
   }
@@ -2284,8 +2368,16 @@ export async function toggleGroupMembership(groupId) {
     return 'requested';
   }
   if (live) {
-    const nextMembers = isMember ? (group.members || []).filter((m) => m !== user.id) : [...(group.members || []), user.id];
-    await sbUpdate('groups', groupId, { members: nextMembers });
+    // M5 fresh-read (toggleFollow pattern): the toggle is applied to
+    // the STORED members, so a join/leave that landed concurrently is
+    // never erased by this whole-array write — and the groups rule's
+    // exact ±1 membership delta is computed against the stored list.
+    const fresh = await sbGet('groups', groupId).catch(() => null);
+    const storedMembers = fresh?.members || group.members || [];
+    const nextMembers = isMember
+      ? storedMembers.filter((m) => m !== user.id)
+      : (storedMembers.includes(user.id) ? storedMembers : [...storedMembers, user.id]);
+    if (nextMembers !== storedMembers) await sbUpdate('groups', groupId, { members: nextMembers });
     // Mirror the membership flip at once: the Join/Joined button and
     // the member count render from the mirror.
     patchMirror((r) => { const g = (r.groups || []).find((x) => x.id === groupId); if (g) g.members = nextMembers; });
@@ -2316,8 +2408,17 @@ export async function respondGroupRequest(requestId, approve) {
   if (request.status !== 'pending') return request.status;
   const status = approve ? 'approved' : 'rejected';
   if (live) {
-    const nextMembers = approve ? [...new Set([...(group.members || []), request.userId])] : null;
-    if (approve) await sbUpdate('groups', group.id, { members: nextMembers });
+    // M5 fresh-read (toggleFollow pattern): the approval adds the
+    // requester to the STORED members, so membership changes that
+    // landed concurrently survive — and the creator branch's exact
+    // +1 delta is computed against the stored list.
+    let nextMembers = null;
+    if (approve) {
+      const fresh = await sbGet('groups', group.id).catch(() => null);
+      const storedMembers = fresh?.members || group.members || [];
+      nextMembers = [...new Set([...storedMembers, request.userId])];
+      await sbUpdate('groups', group.id, { members: nextMembers });
+    }
     await sbUpdate('groupRequests', requestId, { status });
     // Mirror the decision at once: the creator's request queue and
     // the group's member list render from the mirror, so unpatched
@@ -2349,7 +2450,11 @@ export async function removeGroupMember(groupId, memberId) {
   if (group.createdBy !== user.id) throw new Error('Only the group creator can remove members.');
   if (memberId === group.createdBy) throw new Error('The group creator cannot be removed.');
   if (live) {
-    const nextMembers = (group.members || []).filter((m) => m !== memberId);
+    // M5 fresh-read (toggleFollow pattern): the removal is applied
+    // to the STORED members — see respondGroupRequest.
+    const fresh = await sbGet('groups', groupId).catch(() => null);
+    const storedMembers = fresh?.members || group.members || [];
+    const nextMembers = storedMembers.filter((m) => m !== memberId);
     await sbUpdate('groups', groupId, { members: nextMembers });
     // Mirror the removal at once: the member list renders from the
     // mirror, so unpatched the removed member stayed listed.
@@ -2543,7 +2648,22 @@ export async function toggleEventRsvp(eventId, kind) {
     const prev = { [kind]: event[kind], [other]: event[other] };
     patchMirror((r) => { const e = (r.events || []).find((x) => x.id === eventId); if (e) { e[kind] = next[kind]; e[other] = next[other]; } });
     try {
-      await sbUpdate('events', eventId, next);
+      // M5 fresh-read (toggleFollow pattern): the RSVP toggle is
+      // applied to the STORED lists, so RSVPs that landed
+      // concurrently survive — and the M4 ±caller delta check is
+      // computed against the stored row.
+      let payload = next;
+      const fresh = await sbGet('events', eventId).catch(() => null);
+      if (fresh) {
+        const storedKind = fresh[kind] || [];
+        const storedOther = fresh[other] || [];
+        payload = {
+          [kind]: active ? storedKind.filter((id) => id !== user.id) : (storedKind.includes(user.id) ? storedKind : [...storedKind, user.id]),
+          [other]: storedOther.filter((id) => id !== user.id)
+        };
+        patchMirror((r) => { const e = (r.events || []).find((x) => x.id === eventId); if (e) { e[kind] = payload[kind]; e[other] = payload[other]; } });
+      }
+      await sbUpdate('events', eventId, payload);
     } catch (err) {
       patchMirror((r) => { const e = (r.events || []).find((x) => x.id === eventId); if (e) { e[kind] = prev[kind]; e[other] = prev[other]; } });
       throw err;
@@ -2962,7 +3082,18 @@ export async function sendMessage(conversationId, { text, image, audio = '', rep
   // Replying to a message request accepts it (Messenger behaviour).
   const acceptIfRequest = async () => {
     if (conv && !conv.isGroup && !(conv.acceptedBy || []).includes(user.id)) {
-      try { await patchConversationFields(conversationId, { acceptedBy: [...(conv.acceptedBy || []), user.id] }, ['acceptedBy']); } catch { /* best effort */ }
+      try {
+        // M5 fresh-read (toggleFollow pattern, live only): the accept
+        // is added to the STORED acceptedBy, so an accept or flag
+        // write that landed concurrently is not erased.
+        let base = conv.acceptedBy || [];
+        if (live) {
+          const fresh = await sbGet('conversations', conversationId).catch(() => null);
+          if (fresh) base = fresh.acceptedBy || [];
+          if (base.includes(user.id)) return;
+        }
+        await patchConversationFields(conversationId, { acceptedBy: [...base, user.id] }, ['acceptedBy']);
+      } catch { /* best effort */ }
     }
   };
   if (live) {
@@ -3000,7 +3131,16 @@ export async function markConversationRead(conversationId) {
     const done = [];
     try {
       for (const m of mine) {
-        await sbUpdate('messages', m.id, { readBy: [...new Set([...(m.readBy || []), user.id])], status: 'read' });
+        // M5 fresh-read (toggleFollow pattern): readBy is extended
+        // from the STORED row, so a receipt another participant (or
+        // another of my sessions) recorded concurrently is not
+        // erased — and the M3 add-only readBy guard sees exactly a
+        // +caller delta. Already-read rows are skipped, not rewritten.
+        const fresh = await sbGet('messages', m.id).catch(() => null);
+        const storedReadBy = fresh?.readBy || m.readBy || [];
+        if (!storedReadBy.includes(user.id)) {
+          await sbUpdate('messages', m.id, { readBy: [...new Set([...storedReadBy, user.id])], status: 'read' });
+        }
         done.push(m.id);
       }
     } finally {
@@ -3066,7 +3206,25 @@ export async function toggleMessageReaction(messageId, emoji) {
   if (live) {
     patchRemoteMessage(messageId, (m) => { m.reactions = next; });
     try {
-      await sbUpdate('messages', messageId, { reactions: next });
+      // M5 fresh-read (toggleFollow pattern): only the caller's own
+      // membership in the toggled emoji's list is applied to the
+      // STORED map, so reactions other participants added
+      // concurrently survive — and the M3 reactions delta check sees
+      // exactly that.
+      let payload = next;
+      const fresh = await sbGet('messages', messageId).catch(() => null);
+      if (fresh) {
+        payload = {};
+        for (const [e, uids] of Object.entries(fresh.reactions || {})) {
+          if (Array.isArray(uids) && uids.length) payload[e] = [...uids];
+        }
+        const want = (next[emoji] || []).includes(user.id);
+        const list = (payload[emoji] || []).filter((u) => u !== user.id);
+        if (want) list.push(user.id);
+        if (list.length) payload[emoji] = list; else delete payload[emoji];
+        patchRemoteMessage(messageId, (m) => { m.reactions = payload; });
+      }
+      await sbUpdate('messages', messageId, { reactions: payload });
     } catch (err) {
       // Roll back even when there was no previous reactions object
       // (first-ever reaction): the original state is "no key at all".
@@ -3184,7 +3342,16 @@ export async function hideMessage(messageId) {
   const user = me(); if (!user) throw new Error('Sign in first.');
   const msg = data().messages.find((m) => m.id === messageId);
   if (!msg) throw new Error('Message not found.');
-  const hiddenFor = [...new Set([...(msg.hiddenFor || []), user.id])];
+  // M5 fresh-read (toggleFollow pattern, live only): hiddenFor gains
+  // the caller on top of the STORED list, so a hide recorded
+  // concurrently (another session) is not erased — the M3 guard for
+  // hiddenFor is add-only.
+  let base = msg.hiddenFor || [];
+  if (live) {
+    const fresh = await sbGet('messages', messageId).catch(() => null);
+    if (fresh) base = fresh.hiddenFor || [];
+  }
+  const hiddenFor = [...new Set([...base, user.id])];
   await patchMessageFields(messageId, { hiddenFor }, ['hiddenFor']);
 }
 
@@ -3211,14 +3378,23 @@ export async function setConversationFlag(conversationId, flag, on) {
     : (conv[flag] || []).filter((id) => id !== user.id);
   if (live) {
     const prev = conv[flag] || [];
-    patchRemoteConversation(conversationId, (c) => { c[flag] = next; });
+    // M5 fresh-read (toggleFollow pattern): the flag toggle is
+    // applied to the STORED list, so a flag another participant (or
+    // another of my sessions) set concurrently is not erased — and
+    // the M2 ±caller delta check is computed against the stored row.
+    const fresh = await sbGet('conversations', conversationId).catch(() => null);
+    const stored = fresh?.[flag] || prev;
+    const based = on
+      ? [...new Set([...stored, user.id])]
+      : stored.filter((id) => id !== user.id);
+    patchRemoteConversation(conversationId, (c) => { c[flag] = based; });
     try {
-      await sbUpdate('conversations', conversationId, { [flag]: next });
+      await sbUpdate('conversations', conversationId, { [flag]: based });
     } catch (err) {
       patchRemoteConversation(conversationId, (c) => { c[flag] = prev; });
       throw err;
     }
-    return next;
+    return based;
   }
   mutate((s) => { const c = s.conversations.find((x) => x.id === conversationId); if (c) c[flag] = next; });
   return next;
@@ -3273,6 +3449,25 @@ export async function voteChatPoll(messageId, optionId) {
   const msg = data().messages.find((m) => m.id === messageId);
   if (!msg?.poll || msg.unsent) throw new Error('Poll not found.');
   const next = chatPollVote(msg.poll, optionId, user.id);
+  if (live) {
+    // M5 fresh-read (toggleFollow pattern): the caller's resulting
+    // vote (the option the mirror toggle landed on, or none for a
+    // toggle-off) is applied to the STORED poll, so votes other
+    // participants cast concurrently survive — and the M3 chat-poll
+    // delta check sees only the caller's own votes move.
+    const fresh = await sbGet('messages', messageId).catch(() => null);
+    if (fresh?.poll) {
+      const mine = (next.options || []).find((o) => (o.votes || []).includes(user.id));
+      const options = (fresh.poll.options || []).map((o) => ({ ...o, votes: (o.votes || []).filter((v) => v !== user.id) }));
+      if (mine) {
+        const target = options.find((o) => o.id === mine.id);
+        if (target) target.votes = [...target.votes, user.id];
+      }
+      const based = { ...fresh.poll, options };
+      await patchMessageFields(messageId, { poll: based }, ['poll']);
+      return based;
+    }
+  }
   await patchMessageFields(messageId, { poll: next }, ['poll']);
   return next;
 }
@@ -3286,6 +3481,18 @@ export async function setNickname(conversationId, userId, nickname) {
   const next = { ...(conv.nicknames || {}) };
   const clean = String(nickname || '').trim().slice(0, 40);
   if (clean) next[userId] = clean; else delete next[userId];
+  if (live) {
+    // M5 fresh-read (toggleFollow pattern): the nickname is set on
+    // the STORED map, so nicknames other participants set
+    // concurrently are not erased by this whole-map write.
+    const fresh = await sbGet('conversations', conversationId).catch(() => null);
+    if (fresh) {
+      const based = { ...(fresh.nicknames || {}) };
+      if (clean) based[userId] = clean; else delete based[userId];
+      await patchConversationFields(conversationId, { nicknames: based }, ['nicknames']);
+      return based;
+    }
+  }
   await patchConversationFields(conversationId, { nicknames: next }, ['nicknames']);
   return next;
 }
@@ -3298,6 +3505,18 @@ export async function acceptConversationRequest(conversationId) {
   const conv = data().conversations.find((c) => c.id === conversationId);
   if (!conv?.participants?.includes(user.id)) throw new Error('Conversation not found.');
   if ((conv.acceptedBy || []).includes(user.id)) return conv.acceptedBy;
+  if (live) {
+    // M5 fresh-read (toggleFollow pattern): the accept is added to
+    // the STORED acceptedBy — see sendMessage's acceptIfRequest.
+    const fresh = await sbGet('conversations', conversationId).catch(() => null);
+    if (fresh) {
+      const stored = fresh.acceptedBy || [];
+      if (stored.includes(user.id)) return stored;
+      const based = [...stored, user.id];
+      await patchConversationFields(conversationId, { acceptedBy: based }, ['acceptedBy']);
+      return based;
+    }
+  }
   const next = [...(conv.acceptedBy || []), user.id];
   await patchConversationFields(conversationId, { acceptedBy: next }, ['acceptedBy']);
   return next;
@@ -3319,8 +3538,18 @@ export async function setConversationMute(conversationId, durationMs) {
   const user = me(); if (!user) throw new Error('Sign in first.');
   const conv = data().conversations.find((c) => c.id === conversationId);
   if (!conv?.participants?.includes(user.id)) throw new Error('Conversation not found.');
-  const mutedBy = new Set(conv.mutedBy || []);
-  const mutedUntil = { ...(conv.mutedUntil || {}) };
+  // M5 fresh-read (toggleFollow pattern, live only): only the
+  // caller's own entries move, applied to the STORED mutedBy /
+  // mutedUntil, so mutes other participants set concurrently are
+  // not erased — the M2 checks for these columns are caller-keyed.
+  let baseBy = conv.mutedBy || [];
+  let baseUntil = conv.mutedUntil || {};
+  if (live) {
+    const fresh = await sbGet('conversations', conversationId).catch(() => null);
+    if (fresh) { baseBy = fresh.mutedBy || []; baseUntil = fresh.mutedUntil || {}; }
+  }
+  const mutedBy = new Set(baseBy);
+  const mutedUntil = { ...baseUntil };
   if (durationMs === null) { mutedBy.delete(user.id); delete mutedUntil[user.id]; }
   else {
     mutedBy.add(user.id);
@@ -3437,6 +3666,20 @@ export async function addGroupMembers(conversationId, memberIds) {
   const user = me(); if (!user) throw new Error('Sign in first.');
   const conv = data().conversations.find((c) => c.id === conversationId);
   if (!conv?.isGroup || !conv.participants?.includes(user.id)) throw new Error('Conversation not found.');
+  if (live) {
+    // M5 fresh-read (toggleFollow pattern): the additions are merged
+    // into the STORED participants, so a member added/removed
+    // concurrently is not resurrected or erased by this write — and
+    // the M2 additions-only delta is computed against the stored row.
+    const fresh = await sbGet('conversations', conversationId).catch(() => null);
+    if (fresh) {
+      const stored = fresh.participants || [];
+      const merged = [...new Set([...stored, ...(memberIds || [])])];
+      if (merged.length === stored.length) return stored;
+      await patchConversationFields(conversationId, { participants: merged }, ['participants']);
+      return merged;
+    }
+  }
   const next = [...new Set([...conv.participants, ...(memberIds || [])])];
   if (next.length === conv.participants.length) return conv.participants;
   await patchConversationFields(conversationId, { participants: next }, ['participants']);
@@ -3450,6 +3693,19 @@ export async function removeGroupChatMember(conversationId, memberId) {
   const isSelf = memberId === user.id;
   const canRemove = isSelf || conv.createdBy === user.id || isAdminRole(user);
   if (!canRemove) throw new Error('Only the group creator can remove members.');
+  if (live) {
+    // M5 fresh-read (toggleFollow pattern): the removal is applied
+    // to the STORED participants, so members added concurrently are
+    // not erased — and the M2 single-removal delta (and the ≥2
+    // floor) are computed against the stored row.
+    const fresh = await sbGet('conversations', conversationId).catch(() => null);
+    if (fresh) {
+      const based = (fresh.participants || []).filter((id) => id !== memberId);
+      if (based.length < 2) throw new Error('A group needs at least two members.');
+      await patchConversationFields(conversationId, { participants: based }, ['participants']);
+      return based;
+    }
+  }
   const next = conv.participants.filter((id) => id !== memberId);
   if (next.length < 2) throw new Error('A group needs at least two members.');
   await patchConversationFields(conversationId, { participants: next }, ['participants']);
