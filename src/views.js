@@ -13,7 +13,7 @@ import { firebaseReady } from './firebase.js';
 
 // Transient per-session UI state that views need but which is not app
 // data (main.js flips these; a re-render reads them).
-export const uiState = { memoriesDismissed: false, convInfoFor: '', convFilter: 'all', msgMenuFor: '', convMenuFor: '', friendsTab: '' };
+export const uiState = { memoriesDismissed: false, convFilter: 'all', msgMenuFor: '', convMenuFor: '', friendsTab: '' };
 
 export function usersById(d) {
   return Object.fromEntries(d.users.map((u) => [u.id, u]));
@@ -319,7 +319,7 @@ export function rightRail(d, meUser) {
   return `<div class="card rail">
     ${pending.length ? `<h4>Friend requests</h4>${pending.map((f) => `<div class="row gap-sm rail-person">${avatarHtml(byId[f.from], 36)}<span class="grow">${escapeHtml(byId[f.from]?.name || '')}</span><button class="btn btn-primary btn-sm" data-act="accept-request" data-id="${escapeHtml(f.id)}">Accept</button><button class="btn btn-ghost btn-sm" data-act="reject-request" data-id="${escapeHtml(f.id)}" aria-label="Reject">${icon('x')}</button></div>`).join('')}` : ''}
     <h4>People you may know</h4>
-    ${suggestions.map((u) => { const mutual = mutualFriendCount(d.friendships, meUser.id, u.id); return `<div class="row gap-sm rail-person">${avatarHtml(u, 36)}<span class="grow"><a href="#/profile/${escapeHtml(u.id)}">${escapeHtml(u.name)}</a>${verifiedBadgeHtml(u)}${u.currentCity ? `<br/>${locationLineHtml(u)}` : mutual > 0 ? `<br/><span class="muted small">${mutual} ${mutual === 1 ? t('mutualFriend') : t('mutualFriends')}</span>` : ''}</span><button class="btn btn-ghost btn-sm" data-act="send-request" data-id="${escapeHtml(u.id)}">${t('addFriend')}</button></div>`; }).join('') || '<p class="muted small">No suggestions right now.</p>'}
+    ${suggestions.map((u) => { const mutual = mutualFriendCount(d.friendships, meUser.id, u.id); return `<div class="row gap-sm rail-person">${avatarHtml(u, 36)}<span class="grow"><a href="#/profile/${escapeHtml(u.id)}">${escapeHtml(u.name)}</a>${verifiedBadgeHtml(u)}${u.currentCity ? `<br/>${locationLineHtml(u, { id: meUser.id, friendIds })}` : mutual > 0 ? `<br/><span class="muted small">${mutual} ${mutual === 1 ? t('mutualFriend') : t('mutualFriends')}</span>` : ''}</span><button class="btn btn-ghost btn-sm" data-act="send-request" data-id="${escapeHtml(u.id)}">${t('addFriend')}</button></div>`; }).join('') || '<p class="muted small">No suggestions right now.</p>'}
     <h4>Online</h4>
     ${d.users.filter((u) => u.id !== meUser.id && isFreshOnline(u)).slice(0, 6).map((u) => `<a class="row gap-sm rail-person" href="#/profile/${escapeHtml(u.id)}"><span class="online-dot"></span>${escapeHtml(u.name)}${verifiedBadgeHtml(u)}</a>`).join('') || '<p class="muted small">Nobody online.</p>'}
     <p class="muted small">${friendIds.size} friends · MeetBook</p>
@@ -366,7 +366,7 @@ export function profileView(d, meUser, userId) {
       <div class="profile-meta">
         ${avatarHtml(user, 110)}
         <div class="grow">
-          <h2>${userNameHtml(user)}${user.nickname ? ` <span class="nickname">(${escapeHtml(user.nickname)})</span>` : ''}</h2>
+          <h2>${userNameHtml(user)}${user.nickname && canSeeProfileField(user, 'nickname', { id: meUser.id, friendIds: myFriends }) ? ` <span class="nickname">(${escapeHtml(user.nickname)})</span>` : ''}</h2>
           <p class="muted">@${escapeHtml(user.username)} · ${friendIds.size} friends · ${(user.followers || []).length} followers · <span class="${user.online ? 'online-text' : 'muted'}">${user.online ? '● ' + t('online') : t('offline')}</span></p>
           <p>${escapeHtml(user.bio || 'No bio yet.')}</p>
           ${isMe && !user.avatar ? `<button class="link-btn small" data-act="edit-profile">${icon('camera')} ${t('addProfilePhoto')}</button>` : ''}
@@ -384,7 +384,7 @@ export function profileView(d, meUser, userId) {
       </div>
     </div>
     ${(() => {
-      const intro = introCardHtml(user, isMe);
+      const intro = introCardHtml(user, isMe, { id: meUser.id, friendIds: myFriends });
       // Photos strip: this user's photo posts (already visibility-filtered
       // into `posts` above), newest first, up to 9 thumbnails. The strip
       // ALWAYS renders (Audit fix #7) — thumbnails when photo posts
@@ -417,23 +417,43 @@ export function profileView(d, meUser, userId) {
   </div>`;
 }
 
+// Per-field audience check for the Edit Profile privacy pickers
+// (FB-placement pack): the owner picks Public / Friends / Only me per
+// field; the choice persists as user.settings.fieldPrivacy[field] and is
+// enforced HERE at render time (the same render-level model as the
+// sister app). No entry = 'public', so existing profiles are unchanged.
+// `viewer` = { id, friendIds } where friendIds is the VIEWER'S OWN
+// accepted-friend id set (friendIdsOfData(d, viewerId)) — friendship is
+// symmetric, so 'friends' = the owner is in the viewer's friend set.
+export function canSeeProfileField(user, field, viewer = null) {
+  if (!user) return false;
+  const viewerId = viewer?.id || '';
+  if (viewerId && viewerId === user.id) return true; // owner sees all
+  const aud = user.settings?.fieldPrivacy?.[field] || 'public';
+  if (aud === 'onlyMe') return false;
+  if (aud === 'friends') return Boolean(viewerId && viewer?.friendIds && viewer.friendIds.has(user.id));
+  return true;
+}
+
 // Facebook-style Intro card: only the About fields the user actually
 // filled in, one icon row each. Website values are linked (https:// is
-// assumed when no scheme is present).
-export function introCardHtml(user, isMe = false) {
+// assumed when no scheme is present). `viewer` = { id, friendIds } of
+// the person looking (defaults to a stranger: public fields only).
+export function introCardHtml(user, isMe = false, viewer = null) {
+  const see = (field) => canSeeProfileField(user, field, viewer || (isMe ? { id: user.id } : null));
   const items = [];
-  if (user.work) items.push(`<div class="intro-row"><span class="intro-icon">${icon('briefcase')}</span><span>${t('worksAt')} <b>${escapeHtml(user.work)}</b></span></div>`);
-  if (user.education) items.push(`<div class="intro-row"><span class="intro-icon">${icon('grad-cap')}</span><span>${t('studiedAt')} <b>${escapeHtml(user.education)}</b></span></div>`);
-  if (user.currentCity) items.push(`<div class="intro-row"><span class="intro-icon">${icon('map-pin')}</span><span>${t('livesIn')} <b>${escapeHtml(user.currentCity)}</b></span></div>`);
-  if (user.hometown) items.push(`<div class="intro-row"><span class="intro-icon">${icon('home')}</span><span>${t('fromPlace')} <b>${escapeHtml(user.hometown)}</b></span></div>`);
-  if (user.relationship) items.push(`<div class="intro-row"><span class="intro-icon">${icon('heart')}</span><span>${escapeHtml(user.relationship)}</span></div>`);
-  if (user.dob) {
+  if (user.work && see('work')) items.push(`<div class="intro-row"><span class="intro-icon">${icon('briefcase')}</span><span>${t('worksAt')} <b>${escapeHtml(user.work)}</b></span></div>`);
+  if (user.education && see('education')) items.push(`<div class="intro-row"><span class="intro-icon">${icon('grad-cap')}</span><span>${t('studiedAt')} <b>${escapeHtml(user.education)}</b></span></div>`);
+  if (user.currentCity && see('currentCity')) items.push(`<div class="intro-row"><span class="intro-icon">${icon('map-pin')}</span><span>${t('livesIn')} <b>${escapeHtml(user.currentCity)}</b></span></div>`);
+  if (user.hometown && see('hometown')) items.push(`<div class="intro-row"><span class="intro-icon">${icon('home')}</span><span>${t('fromPlace')} <b>${escapeHtml(user.hometown)}</b></span></div>`);
+  if (user.relationship && see('relationship')) items.push(`<div class="intro-row"><span class="intro-icon">${icon('heart')}</span><span>${escapeHtml(user.relationship)}</span></div>`);
+  if (user.dob && see('dob')) {
     const dobDate = new Date(`${user.dob}T00:00:00`);
     const dobText = Number.isNaN(dobDate.getTime()) ? String(user.dob) : dobDate.toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' });
     items.push(`<div class="intro-row"><span class="intro-icon">${icon('cake')}</span><span>${t('birthday')}: <b>${escapeHtml(dobText)}</b></span></div>`);
   }
-  if (user.gender) items.push(`<div class="intro-row"><span class="intro-icon">${icon('user')}</span><span>${t('gender')}: <b>${escapeHtml(user.gender)}</b></span></div>`);
-  if (user.website) {
+  if (user.gender && see('gender')) items.push(`<div class="intro-row"><span class="intro-icon">${icon('user')}</span><span>${t('gender')}: <b>${escapeHtml(user.gender)}</b></span></div>`);
+  if (user.website && see('website')) {
     const href = /^https?:\/\//i.test(user.website) ? user.website : `https://${user.website}`;
     items.push(`<div class="intro-row"><span class="intro-icon">${icon('link')}</span><a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(user.website)}</a></div>`);
   }
@@ -447,9 +467,12 @@ export function introCardHtml(user, isMe = false) {
 // Green "Lives in <city>" line for person cards/rows (Friends Pack,
 // 2026-11-25): the text is the profile's EXISTING currentCity, labelled
 // exactly as the profile Intro labels it (t('livesIn')). No new data —
-// profiles without a city simply get no line.
-export function locationLineHtml(u) {
+// profiles without a city simply get no line. The city is a privacy-
+// pickable profile field, so the line honours fieldPrivacy too
+// (`viewer` = { id, friendIds }; no viewer = public fields only).
+export function locationLineHtml(u, viewer = null) {
   if (!u || !u.currentCity) return '';
+  if (!canSeeProfileField(u, 'currentCity', viewer)) return '';
   return `<span class="loc-line">${icon('map-pin', 'ic-sm')} ${t('livesIn')} ${escapeHtml(u.currentCity)}</span>`;
 }
 
@@ -470,7 +493,7 @@ export function friendsView(d, meUser) {
     // rendering a card for a missing user used to throw and take the
     // whole Friends page down with it.
     if (!u) return '';
-    const body = `${photo ? `<span class="person-ava">${avatarHtml(u, 72)}</span>` : avatarHtml(u, 56)}<a href="#/profile/${escapeHtml(u.id)}"><b>${escapeHtml(u.name)}</b></a>${verifiedBadgeHtml(u)}<span class="muted small">@${escapeHtml(u.username)}</span>${locationLineHtml(u)}${extra}<div class="row gap wrap center">${actions}</div>`;
+    const body = `${photo ? `<span class="person-ava">${avatarHtml(u, 72)}</span>` : avatarHtml(u, 56)}<a href="#/profile/${escapeHtml(u.id)}"><b>${escapeHtml(u.name)}</b></a>${verifiedBadgeHtml(u)}<span class="muted small">@${escapeHtml(u.username)}</span>${locationLineHtml(u, { id: meUser.id, friendIds })}${extra}<div class="row gap wrap center">${actions}</div>`;
     if (!photo) return `<div class="card person-card">${body}</div>`;
     // Discover variant (Friends Pack): photo header from the user's
     // EXISTING cover (lazy, 600w) or the brand gradient when they have
@@ -946,7 +969,7 @@ export function messagesView(d, meUser, activeConvId = '') {
     .sort((a, b) => Number(myFriendIds.has(b.id)) - Number(myFriendIds.has(a.id))).slice(0, 12);
   return `<div class="messenger card ${activeConvId ? 'has-open' : ''}">
     <div class="conv-list">
-      <div class="row gap-sm"><h3 class="grow">${icon('message-circle')} ${t('messages')}</h3><button class="btn btn-primary btn-sm" data-act="create-group-chat">${icon('users')} ${t('newGroupChat')}</button></div>
+      <div class="row gap-sm"><h3 class="grow">${icon('message-circle')} ${t('messages')}</h3><a class="icon-btn" href="#/settings/messaging" title="${t('messagingSettings')}" aria-label="${t('messagingSettings')}">${icon('settings')}</a><button class="btn btn-primary btn-sm" data-act="create-group-chat">${icon('users')} ${t('newGroupChat')}</button></div>
       <input id="conv-search" class="conv-search" type="search" placeholder="${t('searchConversations')}" autocomplete="off" aria-label="${t('searchConversations')}" />
       ${onlineUsers.length ? `<div class="active-rail" aria-label="${t('activeNow')}">${onlineUsers.map((u) => `<button class="active-person" data-act="message-user" data-id="${escapeHtml(u.id)}" title="${escapeHtml(u.name)}">${avatarHtml(u, 44)}<span class="active-dot"></span><span class="active-name">${escapeHtml(u.name.split(' ')[0])}</span></button>`).join('')}</div>` : ''}
       <div class="row gap-sm conv-filters">
@@ -975,44 +998,6 @@ export function messagesView(d, meUser, activeConvId = '') {
       <header class="thread-head"><a class="thread-back" href="#/messages" aria-label="Back to conversations">${icon('arrow-left')}</a>${avatarHtml(active.avatarUser, 40)}<div><b>${active.isGroup ? icon('users', 'ic-sm') + ' ' : ''}${escapeHtml(active.title)}${active.isGroup ? '' : verifiedBadgeHtml(active.other)}</b><br/><span class="muted small">${active.isGroup ? `${active.conv.participants.length} ${t('members')}` : `${active.other?.online ? t('online') : t('offline')}`}</span></div>
       <span class="spacer"></span><button type="button" class="btn btn-ghost btn-sm" data-act="conv-info" title="${t('conversationDetails')}" aria-label="${t('conversationDetails')}">${icon('info')}</button>${active.isGroup ? '' : `<button class="btn btn-ghost btn-sm" data-act="report-user" data-id="${active.other?.id}" title="${t('report')}" aria-label="${t('report')}">${icon('flag')}</button>`}</header>
       ${latestPinned ? `<button type="button" class="pinned-bar" data-act="jump-message" data-id="${escapeHtml(latestPinned.id)}"><span class="pinned-bar-label">${icon('pin')} ${t('pinnedMessage')}</span><span class="pinned-bar-text">${escapeHtml(messageSnippet(latestPinned, 90))}</span></button>` : ''}
-      <div id="conv-info" class="conv-info${uiState.convInfoFor === active.conv.id ? '' : ' hidden'}">
-        <div class="conv-info-section"><h4>${icon('palette')} ${t('chatTheme')}</h4>
-          <div class="theme-swatches">${CHAT_THEMES.map((th) => `<button type="button" class="theme-swatch ${theme.id === th.id ? 'active' : ''}" data-act="set-theme" data-conv="${escapeHtml(active.conv.id)}" data-theme="${escapeHtml(th.id)}" title="${t(`theme_${escapeHtml(th.id)}`)}" aria-label="${t(`theme_${escapeHtml(th.id)}`)}" style="${th.gradient ? `background:${th.gradient};` : ''}">${th.id === 'default' ? '∅' : ''}</button>`).join('')}</div>
-          <p class="muted small">${t(`theme_${escapeHtml(theme.id)}`)}</p>
-        </div>
-        <div class="conv-info-section"><h4>${icon('pin')} ${t('pinnedMessages')}</h4>
-          ${pinned.length ? pinned.map((m) => `<button type="button" class="pinned-item" data-act="jump-message" data-id="${escapeHtml(m.id)}"><b>${escapeHtml((byId[m.senderId]?.name || '').split(' ')[0])}</b><span class="grow">${escapeHtml(messageSnippet(m, 80))}</span><span class="muted small">${timeAgo(m.createdAt)}</span></button>`).join('') : `<p class="muted small">${t('noPinnedMessages')}</p>`}
-        </div>
-        <div class="conv-info-section"><h4>${icon('smile')} ${t('chatEmoji')}</h4>
-          <div class="emoji-swatches">${['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '🎉', '😍', '👏', '💯', '🌙'].map((e) => `<button type="button" class="emoji-swatch ${(active.conv.emoji || '👍') === e ? 'active' : ''}" data-act="set-conv-emoji" data-conv="${escapeHtml(active.conv.id)}" data-emoji="${e}" aria-label="${t('chatEmoji')} ${e}">${e}</button>`).join('')}</div>
-          <p class="muted small">${t('chatEmojiHint')}</p>
-        </div>
-        <div class="conv-info-section"><h4>${icon('eye-off')} ${t('vanishMode')}</h4>
-          <div class="row gap-sm"><span class="grow small">${active.conv.vanish ? t('vanishOnText') : t('vanishOffText')}</span><button class="btn btn-ghost btn-sm" data-act="vanish-toggle" data-conv="${escapeHtml(active.conv.id)}">${active.conv.vanish ? t('turnOff') : t('turnOn')}</button></div>
-          <p class="muted small">${t('vanishHint')}</p>
-        </div>
-        <div class="conv-info-section"><h4>${icon('tag')} ${t('nicknames')}</h4>
-          ${active.conv.participants.map((id) => `<div class="row gap-sm"><span class="grow row gap-sm">${avatarHtml(byId[id], 28)}<span>${escapeHtml(nicknameFor(active.conv, id, byId[id]?.name || ''))}${active.conv.nicknames?.[id] ? ` <span class="muted small">(${escapeHtml(byId[id]?.name || '')})</span>` : ''}</span></span><button class="btn btn-ghost btn-sm" data-act="set-nickname" data-conv="${escapeHtml(active.conv.id)}" data-id="${id}">${t('setNickname')}</button></div>`).join('')}
-          <p class="muted small">${t('nicknameHint')}</p>
-        </div>
-        <div class="conv-info-section"><h4>${icon('search')} ${t('searchInConversation')}</h4>
-          <input id="conv-msg-search" class="conv-search" type="search" placeholder="${t('searchInConversation')}" autocomplete="off" data-conv="${escapeHtml(active.conv.id)}" aria-label="${t('searchInConversation')}" />
-          <div id="conv-search-results"></div>
-        </div>
-        ${(() => { const media = active.msgs.filter((m) => m.image && !m.unsent); return media.length ? `<div class="conv-info-section"><h4>${icon('image')} ${t('sharedMedia')}</h4><div class="media-grid">${media.slice(-9).reverse().map((m) => `<button type="button" class="media-thumb" data-act="jump-message" data-id="${escapeHtml(m.id)}"><img src="${escapeHtml(safeMediaUrl(cldImg(m.image, 480)))}" alt="${t('sharedMedia')}" loading="lazy" decoding="async" /></button>`).join('')}</div></div>` : ''; })()}
-        ${active.isGroup ? (() => { const conv = active.conv; const canManage = conv.createdBy === meUser.id || isAdminRole(meUser); const addable = [...friendIdsOfData(d, meUser.id)].map((id) => byId[id]).filter((u) => u && !conv.participants.includes(u.id)); return `<div class="conv-info-section"><h4>${icon('users')} ${t('members')}</h4>
-          <form id="group-rename-form" data-conv="${escapeHtml(conv.id)}" class="row gap-sm pf-form">
-            <input name="title" class="grow" value="${escapeHtml(conv.title || '')}" maxlength="60" aria-label="${t('groupName')}" />
-            <button class="btn btn-ghost btn-sm" type="submit">${t('renameGroup')}</button>
-          </form>
-          <div class="stack gap-sm"><b class="small">${icon('link')} ${t('inviteLink')}</b>
-          ${conv.joinCode ? `<div class="row gap-sm"><input class="grow" readonly value="${escapeHtml(inviteLinkFor(conv.joinCode))}" aria-label="${t('inviteLink')}" /><button class="btn btn-ghost btn-sm" data-act="copy-invite" data-link="${escapeHtml(inviteLinkFor(conv.joinCode))}">${t('copyLink')}</button></div>` : (conv.createdBy === meUser.id ? `<button class="btn btn-ghost btn-sm" data-act="create-invite" data-conv="${escapeHtml(conv.id)}">${t('createInviteLink')}</button>` : '')}
-          <span class="muted small">${t('inviteHint')}</span></div>
-          ${conv.participants.map((id) => `<div class="row gap-sm"><span class="grow row gap-sm">${avatarHtml(byId[id], 28)}<span>${escapeHtml(byId[id]?.name || '')}${verifiedBadgeHtml(byId[id])}</span>${conv.createdBy === id ? `<span class="badge badge-ok">${t('groupCreator')}</span>` : ''}</span>${id !== meUser.id && canManage ? `<button class="btn btn-ghost btn-sm" data-act="group-remove-member" data-conv="${escapeHtml(conv.id)}" data-id="${id}">${t('removeMember')}</button>` : ''}</div>`).join('')}
-          ${addable.length ? `<details><summary>${t('addMembers')}</summary><form id="group-add-form" data-conv="${escapeHtml(conv.id)}" class="stack group-pick-list">${addable.map((u) => `<label class="row gap-sm"><input type="checkbox" name="member" value="${escapeHtml(u.id)}" /> ${avatarHtml(u, 26)}<span>${escapeHtml(u.name)}</span></label>`).join('')}<div class="row gap end"><button class="btn btn-primary btn-sm" type="submit">${t('addMembers')}</button></div></form></details>` : ''}
-          <button class="btn btn-danger btn-sm" data-act="group-leave" data-conv="${escapeHtml(conv.id)}">${icon('log-out')} ${t('leaveGroup')}</button>
-        </div>`; })() : ''}
-      </div>
       <div class="thread-body" id="thread-body" style="${theme.tint ? `background:${theme.tint};` : ''}${theme.bubble ? `--bubble-mine:${theme.bubble};` : ''}">
         ${active.msgs.map((m) => messageHtml(m, meUser, byId, active.isGroup, active.conv)).join('') || '<p class="muted center">No messages yet. Say hello 👋</p>'}
       </div>
@@ -1055,6 +1040,102 @@ export function messagesView(d, meUser, activeConvId = '') {
         </div>
       </div>` : `<div class="empty-state"><div class="empty-icon">${icon('message-circle', 'ic-xl')}</div><p class="muted">${t('selectConversation')}</p></div>`}
     </div>
+  </div>`;
+}
+
+// ------------------------------------------------------- CHAT INFO PAGE
+// FB-placement pack: the old in-thread info panel (≤46dvh) is now a
+// full-screen page at #/messages/<id>/info — conversation header, a row
+// of round quick-action buttons, then Actions / Customization /
+// Privacy & support groups (plus the group admin tools for groups).
+// Every control reuses the panel's existing data-act handlers and
+// state; the ⓘ button in the thread header navigates here and the back
+// link returns to the open thread (its scroll/draft state is carried
+// by the same capture/restore machinery as any thread re-render).
+export function chatInfoView(d, meUser, convId) {
+  const byId = usersById(d);
+  const conv = (d.conversations || []).find((c) => c.id === convId && c.participants.includes(meUser.id));
+  if (!conv) return `<div class="page narrow">${emptyState('message-circle', t('selectConversation'))}<p class="center"><a class="btn btn-ghost" href="#/messages">${icon('arrow-left')} ${t('messages')}</a></p></div>`;
+  const isGroup = Boolean(conv.isGroup);
+  const otherId = conv.participants.find((p) => p !== meUser.id);
+  const other = byId[otherId];
+  const title = isGroup ? (conv.title || t('groupChat')) : nicknameFor(conv, otherId, other?.name || 'Unknown');
+  const avatarUser = isGroup ? { name: title, username: title, avatar: conv.photo || '' } : other;
+  const msgs = d.messages.filter((m) => m.conversationId === conv.id && isMessageVisibleTo(m, meUser.id) && !isVanishExpired(m)).sort((a, b) => a.createdAt - b.createdAt);
+  const theme = chatTheme(conv.theme);
+  const pinned = pinnedMessages(msgs);
+  const media = msgs.filter((m) => m.image && !m.unsent);
+  const muted = isMutedNow(conv, meUser.id);
+  const isPinned = isConversationFlagged(conv, 'pinnedBy', meUser.id);
+  const isArchived = isConversationFlagged(conv, 'archivedBy', meUser.id);
+  const subtitle = isGroup ? `${conv.participants.length} ${t('members')}` : `@${other?.username || ''} · ${other?.online ? t('online') : t('offline')}`;
+  const qa = (inner, label) => `<span class="qa-item">${inner}<span class="qa-label">${escapeHtml(label)}</span></span>`;
+  return `<div class="page narrow chat-info-page">
+    <p><a class="page-back" href="#/messages/${escapeHtml(conv.id)}">${icon('arrow-left')} ${t('messages')}</a></p>
+    <div class="card chat-info-head">
+      ${avatarHtml(avatarUser, 80)}
+      <h2>${isGroup ? icon('users', 'ic-sm') + ' ' : ''}${escapeHtml(title)}${isGroup ? '' : verifiedBadgeHtml(other)}</h2>
+      <p class="muted small">${escapeHtml(subtitle)}</p>
+      <div class="qa-row">
+        ${isGroup ? '' : qa(`<a class="qa-btn" href="#/profile/${escapeHtml(otherId || '')}" aria-label="${t('viewProfile')}">${icon('user')}</a>`, t('profile'))}
+        ${qa(`<button type="button" class="qa-btn" data-act="conv-pin" data-id="${escapeHtml(conv.id)}" aria-label="${isPinned ? t('unpinChat') : t('pinChat')}">${icon('pin')}</button>`, isPinned ? t('unpinChat') : t('pinChat'))}
+        ${muted
+          ? qa(`<button type="button" class="qa-btn" data-act="conv-mute" data-id="${escapeHtml(conv.id)}" data-ms="" aria-label="${t('unmuteChat')}">${icon('bell')}</button>`, t('unmuteChat'))
+          : qa(`<button type="button" class="qa-btn" data-act="conv-mute" data-id="${escapeHtml(conv.id)}" data-ms="inf" aria-label="${t('muteForever')}">${icon('bell-off')}</button>`, t('muteForever'))}
+        ${qa(`<button type="button" class="qa-btn" data-act="conv-archive" data-id="${escapeHtml(conv.id)}" aria-label="${isArchived ? t('unarchiveChat') : t('archiveChat')}">${icon('archive')}</button>`, isArchived ? t('unarchiveChat') : t('archiveChat'))}
+      </div>
+    </div>
+    <h3 class="info-group-title">${t('chatInfoActions')}</h3>
+    <div class="card">
+      <div class="conv-info-section"><h4>${icon('pin')} ${t('pinnedMessages')}</h4>
+        ${pinned.length ? pinned.map((m) => `<button type="button" class="pinned-item" data-act="jump-message" data-id="${escapeHtml(m.id)}"><b>${escapeHtml((byId[m.senderId]?.name || '').split(' ')[0])}</b><span class="grow">${escapeHtml(messageSnippet(m, 80))}</span><span class="muted small">${timeAgo(m.createdAt)}</span></button>`).join('') : `<p class="muted small">${t('noPinnedMessages')}</p>`}
+      </div>
+      <div class="conv-info-section"><h4>${icon('search')} ${t('searchInConversation')}</h4>
+        <input id="conv-msg-search" class="conv-search" type="search" placeholder="${t('searchInConversation')}" autocomplete="off" data-conv="${escapeHtml(conv.id)}" aria-label="${t('searchInConversation')}" />
+        <div id="conv-search-results"></div>
+      </div>
+      ${media.length ? `<div class="conv-info-section"><h4>${icon('image')} ${t('sharedMedia')}</h4><div class="media-grid">${media.slice(-9).reverse().map((m) => `<button type="button" class="media-thumb" data-act="jump-message" data-id="${escapeHtml(m.id)}"><img src="${escapeHtml(safeMediaUrl(cldImg(m.image, 480)))}" alt="${t('sharedMedia')}" loading="lazy" decoding="async" /></button>`).join('')}</div></div>` : ''}
+    </div>
+    <h3 class="info-group-title">${t('chatInfoCustomization')}</h3>
+    <div class="card">
+      <div class="conv-info-section"><h4>${icon('palette')} ${t('chatTheme')}</h4>
+        <div class="theme-swatches">${CHAT_THEMES.map((th) => `<button type="button" class="theme-swatch ${theme.id === th.id ? 'active' : ''}" data-act="set-theme" data-conv="${escapeHtml(conv.id)}" data-theme="${escapeHtml(th.id)}" title="${t(`theme_${escapeHtml(th.id)}`)}" aria-label="${t(`theme_${escapeHtml(th.id)}`)}" style="${th.gradient ? `background:${th.gradient};` : ''}">${th.id === 'default' ? '∅' : ''}</button>`).join('')}</div>
+        <p class="muted small">${t(`theme_${escapeHtml(theme.id)}`)}</p>
+      </div>
+      <div class="conv-info-section"><h4>${icon('smile')} ${t('chatEmoji')}</h4>
+        <div class="emoji-swatches">${['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '🎉', '😍', '👏', '💯', '🌙'].map((e) => `<button type="button" class="emoji-swatch ${(conv.emoji || '👍') === e ? 'active' : ''}" data-act="set-conv-emoji" data-conv="${escapeHtml(conv.id)}" data-emoji="${e}" aria-label="${t('chatEmoji')} ${e}">${e}</button>`).join('')}</div>
+        <p class="muted small">${t('chatEmojiHint')}</p>
+      </div>
+      <div class="conv-info-section"><h4>${icon('tag')} ${t('nicknames')}</h4>
+        ${conv.participants.map((id) => `<div class="row gap-sm"><span class="grow row gap-sm">${avatarHtml(byId[id], 28)}<span>${escapeHtml(nicknameFor(conv, id, byId[id]?.name || ''))}${conv.nicknames?.[id] ? ` <span class="muted small">(${escapeHtml(byId[id]?.name || '')})</span>` : ''}</span></span><button class="btn btn-ghost btn-sm" data-act="set-nickname" data-conv="${escapeHtml(conv.id)}" data-id="${id}">${t('setNickname')}</button></div>`).join('')}
+        <p class="muted small">${t('nicknameHint')}</p>
+      </div>
+    </div>
+    <h3 class="info-group-title">${t('chatInfoPrivacy')}</h3>
+    <div class="card">
+      <div class="conv-info-section"><h4>${icon('eye-off')} ${t('vanishMode')}</h4>
+        <div class="row gap-sm"><span class="grow small">${conv.vanish ? t('vanishOnText') : t('vanishOffText')}</span><button class="btn btn-ghost btn-sm" data-act="vanish-toggle" data-conv="${escapeHtml(conv.id)}">${conv.vanish ? t('turnOff') : t('turnOn')}</button></div>
+        <p class="muted small">${t('vanishHint')}</p>
+      </div>
+      ${isGroup ? '' : `<div class="conv-info-section"><h4>${icon('flag')} ${t('report')}</h4>
+        <div class="row gap-sm"><span class="grow small">${escapeHtml(other?.name || '')}</span><button class="btn btn-ghost btn-sm" data-act="report-user" data-id="${escapeHtml(otherId || '')}">${icon('flag')} ${t('report')}</button></div>
+      </div>`}
+    </div>
+    ${isGroup ? (() => { const canManage = conv.createdBy === meUser.id || isAdminRole(meUser); const addable = [...friendIdsOfData(d, meUser.id)].map((id) => byId[id]).filter((u) => u && !conv.participants.includes(u.id)); return `<h3 class="info-group-title">${t('members')}</h3>
+    <div class="card">
+      <div class="conv-info-section">
+        <form id="group-rename-form" data-conv="${escapeHtml(conv.id)}" class="row gap-sm pf-form">
+          <input name="title" class="grow" value="${escapeHtml(conv.title || '')}" maxlength="60" aria-label="${t('groupName')}" />
+          <button class="btn btn-ghost btn-sm" type="submit">${t('renameGroup')}</button>
+        </form>
+        <div class="stack gap-sm"><b class="small">${icon('link')} ${t('inviteLink')}</b>
+        ${conv.joinCode ? `<div class="row gap-sm"><input class="grow" readonly value="${escapeHtml(inviteLinkFor(conv.joinCode))}" aria-label="${t('inviteLink')}" /><button class="btn btn-ghost btn-sm" data-act="copy-invite" data-link="${escapeHtml(inviteLinkFor(conv.joinCode))}">${t('copyLink')}</button></div>` : (conv.createdBy === meUser.id ? `<button class="btn btn-ghost btn-sm" data-act="create-invite" data-conv="${escapeHtml(conv.id)}">${t('createInviteLink')}</button>` : '')}
+        <span class="muted small">${t('inviteHint')}</span></div>
+        ${conv.participants.map((id) => `<div class="row gap-sm"><span class="grow row gap-sm">${avatarHtml(byId[id], 28)}<span>${escapeHtml(byId[id]?.name || '')}${verifiedBadgeHtml(byId[id])}</span>${conv.createdBy === id ? `<span class="badge badge-ok">${t('groupCreator')}</span>` : ''}</span>${id !== meUser.id && canManage ? `<button class="btn btn-ghost btn-sm" data-act="group-remove-member" data-conv="${escapeHtml(conv.id)}" data-id="${id}">${t('removeMember')}</button>` : ''}</div>`).join('')}
+        ${addable.length ? `<details><summary>${t('addMembers')}</summary><form id="group-add-form" data-conv="${escapeHtml(conv.id)}" class="stack group-pick-list">${addable.map((u) => `<label class="row gap-sm"><input type="checkbox" name="member" value="${escapeHtml(u.id)}" /> ${avatarHtml(u, 26)}<span>${escapeHtml(u.name)}</span></label>`).join('')}<div class="row gap end"><button class="btn btn-primary btn-sm" type="submit">${t('addMembers')}</button></div></form></details>` : ''}
+        <button class="btn btn-danger btn-sm" data-act="group-leave" data-conv="${escapeHtml(conv.id)}">${icon('log-out')} ${t('leaveGroup')}</button>
+      </div>
+    </div>`; })() : ''}
   </div>`;
 }
 
@@ -1302,6 +1383,11 @@ export function settingsView(d, meUser, prefs) {
       <div><a class="btn btn-ghost btn-sm" href="#/support">${t('supportOpenInbox')}</a></div>
     </div>
     <div class="card stack">
+      <h3>${icon('message-circle')} ${t('messagingSettings')}</h3>
+      <p class="muted">${t('messagingSettingsHelp')}</p>
+      <div><a class="btn btn-ghost btn-sm" href="#/settings/messaging">${t('messagingSettingsOpen')}</a></div>
+    </div>
+    <div class="card stack">
       <h3>${t('settingsAppearance')}</h3>
       <div class="row gap wrap">
         <button class="btn btn-ghost" data-act="toggle-theme">${prefs.theme === 'dark' ? icon('sun') + ' ' + t('lightMode') : icon('moon') + ' ' + t('darkMode')}</button>
@@ -1348,6 +1434,43 @@ export function settingsView(d, meUser, prefs) {
       <h3>${icon('alert-triangle')} ${t('dangerZone')}</h3>
       <p class="muted small">${t('dangerZoneHelp')}</p>
       <div><button class="btn btn-danger" data-act="delete-account">${t('deleteAccount')}</button></div>
+    </div>
+  </div>`;
+}
+
+// ------------------------------------------------- MESSAGING SETTINGS
+// FB-placement pack: a dedicated page (#/settings/messaging, also
+// linked by the gear in the chat-list header) gathering the EXISTING
+// messaging controls: the message-notification preference (the same
+// settings.notifPrefs.message the Notification preferences form edits),
+// entries into the chat list's requests / archived filter states, and
+// the blocked-users list (the same rows Settings → Privacy renders).
+// No active-status / read-receipt toggles: no such user settings exist
+// in the codebase, so none are invented here.
+export function messagingSettingsView(d, meUser) {
+  const np = meUser.settings?.notifPrefs || {};
+  const byId = usersById(d);
+  const myFriendIds = friendIdsOfData(d, meUser.id);
+  const myConvs = (d.conversations || []).filter((c) => c.participants.includes(meUser.id));
+  const requestsCount = myConvs.filter((c) => isMessageRequest(c, meUser.id, myFriendIds, byId) && !isConversationFlagged(c, 'archivedBy', meUser.id)).length;
+  const archivedCount = myConvs.filter((c) => isConversationFlagged(c, 'archivedBy', meUser.id)).length;
+  const myBlocks = (d.blocks || []).filter((b) => b.by === meUser.id);
+  return `<div class="page narrow">
+    <p><a class="page-back" href="#/settings">${icon('arrow-left')} ${t('settings')}</a></p>
+    <h2>${icon('message-circle')} ${t('messagingSettings')}</h2>
+    <div class="card stack">
+      <h3>${icon('bell')} ${t('messageNotifications')}</h3>
+      <label class="notif-pref-row"><span class="grow">${t('prefMessage')}</span><input type="checkbox" data-act="msg-notif-toggle" ${np.message === false ? '' : 'checked'} /></label>
+      <p class="muted small">${t('messagingSettingsHelp')}</p>
+    </div>
+    <div class="card stack">
+      <button type="button" class="msg-set-row" data-act="open-msg-requests">${icon('inbox')}<span class="grow">${t('messageRequests')}</span>${requestsCount ? `<span class="unread-badge">${requestsCount}</span>` : ''}${icon('chevron-right')}</button>
+      <button type="button" class="msg-set-row" data-act="open-msg-archive">${icon('archive')}<span class="grow">${t('archivedChats')}</span>${archivedCount ? `<span class="muted small">${archivedCount}</span>` : ''}${icon('chevron-right')}</button>
+    </div>
+    <div class="card stack">
+      <h3>${icon('shield')} ${t('blockedUsers')}</h3>
+      <p class="muted">${t('blockedHelp')}</p>
+      ${myBlocks.map((b) => `<div class="row gap-sm">${avatarHtml(byId[b.target], 32)}<span class="grow">${escapeHtml(byId[b.target]?.name || '')}</span><button class="btn btn-ghost btn-sm" data-act="block" data-id="${b.target}">${t('unblock')}</button></div>`).join('') || `<p class="muted small">${t('noBlocked')}</p>`}
     </div>
   </div>`;
 }
@@ -1637,7 +1760,15 @@ export function staticView(kind) {
 
 const RELATIONSHIP_OPTIONS = ['', 'Single', 'In a relationship', 'Engaged', 'Married', "It's complicated"];
 
-export function editProfileHtml(user) {
+// FB-placement pack: Edit Profile is a full page now (#/edit-profile);
+// opts.page swaps the modal's data-close Cancel for a link back to the
+// profile. Each pickable field (work, education, currentCity, hometown,
+// relationship, dob, gender, nickname, website) carries an audience
+// picker right under it; the save handler persists the choices as
+// settings.fieldPrivacy and canSeeProfileField enforces them at render.
+export function editProfileHtml(user, opts = {}) {
+  const fp = user.settings?.fieldPrivacy || {};
+  const aud = (field) => `<div class="field-aud"><span class="field-aud-label">${icon('eye', 'ic-sm')} ${t('fieldAudience')}</span><select name="privacy_${field}" class="aud-select" aria-label="${t('fieldAudience')}"><option value="public" ${(fp[field] || 'public') === 'public' ? 'selected' : ''}>${t('publicLabel')}</option><option value="friends" ${fp[field] === 'friends' ? 'selected' : ''}>${t('friends')}</option><option value="onlyMe" ${fp[field] === 'onlyMe' ? 'selected' : ''}>${t('onlyMe')}</option></select></div>`;
   return `<h3>${icon('pencil')} ${t('editProfile')}</h3>
   <form id="edit-profile-form" class="stack pf-form">
     <section class="pf-section">
@@ -1645,6 +1776,7 @@ export function editProfileHtml(user) {
       <label>Name<input name="name" required maxlength="60" value="${escapeHtml(user.name)}" /></label>
       <label>Username<input name="username" required maxlength="24" value="${escapeHtml(user.username)}" /></label>
       <label>${t('nickname')}<input name="nickname" maxlength="40" value="${escapeHtml(user.nickname || '')}" /></label>
+      ${aud('nickname')}
       <label>Bio<textarea name="bio" rows="3" maxlength="300">${escapeHtml(user.bio || '')}</textarea></label>
     </section>
     <section class="pf-section">
@@ -1655,15 +1787,19 @@ export function editProfileHtml(user) {
     <section class="pf-section">
       <div class="pf-head"><span class="pf-chip pf-chip--edu">${icon('grad-cap')}</span><h4>${t('education')}</h4></div>
       <label>${t('education')}<input name="education" maxlength="100" value="${escapeHtml(user.education || '')}" /></label>
+      ${aud('education')}
     </section>
     <section class="pf-section">
       <div class="pf-head"><span class="pf-chip pf-chip--work">${icon('briefcase')}</span><h4>${t('work')}</h4></div>
       <label>${t('work')}<input name="work" maxlength="100" value="${escapeHtml(user.work || '')}" /></label>
+      ${aud('work')}
     </section>
     <section class="pf-section">
       <div class="pf-head"><span class="pf-chip pf-chip--places">${icon('map-pin')}</span><h4>${t('places')}</h4></div>
       <label>${t('currentCity')}<input name="currentCity" maxlength="80" value="${escapeHtml(user.currentCity || '')}" /></label>
+      ${aud('currentCity')}
       <label>${t('hometown')}<input name="hometown" maxlength="80" value="${escapeHtml(user.hometown || '')}" /></label>
+      ${aud('hometown')}
     </section>
     <section class="pf-section">
       <div class="pf-head"><span class="pf-chip pf-chip--personal">${icon('heart')}</span><h4>${t('personal')}</h4></div>
@@ -1672,7 +1808,9 @@ export function editProfileHtml(user) {
           ${RELATIONSHIP_OPTIONS.map((opt) => `<option value="${escapeHtml(opt)}" ${String(user.relationship || '') === opt ? 'selected' : ''}>${opt === '' ? '—' : escapeHtml(opt)}</option>`).join('')}
         </select>
       </label>
+      ${aud('relationship')}
       <label>${t('dob')}<input name="dob" type="date" value="${escapeHtml(user.dob || '')}" /></label>
+      ${aud('dob')}
       <label>${t('gender')}
         <select name="gender">
           <option value="" ${!user.gender ? 'selected' : ''}>—</option>
@@ -1682,13 +1820,24 @@ export function editProfileHtml(user) {
           <option value="Prefer not to say" ${user.gender === 'Prefer not to say' ? 'selected' : ''}>${t('genderPreferNot')}</option>
         </select>
       </label>
+      ${aud('gender')}
     </section>
     <section class="pf-section">
       <div class="pf-head"><span class="pf-chip pf-chip--web">${icon('link')}</span><h4>${t('website')}</h4></div>
       <label>${t('website')}<input name="website" type="text" maxlength="200" placeholder="https://example.com" value="${escapeHtml(user.website || '')}" /></label>
+      ${aud('website')}
     </section>
-    <div class="row gap end"><button class="btn btn-ghost" type="button" data-close>Cancel</button><button class="btn btn-primary" type="submit">Save profile</button></div>
+    <div class="row gap end">${opts.page ? `<a class="btn btn-ghost" href="#/profile/${escapeHtml(user.id)}">Cancel</a>` : '<button class="btn btn-ghost" type="button" data-close>Cancel</button>'}<button class="btn btn-primary" type="submit">Save profile</button></div>
   </form>`;
+}
+
+// Full-page Edit Profile (#/edit-profile): the same form, on a page
+// with a back link to the profile — no longer a modal.
+export function editProfileView(d, meUser) {
+  return `<div class="page narrow">
+    <p><a class="page-back" href="#/profile/${escapeHtml(meUser.id)}">${icon('arrow-left')} ${t('profile')}</a></p>
+    <div class="card">${editProfileHtml(meUser, { page: true })}</div>
+  </div>`;
 }
 
 export { friendIdsOf, blockedIdsOf };

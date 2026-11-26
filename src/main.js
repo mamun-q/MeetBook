@@ -219,7 +219,7 @@ export function render() {
   // is the thread itself, instead of a page that scrolls under a
   // vh-sized thread box. Set on every render so route changes,
   // sign-out and the boot splash never leave it stale.
-  document.body.classList.toggle('chat-open', Boolean(user) && route === 'messages' && Boolean(seg[1]));
+  document.body.classList.toggle('chat-open', Boolean(user) && route === 'messages' && Boolean(seg[1]) && seg[2] !== 'info');
 
   // Boot gate (live mode only — demo auth is synchronous): splash while
   // the auth state restores, and while a restored session's profile is
@@ -274,14 +274,20 @@ export function render() {
     case 'group': body = V.groupView(d, user, seg[1] || '', { loading: api.groupsSyncPending() }); break;
     case 'pages': body = V.pagesView(d, user, query.get('q') || ''); break;
     case 'page': body = V.pageView(d, user, seg[1] || ''); break;
-    case 'messages': body = V.messagesView(d, user, seg[1] || ''); setTimeout(setupThread, 30); break;
+    case 'messages':
+      // #/messages/<id>/info is the full-page chat info (FB-placement
+      // pack); the plain thread route keeps the setupThread timer.
+      if (seg[2] === 'info') body = V.chatInfoView(d, user, seg[1] || '');
+      else { body = V.messagesView(d, user, seg[1] || ''); setTimeout(setupThread, 30); }
+      break;
     case 'notifications': body = V.notificationsView(d, user); break;
     case 'support': body = V.supportInboxView(d, user); break;
     case 'profile': body = V.profileView(d, user, seg[1] || user.id); break;
     case 'search': body = V.searchView(d, user, query.get('q') || ''); break;
     case 'saved': body = V.savedView(d, user); break;
     case 'memories': body = V.memoriesView(d, user); break;
-    case 'settings': body = V.settingsView(d, user, prefs); break;
+    case 'settings': body = seg[1] === 'messaging' ? V.messagingSettingsView(d, user) : V.settingsView(d, user, prefs); break;
+    case 'edit-profile': body = V.editProfileView(d, user); break;
     case 'admin': {
       // Admin code is a lazy chunk (see loadAdminViews): render it once
       // loaded; until then show the standard loading card and re-render
@@ -366,6 +372,11 @@ let threadResizeObserver = null;
 // button (focus moves to the button) used to risk losing it on the
 // next data event.
 const composerDrafts = new Map();
+// FB-placement pack: a jump-message tap on the chat INFO page (pinned
+// list / search results / shared media) has no message element on
+// screen — stash the target, navigate to the thread, and let
+// setupThread perform the scroll+flash once the thread has rendered.
+let pendingJump = null; // { id, convId }
 
 function measureThreadRows(el) {
   const box = el.getBoundingClientRect();
@@ -532,8 +543,24 @@ function scrollThread() {
   };
 }
 
+// Deferred jump from the chat info page (see pendingJump): only in
+// the conversation the jump belongs to; stays pending across
+// re-renders until the message element exists (live data can lag).
+function applyPendingJump() {
+  if (!pendingJump) return;
+  const openConv = document.getElementById('message-form')?.dataset.conv || '';
+  if (openConv && openConv !== pendingJump.convId) { pendingJump = null; return; }
+  const target = document.getElementById(`msg-${pendingJump.id}`);
+  if (!target) return;
+  pendingJump = null;
+  target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  target.classList.add('flash');
+  setTimeout(() => target.classList.remove('flash'), 1600);
+}
+
 function setupThread() {
   restoreThreadView();
+  applyPendingJump();
   const threadEl = document.getElementById('thread-body');
   if (threadEl) {
     threadEl.addEventListener('scroll', refreshThreadIntent, { passive: true });
@@ -1280,14 +1307,23 @@ document.addEventListener('click', async (e) => {
     case 'composer-more': { const tray = document.getElementById('composer-tray'); tray?.classList.toggle('hidden'); if (tray && !tray.classList.contains('hidden')) applyThreadScroll(); break; }
     // ---- Chat Pack: conversation info / themes / reply / reactions / pins
     case 'conv-info': {
-      // The open state lives in uiState (keyed by conversation) so a
-      // re-render — above all picking a chat theme, Audit fix #5 —
-      // restores the panel instead of rebuilding it closed.
+      // FB-placement pack: chat info is a full page now — the ⓘ button
+      // navigates to #/messages/<id>/info; its back link returns here
+      // and the thread state survives via capture/restoreThreadView.
       const convId = document.getElementById('message-form')?.dataset.conv || '';
-      V.uiState.convInfoFor = V.uiState.convInfoFor === convId ? '' : convId;
-      document.getElementById('conv-info')?.classList.toggle('hidden');
+      if (convId) location.hash = `#/messages/${convId}/info`;
       break;
     }
+    // ---- FB-placement pack: messaging settings page actions
+    case 'msg-notif-toggle': {
+      // Same settings.notifPrefs.message the Settings form edits —
+      // merged through updateSettings so other prefs survive.
+      const notifPrefs = { ...(user.settings?.notifPrefs || {}), message: actEl.checked === true };
+      await handle(api.updateSettings(user.id, { notifPrefs }), 'Preferences saved.');
+      break;
+    }
+    case 'open-msg-requests': V.uiState.convFilter = 'requests'; location.hash = '#/messages'; break;
+    case 'open-msg-archive': V.uiState.convFilter = 'archived'; location.hash = '#/messages'; break;
     case 'set-theme': await handle(api.setConversationTheme(actEl.dataset.conv, actEl.dataset.theme)); break;
     // ---- Messenger Complete Pack: filters, archive/mute, thread emoji
     case 'conv-filter': V.uiState.convFilter = actEl.dataset.filter || 'all'; V.uiState.convMenuFor = ''; render(); break;
@@ -1476,7 +1512,17 @@ document.addEventListener('click', async (e) => {
         target.classList.add('flash');
         setTimeout(() => target.classList.remove('flash'), 1600);
       } else {
-        toast(t('originalMessageUnavailable'), 'error');
+        // Not on screen: on the chat info page the message lives in
+        // the thread — stash a pending jump and navigate there
+        // (setupThread scrolls + flashes once it renders). A message
+        // that no longer exists keeps the old toast.
+        const msg = d.messages.find((m) => m.id === actEl.dataset.id);
+        if (msg) {
+          pendingJump = { id: msg.id, convId: msg.conversationId };
+          location.hash = `#/messages/${msg.conversationId}`;
+        } else {
+          toast(t('originalMessageUnavailable'), 'error');
+        }
       }
       break;
     }
@@ -1671,8 +1717,8 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'edit-profile': {
-      const modal = openModal(V.editProfileHtml(user));
-      modal.querySelector('[data-close]').onclick = closeModal;
+      // FB-placement pack: Edit Profile is a full page now.
+      location.hash = '#/edit-profile';
       break;
     }
     case 'change-password': await handle(api.resetPassword(user.email), firebaseReady ? t('resetEmailSent') : undefined); break;
@@ -2126,7 +2172,19 @@ document.addEventListener('submit', async (e) => {
     if (avatarFile) patch.avatar = await api.uploadImage(avatarFile, `avatars/${user.id}`).catch((err) => { toast(err.message, 'error'); return user.avatar; });
     if (coverFile) patch.cover = await api.uploadImage(coverFile, `covers/${user.id}`).catch((err) => { toast(err.message, 'error'); return user.cover; });
     const r = await handle(api.updateProfile(user.id, patch), 'Profile updated.');
-    if (r !== null) closeModal();
+    if (r !== null) {
+      // Per-field audience pickers ride along in the same form: persist
+      // them as settings.fieldPrivacy through the settings path (the
+      // pickers always render, so the full map is rewritten each save).
+      const fieldPrivacy = {};
+      for (const f of ['work', 'education', 'currentCity', 'hometown', 'relationship', 'dob', 'gender', 'nickname', 'website']) {
+        const v = String(fd.get(`privacy_${f}`) || 'public');
+        fieldPrivacy[f] = ['public', 'friends', 'onlyMe'].includes(v) ? v : 'public';
+      }
+      await handle(api.updateSettings(user.id, { fieldPrivacy }));
+      closeModal();
+      location.hash = `#/profile/${user.id}`;
+    }
     return;
   }
   if (form.id === 'notif-prefs-form') {

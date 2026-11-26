@@ -1174,3 +1174,19 @@ a, button, input, select, textarea, label { touch-action: manipulation; }
 .person-body { display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; width: 100%; box-sizing: border-box; padding: 0 var(--space-4) var(--space-4); }
 .person-body .person-ava { margin-top: -34px; }
 .person-ava .avatar { border: 3px solid var(--surface); }
+
+/* ===== FB-placement pack: full-page chat info / edit profile / messaging settings ===== */
+.page-back { display: inline-flex; align-items: center; gap: 6px; color: var(--brand); font-weight: 600; text-decoration: none; }
+.chat-info-head { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 4px; padding: var(--space-4); }
+.chat-info-head h2 { margin: 6px 0 0; }
+.qa-row { display: flex; gap: 18px; justify-content: center; flex-wrap: wrap; margin-top: 10px; }
+.qa-item { display: flex; flex-direction: column; align-items: center; gap: 5px; min-width: 56px; }
+.qa-btn { width: 48px; height: 48px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; text-decoration: none; -webkit-tap-highlight-color: transparent; }
+.qa-btn:active { transform: scale(.94); }
+.qa-label { font-size: .78rem; color: var(--muted); }
+.info-group-title { margin: 18px 2px 8px; font-size: 1.02rem; }
+.field-aud { display: flex; align-items: center; gap: 8px; margin: -4px 0 10px; }
+.field-aud-label { display: inline-flex; align-items: center; gap: 5px; font-size: .82rem; color: var(--muted); }
+.aud-select { margin-left: auto; max-width: 55%; }
+.msg-set-row { display: flex; align-items: center; gap: 10px; width: 100%; background: none; border: none; padding: 10px 2px; font: inherit; color: var(--text); cursor: pointer; text-align: left; -webkit-tap-highlight-color: transparent; }
+.msg-set-row .grow { text-align: left; }
