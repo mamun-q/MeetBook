@@ -104,24 +104,33 @@ describe('#3 components toast/clearToasts honour the creation stamp', () => {
 });
 
 // ------------------------------------------------------- #5 conv-info state
-describe('#5 messagesView renders the info panel open when uiState says so', () => {
+// FB-placement pack: the in-thread panel this fix originally kept open
+// across re-renders is now a full page (chatInfoView) — a re-render
+// re-renders the page itself, so the "panel snapped shut" bug class is
+// gone structurally. These tests pin the new shape.
+describe('#5 chat info lives on its own page (no in-thread panel)', () => {
   const d = baseData({
     conversations: [{ id: 'c1', participants: ['u_me', 'u_friend'], createdAt: NOW - 9000 }],
     messages: [{ id: 'm1', conversationId: 'c1', participants: ['u_me', 'u_friend'], senderId: 'u_friend', text: 'Hi', image: '', audio: '', createdAt: NOW - 1000, status: 'sent', readBy: ['u_friend'] }]
   });
-  afterEach(() => { V.uiState.convInfoFor = ''; });
-  it('closed by default', () => {
-    expect(V.messagesView(d, me, 'c1')).toContain('<div id="conv-info" class="conv-info hidden">');
-  });
-  it('stays open across a re-render (e.g. after picking a theme) when uiState.convInfoFor matches', () => {
-    V.uiState.convInfoFor = 'c1';
+  it('the thread renders no info panel, only the ⓘ entry button', () => {
     const html = V.messagesView(d, me, 'c1');
-    expect(html).toContain('<div id="conv-info" class="conv-info">');
-    expect(html).not.toContain('<div id="conv-info" class="conv-info hidden">');
+    expect(html).not.toContain('id="conv-info"');
+    expect(html).toContain('data-act="conv-info"');
   });
-  it('a different conversation still renders closed', () => {
-    V.uiState.convInfoFor = 'some-other-conv';
-    expect(V.messagesView(d, me, 'c1')).toContain('<div id="conv-info" class="conv-info hidden">');
+  it('the info page renders the conversation controls (theme, emoji, vanish, nicknames, search)', () => {
+    const html = V.chatInfoView(d, me, 'c1');
+    expect(html).toContain('data-act="set-theme"');
+    expect(html).toContain('data-act="set-conv-emoji"');
+    expect(html).toContain('data-act="vanish-toggle"');
+    expect(html).toContain('data-act="set-nickname"');
+    expect(html).toContain('id="conv-msg-search"');
+    expect(html).toContain('href="#/messages/c1"'); // back to the thread
+  });
+  it('a conversation the viewer is not part of renders the safe fallback', () => {
+    const html = V.chatInfoView(d, me, 'no-such-conv');
+    expect(html).not.toContain('data-act="set-theme"');
+    expect(html).toContain('href="#/messages"');
   });
 });
 

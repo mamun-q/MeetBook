@@ -134,7 +134,8 @@ describe('messagesView — fun pack rendering', () => {
     expect(html).toContain('chat-poll-option');
     expect(html).toContain('data-act="vote-poll"');
     expect(html).toContain('data-act="react-more"');
-    expect(html).toContain('data-act="set-nickname"');
-    expect(html).toContain('Captain');
+    expect(html).toContain('Captain'); // thread title uses the nickname
+    // The nickname editor itself lives on the chat info page now.
+    expect(V.chatInfoView(api.data(), meUser, 'conv_1')).toContain('data-act="set-nickname"');
   });
 });

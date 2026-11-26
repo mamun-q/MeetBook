@@ -208,25 +208,31 @@ describe('messagesView — reply quote, reactions, pins, themes', () => {
     expect(html).toContain('😂 1');
     for (const e of MESSAGE_REACTIONS) expect(html).toContain(`data-emoji="${e}"`);
   });
-  it('shows the latest pinned message in the pinned bar and all pins in the info panel', () => {
-    const html = V.messagesView(viewData({ messages: baseMessages }), me, 'c1');
+  it('shows the latest pinned message in the pinned bar and all pins on the chat info page', () => {
+    // FB-placement pack: the in-thread panel is gone — the pinned bar
+    // stays in the thread, the full pin list lives on chatInfoView.
+    const d = viewData({ messages: baseMessages });
+    const html = V.messagesView(d, me, 'c1');
     expect(html).toContain('pinned-bar');
-    const bar = html.slice(html.indexOf('pinned-bar'), html.indexOf('id="conv-info"'));
+    const bar = html.slice(html.indexOf('pinned-bar'), html.indexOf('thread-body'));
     expect(bar).toContain('Newer pin');
     expect(bar).toContain('data-id="m5"');
-    const panel = html.slice(html.indexOf('id="conv-info"'), html.indexOf('thread-body'));
-    expect(panel).toContain('Older pin');
-    expect(panel).toContain('Newer pin');
-    expect(html).toContain('id="conv-info"');
     expect(html).toContain('data-act="conv-info"');
+    expect(html).not.toContain('id="conv-info"');
+    const info = V.chatInfoView(d, me, 'c1');
+    expect(info).toContain('Older pin');
+    expect(info).toContain('Newer pin');
   });
   it('applies the conversation theme: bubble variable, tint and active swatch', () => {
-    const html = V.messagesView(viewData({ convExtra: { theme: 'ocean' }, messages: baseMessages }), me, 'c1');
+    const d = viewData({ convExtra: { theme: 'ocean' }, messages: baseMessages });
+    const html = V.messagesView(d, me, 'c1');
     expect(html).toContain('--bubble-mine:linear-gradient(135deg,#0ea5e9,#2563eb)');
     expect(html).toContain('background:rgba(14,165,233,.07)');
-    expect(html).toContain('theme-swatch active');
-    expect((html.match(/theme-swatch/g) || []).length).toBe(CHAT_THEMES.length + 1); // +1: the CSS class in "theme-swatches"
-    expect(html).toContain('data-act="set-theme"');
+    // The theme swatches moved to the chat info page with the panel.
+    const info = V.chatInfoView(d, me, 'c1');
+    expect(info).toContain('theme-swatch active');
+    expect((info.match(/theme-swatch/g) || []).length).toBe(CHAT_THEMES.length + 1); // +1: the CSS class in "theme-swatches"
+    expect(info).toContain('data-act="set-theme"');
   });
   it('renders cleanly with no chat-pack fields at all (legacy data)', () => {
     const html = V.messagesView(viewData({ messages: [{ id: 'mx', senderId: 'u_friend', text: 'Plain', createdAt: NOW - 100 }] }), me, 'c1');

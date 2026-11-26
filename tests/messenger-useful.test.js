@@ -137,7 +137,8 @@ describe('messagesView — useful pack rendering', () => {
     await api.setConversationVanish('conv_1', true);
     html = V.messagesView(api.data(), meUser, 'conv_1');
     expect(html).toContain('vanish-banner');
-    expect(html).toContain('data-act="vanish-toggle"');
+    // The vanish toggle itself lives on the chat info page now.
+    expect(V.chatInfoView(api.data(), meUser, 'conv_1')).toContain('data-act="vanish-toggle"');
     await api.setConversationVanish('conv_1', false);
   });
   it('pinned chats sort first and show the pin marker + menu', async () => {
@@ -156,10 +157,12 @@ describe('messagesView — useful pack rendering', () => {
     const tanvir = api.data().users.find((u) => u.id === 'u_tanvir');
     await api.sendMessage(group.id, { text: `ping @${tanvir.username}` });
     const html = V.messagesView(api.data(), meUser, group.id);
-    expect(html).toContain(`join=${code}`);
-    expect(html).toContain('data-act="copy-invite"');
     expect(html).toContain('msg-mention');
     expect(html).toContain('id="mention-menu"');
+    // The invite link + group admin tools live on the chat info page now.
+    const info = V.chatInfoView(api.data(), meUser, group.id);
+    expect(info).toContain(`join=${code}`);
+    expect(info).toContain('data-act="copy-invite"');
   });
   it('the request banner uses its own action name (never the friend-request one)', async () => {
     // Regression guard: data-act="accept-request" belongs to FRIEND

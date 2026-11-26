@@ -168,7 +168,8 @@ describe('messagesView — complete pack rendering', () => {
     expect(html).toContain('msg-big-emoji');
     expect(html).toContain('data-act="send-thread-emoji"');
     expect(html).toContain('data-act="conv-filter"');
-    expect(html).toContain('id="conv-msg-search"');
+    // In-conversation search lives on the chat info page now.
+    expect(V.chatInfoView(api.data(), meUser, 'conv_1')).toContain('id="conv-msg-search"');
   });
   it('archived chats leave the All list and appear under Archived', async () => {
     const meUser = api.data().users.find((u) => u.id === 'u_ayesha');
