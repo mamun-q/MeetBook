@@ -97,6 +97,10 @@ input:not([type="checkbox"]):not([type="radio"]):focus, select:focus, textarea:f
 /* Checkboxes/radios must never take the full-width text-input sizing —
    width:100% on them is what staggered the settings preference rows. */
 input[type="checkbox"], input[type="radio"] { width: auto; accent-color: var(--brand); }
+/* File inputs: style the OS picker button as an app pill — the raw
+   "Choose File" control clashed with every form it appeared in
+   (edit profile, group/page forms; visual sweep 2026-11-27). */
+input[type="file"]::file-selector-button { font: inherit; font-size: .85rem; font-weight: 600; color: #fff; background: var(--grad); border: none; border-radius: 999px; padding: .35rem .8rem; margin-right: .6rem; cursor: pointer; }
 textarea { resize: vertical; }
 label { display: block; font-size: .9rem; font-weight: 600; }
 label input, label select, label textarea { margin-top: .3rem; font-weight: 400; }
@@ -925,7 +929,11 @@ a, button, input, select, textarea, label { touch-action: manipulation; }
 .msg-menu { position: static; margin-top: 6px; box-shadow: var(--shadow-md); min-width: 190px; }
 .msg-row.mine .msg-menu { align-self: flex-end; }
 .conv-item-wrap { display: flex; flex-wrap: wrap; align-items: center; }
-.conv-item-wrap > .conv-item { flex: 1; }
+/* min-width: 0 lets the row actually shrink: without it the button's
+   min-content width (avatar + full preview text) forced the ••• menu
+   button onto its own line under every conversation (visual sweep
+   2026-11-27). The title/preview ellipsis rules above do the rest. */
+.conv-item-wrap > .conv-item { flex: 1; min-width: 0; }
 .conv-menu-btn { flex: none; }
 .conv-menu { position: static; flex-basis: 100%; margin: 2px 0 6px auto; width: fit-content; min-width: 200px; box-shadow: var(--shadow-md); }
 /* Filter chips wrap inside the 300px list pane (two per row) instead
@@ -1031,6 +1039,25 @@ a, button, input, select, textarea, label { touch-action: manipulation; }
      The role select in Admin → Users also beat the 16px iOS
      auto-zoom guard with its own smaller font-size. */
   .message-form .btn-sm, .thread-emoji-btn { min-height: 42px; min-width: 42px; }
+  /* Chat composer squeeze (visual sweep 2026-11-27): the six fixed
+     controls + gaps + padding left the text input only ~74px wide at
+     390px, clipping the placeholder to "Type a". Compact the icon
+     buttons inside the composer only (tap targets stay ≥38px), tighten
+     the form's own spacing, and drop the quick-emoji shortcut while
+     the user is actually typing — Send stays, the emoji returns at
+     rest. The selector names input[name="text"]: the hidden file
+     inputs also match :not(:placeholder-shown). */
+  .message-form { gap: 3px; padding: 10px 6px; }
+  .message-form .btn-sm, .thread-emoji-btn { min-width: 38px; padding-left: .4rem; padding-right: .4rem; }
+  .message-form .msg-send-btn { min-width: 42px; padding-left: .45rem; padding-right: .45rem; }
+  .message-form input[name="text"] { padding-left: .55rem; padding-right: .55rem; }
+  .message-form:has(input[name="text"]:not(:placeholder-shown)) .thread-emoji-btn { display: none; }
+  /* Profile/page/group heads (visual sweep 2026-11-27): on phones the
+     action row shared the meta row, squeezing the name/about column
+     beside the 110px avatar (a page's about collapsed to ~107px and
+     wrapped word-by-word). Give the actions their own full-width row
+     under the text — the wrap the wider heads already fell back to. */
+  .profile-meta > .row { flex-basis: 100%; }
   .admin-role-select { font-size: 16px !important; }
 }
 
